@@ -492,7 +492,7 @@ go test ./internal/securefs ./internal/transfer
 $env:CGO_ENABLED = "0"
 $env:GOOS = "linux"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags="-s -w -buildid=" -o "$env:TEMP\cpgen-transfer" ./cmd/cpgen-transfer
+go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" -o "$env:TEMP\cpgen-transfer" ./cmd/cpgen-transfer
 Remove-Item Env:CGO_ENABLED,Env:GOOS,Env:GOARCH
 ~~~
 

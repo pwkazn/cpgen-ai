@@ -1,9 +1,12 @@
 package port
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	"cpgen/internal/domain"
@@ -96,7 +99,64 @@ func (m SourceBundleManifest) Validate() error {
 	if !foundEntry {
 		return fmt.Errorf("entry point is not present in source files")
 	}
+	computed, err := ComputeSourceBundleDigest(m)
+	if err != nil {
+		return err
+	}
+	if computed != m.Digest {
+		return fmt.Errorf("source bundle digest mismatch: got %q, computed %q", m.Digest, computed)
+	}
 	return nil
+}
+
+func ComputeSourceBundleDigest(m SourceBundleManifest) (domain.Digest, error) {
+	if err := m.SchemaVersion.Validate(); err != nil {
+		return "", err
+	}
+	if err := m.EntryPoint.Validate(); err != nil {
+		return "", fmt.Errorf("entry point: %w", err)
+	}
+	if len(m.Files) == 0 {
+		return "", fmt.Errorf("source bundle must contain at least one file")
+	}
+	files := slices.Clone(m.Files)
+	sort.Slice(files, func(left, right int) bool { return files[left].Path < files[right].Path })
+	seen := make(map[domain.SafeRelPath]struct{}, len(files))
+	foundEntry := false
+	for index, file := range files {
+		if err := file.Path.Validate(); err != nil {
+			return "", fmt.Errorf("source file %d: %w", index, err)
+		}
+		if err := file.Blob.Validate(); err != nil {
+			return "", fmt.Errorf("source file %d: %w", index, err)
+		}
+		if _, exists := seen[file.Path]; exists {
+			return "", fmt.Errorf("duplicate source path %q", file.Path)
+		}
+		seen[file.Path] = struct{}{}
+		foundEntry = foundEntry || file.Path == m.EntryPoint
+	}
+	if !foundEntry {
+		return "", fmt.Errorf("entry point is not present in source files")
+	}
+
+	var encoded bytes.Buffer
+	writeString := func(value string) {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+		encoded.Write(size[:])
+		encoded.WriteString(value)
+	}
+	writeString(string(m.SchemaVersion))
+	writeString(string(m.EntryPoint))
+	var count [4]byte
+	binary.BigEndian.PutUint32(count[:], uint32(len(files)))
+	encoded.Write(count[:])
+	for _, file := range files {
+		writeString(string(file.Path))
+		writeString(string(file.Blob.Digest))
+	}
+	return domain.SumBytes(encoded.Bytes()), nil
 }
 
 type CompileLimits struct {
@@ -238,6 +298,7 @@ type CompileResult struct {
 	Program   *domain.PendingArtifact `json:"program,omitempty"`
 	Stdout    *domain.PendingArtifact `json:"stdout,omitempty"`
 	Stderr    *domain.PendingArtifact `json:"stderr,omitempty"`
+	Execution *domain.PendingArtifact `json:"execution,omitempty"`
 	Details   map[string]string       `json:"details,omitempty"`
 }
 
@@ -254,25 +315,38 @@ func (r CompileResult) Validate() error {
 	if r.Outcome != domain.CompileOK && r.Program != nil {
 		return fmt.Errorf("failed compile cannot return a program artifact")
 	}
-	for name, artifact := range map[string]*domain.PendingArtifact{"program": r.Program, "stdout": r.Stdout, "stderr": r.Stderr} {
+	for name, artifact := range map[string]*domain.PendingArtifact{"program": r.Program, "stdout": r.Stdout, "stderr": r.Stderr, "execution": r.Execution} {
 		if artifact != nil {
 			if err := artifact.Validate(); err != nil {
 				return fmt.Errorf("%s artifact: %w", name, err)
 			}
 		}
 	}
+	for name, check := range map[string]struct {
+		artifact *domain.PendingArtifact
+		role     domain.ArtifactRole
+	}{
+		"program": {r.Program, domain.ArtifactProgram}, "stdout": {r.Stdout, domain.ArtifactStdout},
+		"stderr": {r.Stderr, domain.ArtifactStderr}, "execution": {r.Execution, domain.ArtifactEvidence},
+	} {
+		if check.artifact != nil && check.artifact.Role != check.role {
+			return fmt.Errorf("%s artifact has role %q, want %q", name, check.artifact.Role, check.role)
+		}
+	}
 	return nil
 }
 
 type RunResult struct {
-	CallTrace domain.CallTrace        `json:"call_trace"`
-	Outcome   domain.ProcessOutcome   `json:"outcome"`
-	ExitCode  *int                    `json:"exit_code,omitempty"`
-	Signal    *string                 `json:"signal,omitempty"`
-	Metrics   ProcessMetrics          `json:"metrics"`
-	Stdout    *domain.PendingArtifact `json:"stdout,omitempty"`
-	Stderr    *domain.PendingArtifact `json:"stderr,omitempty"`
-	Details   map[string]string       `json:"details,omitempty"`
+	CallTrace domain.CallTrace         `json:"call_trace"`
+	Outcome   domain.ProcessOutcome    `json:"outcome"`
+	ExitCode  *int                     `json:"exit_code,omitempty"`
+	Signal    *string                  `json:"signal,omitempty"`
+	Metrics   ProcessMetrics           `json:"metrics"`
+	Stdout    *domain.PendingArtifact  `json:"stdout,omitempty"`
+	Stderr    *domain.PendingArtifact  `json:"stderr,omitempty"`
+	Execution *domain.PendingArtifact  `json:"execution,omitempty"`
+	Outputs   []domain.PendingArtifact `json:"outputs,omitempty"`
+	Details   map[string]string        `json:"details,omitempty"`
 }
 
 func (r RunResult) Validate() error {
@@ -292,12 +366,36 @@ func (r RunResult) Validate() error {
 		(r.Metrics.PeakRSSBytes != nil && *r.Metrics.PeakRSSBytes < 0) {
 		return fmt.Errorf("process metrics must be non-negative")
 	}
-	for name, artifact := range map[string]*domain.PendingArtifact{"stdout": r.Stdout, "stderr": r.Stderr} {
+	for name, artifact := range map[string]*domain.PendingArtifact{"stdout": r.Stdout, "stderr": r.Stderr, "execution": r.Execution} {
 		if artifact != nil {
 			if err := artifact.Validate(); err != nil {
 				return fmt.Errorf("%s artifact: %w", name, err)
 			}
 		}
+	}
+	for name, check := range map[string]struct {
+		artifact *domain.PendingArtifact
+		role     domain.ArtifactRole
+	}{
+		"stdout": {r.Stdout, domain.ArtifactStdout}, "stderr": {r.Stderr, domain.ArtifactStderr},
+		"execution": {r.Execution, domain.ArtifactEvidence},
+	} {
+		if check.artifact != nil && check.artifact.Role != check.role {
+			return fmt.Errorf("%s artifact has role %q, want %q", name, check.artifact.Role, check.role)
+		}
+	}
+	outputPaths := make(map[domain.SafeRelPath]struct{}, len(r.Outputs))
+	for index, artifact := range r.Outputs {
+		if err := artifact.Validate(); err != nil {
+			return fmt.Errorf("output artifact %d: %w", index, err)
+		}
+		if artifact.Role != domain.ArtifactOutput {
+			return fmt.Errorf("output artifact %d has role %q", index, artifact.Role)
+		}
+		if _, exists := outputPaths[artifact.LogicalPath]; exists {
+			return fmt.Errorf("duplicate output artifact path %q", artifact.LogicalPath)
+		}
+		outputPaths[artifact.LogicalPath] = struct{}{}
 	}
 	return nil
 }
@@ -344,6 +442,7 @@ type SandboxDispatchAuthorization interface {
 	ContainerPlan() ContainerPlan
 	ClaimEnginePing(ctx context.Context) (DispatchAuthorization, error)
 	ClaimNextContainer(ctx context.Context, role ContainerRole) (ContainerDispatchGrant, error)
+	AbortRemaining(ctx context.Context) error
 	sealSandboxDispatchAuthorization()
 }
 

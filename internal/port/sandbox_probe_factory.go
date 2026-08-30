@@ -17,6 +17,7 @@ type probeSandboxDispatchAuthorization struct {
 	claims            ProbeClaimStore
 	nextResourceIndex int
 	pingClaimed       bool
+	aborted           bool
 }
 
 func NewSlice0ProbeAuthorization(identity ProbeAuthorizationIdentity, plan ContainerPlan, claims ProbeClaimStore) (SandboxDispatchAuthorization, error) {
@@ -54,6 +55,9 @@ func (a *probeSandboxDispatchAuthorization) sealSandboxDispatchAuthorization() {
 func (a *probeSandboxDispatchAuthorization) ClaimEnginePing(ctx context.Context) (DispatchAuthorization, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.aborted {
+		return nil, fmt.Errorf("probe authorization was aborted")
+	}
 	if len(a.plan.Resources) != 0 {
 		return nil, fmt.Errorf("Engine ping claim is not allowed by a container plan")
 	}
@@ -71,6 +75,9 @@ func (a *probeSandboxDispatchAuthorization) ClaimEnginePing(ctx context.Context)
 func (a *probeSandboxDispatchAuthorization) ClaimNextContainer(ctx context.Context, role ContainerRole) (ContainerDispatchGrant, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.aborted {
+		return ContainerDispatchGrant{}, fmt.Errorf("probe authorization was aborted")
+	}
 	if len(a.plan.Resources) == 0 {
 		return ContainerDispatchGrant{}, fmt.Errorf("container claim is not allowed by an Engine-ping plan")
 	}
@@ -97,6 +104,19 @@ func (a *probeSandboxDispatchAuthorization) ClaimNextContainer(ctx context.Conte
 		Role: role,
 		Auth: probeDispatchGrant{callID: callID, identity: a.identity},
 	}, nil
+}
+
+func (a *probeSandboxDispatchAuthorization) AbortRemaining(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.aborted {
+		return nil
+	}
+	if err := a.claims.AbortRemaining(ctx, a.identity); err != nil {
+		return err
+	}
+	a.aborted = true
+	return nil
 }
 
 type probeDispatchGrant struct {

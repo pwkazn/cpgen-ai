@@ -89,6 +89,35 @@ func TestProbeAuthorizationReturnsPlanCopies(t *testing.T) {
 	}
 }
 
+func TestProbeAuthorizationAbortsOnlyUnconsumedClaims(t *testing.T) {
+	plan := containerPlan(t)
+	identity := probeIdentity(plan.PlanDigest)
+	ledger, err := probe.NewContainerLedger(identity, plan, []domain.AttemptCallID{
+		"call_00000000000000000000000000000001",
+		"call_00000000000000000000000000000002",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := port.NewSlice0ProbeAuthorization(identity, plan, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.ClaimNextContainer(context.Background(), port.ContainerImport); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.AbortRemaining(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := ledger.Snapshot()
+	if snapshot.Containers[0].State != probe.ClaimDispatching || snapshot.Containers[1].State != probe.ClaimAbortedNoDispatch {
+		t.Fatalf("claim states = %#v", snapshot.Containers)
+	}
+	if _, err := auth.ClaimNextContainer(context.Background(), port.ContainerTarget); err == nil {
+		t.Fatal("aborted claim was consumed")
+	}
+}
+
 func TestEnginePingAndContainerClaimsAreMutuallyExclusive(t *testing.T) {
 	pingPlan, err := port.NewContainerPlan(domain.SumBytes([]byte("engine")), nil, 0)
 	if err != nil {

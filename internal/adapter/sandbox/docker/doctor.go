@@ -55,12 +55,12 @@ func (e *CheckError) Unwrap() error {
 }
 
 type Doctor struct {
-	engine   Engine
+	engine   StaticEngine
 	config   Config
 	endpoint Endpoint
 }
 
-func NewDoctor(engine Engine, config Config, goos string) (*Doctor, error) {
+func NewDoctor(engine StaticEngine, config Config, goos string) (*Doctor, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("Docker Engine client is required")
 	}

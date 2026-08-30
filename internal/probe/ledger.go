@@ -14,8 +14,9 @@ import (
 type ClaimState string
 
 const (
-	ClaimAuthorized  ClaimState = "AUTHORIZED"
-	ClaimDispatching ClaimState = "DISPATCHING"
+	ClaimAuthorized        ClaimState = "AUTHORIZED"
+	ClaimDispatching       ClaimState = "DISPATCHING"
+	ClaimAbortedNoDispatch ClaimState = "ABORTED_NO_DISPATCH"
 )
 
 type ClaimSnapshot struct {
@@ -148,6 +149,27 @@ func (l *Ledger) ClaimContainer(ctx context.Context, identity port.ProbeAuthoriz
 	claim.State = ClaimDispatching
 	l.nextOrdinal++
 	return claim.CallID, nil
+}
+
+func (l *Ledger) AbortRemaining(ctx context.Context, identity port.ProbeAuthorizationIdentity) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.checkIdentity(identity); err != nil {
+		return err
+	}
+	if l.enginePing != nil && l.enginePing.State == ClaimAuthorized {
+		l.enginePing.State = ClaimAbortedNoDispatch
+	}
+	for index := l.nextOrdinal; index < len(l.containers); index++ {
+		if l.containers[index].State == ClaimAuthorized {
+			l.containers[index].State = ClaimAbortedNoDispatch
+		}
+	}
+	l.nextOrdinal = len(l.containers)
+	return nil
 }
 
 func (l *Ledger) Snapshot() LedgerSnapshot {

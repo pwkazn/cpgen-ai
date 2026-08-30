@@ -445,4 +445,5 @@ func (i ProbeAuthorizationIdentity) Validate() error {
 type ProbeClaimStore interface {
 	ClaimEnginePing(context.Context, ProbeAuthorizationIdentity) (domain.AttemptCallID, error)
 	ClaimContainer(context.Context, ProbeAuthorizationIdentity, int, ContainerRole) (domain.AttemptCallID, error)
+	AbortRemaining(context.Context, ProbeAuthorizationIdentity) error
 }
