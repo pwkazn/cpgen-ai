@@ -1,6 +1,6 @@
 # CP Problem Generator AI 开发 TODO
 
-> 当前阶段：设计完成，代码尚未开始。  
+> 当前阶段：Slice 0 实现中；M0 工程骨架与 ADR-0003 领域/Judge 契约已完成。
 > 开发主线：Go 模块化单体 + SQLite + Docker `docker-direct-v2`。  
 > 详细约束以 [ARCHITECTURE.md](./ARCHITECTURE.md)、[实施计划](./docs/implementation-plan.md) 和对应 ADR 为准。
 
@@ -16,7 +16,7 @@
 
 | 里程碑 | 目标 | 状态 |
 |---|---|---|
-| M0 | Go 工程和测试骨架可运行 | TODO |
+| M0 | Go 工程和测试骨架可运行 | DONE |
 | M1 | 可恢复的 SQLite 工作流核心 | TODO |
 | M2 | 创意、题面、LLM 和查重闭环 | TODO |
 | M3 | Docker 沙箱和 Judge 可验证 | TODO |
@@ -30,18 +30,18 @@
 
 ### 工程骨架
 
-- [ ] 初始化 `go.mod`、`cmd/cpgen` 和 `internal/` 分层目录。
-- [ ] 配置 `go test ./...`、静态检查、格式化和基础 CI。
-- [ ] 定义统一 `schema_version`、`Digest`、ID、时间和错误类型。
-- [ ] 实现 `context.Context` 取消、阶段超时和测试用 fake clock。
-- [ ] 建立 Fake LLM、Fake Similarity、Fake Sandbox 和内存 ArtifactSink。
+- [x] 初始化 `go.mod`、`cmd/cpgen` 和 `internal/` 分层目录。
+- [x] 配置 `go test ./...`、静态检查、格式化和基础 CI。
+- [x] 定义统一 `schema_version`、`Digest`、ID、时间和错误类型。
+- [x] 实现 `context.Context` 取消、阶段超时和测试用 fake clock。
+- [x] 建立 Fake LLM、Fake Similarity、Fake Sandbox 和内存 ArtifactSink。
 
 ### 领域与 Judge 基础类型
 
-- [ ] 实现 `CompileOutcome`、`ProcessOutcome`、`ValidatorOutcome`、`CheckerOutcome`。
-- [ ] 实现 `MeteredOutcome`、`CallTrace`、`PortFailure` 和 `FailureRouteClass`。
-- [ ] 完成 ADR-0003 的固定 test vectors：CE、RE、TLE、MLE、OLE、VALID/INVALID、AC/WA/PE/CHECKER_ERROR。
-- [ ] 所有 enum 反序列化拒绝未知值。
+- [x] 实现 `CompileOutcome`、`ProcessOutcome`、`ValidatorOutcome`、`CheckerOutcome`。
+- [x] 实现 `MeteredOutcome`、`CallTrace`、`PortFailure` 和 `FailureRouteClass`。
+- [x] 完成 ADR-0003 的固定 test vectors：CE、RE、TLE、MLE、OLE、VALID/INVALID、AC/WA/PE/CHECKER_ERROR。
+- [x] 所有 enum 反序列化拒绝未知值。
 
 ### Docker 探针
 
@@ -215,9 +215,9 @@
 
 按以下顺序开始编码：
 
-1. `internal/domain` 的 outcome、ID、Schema 和 ADR-0003 tests。
-2. `internal/port` 的 Sandbox、Judge、Artifact 和 MeteredOutcome 契约。
-3. Slice 0 的 Docker direct-run 探针与固定 A+B fixture。
+1. Slice 0 的本机 Docker endpoint 校验与静态 capability doctor。
+2. `docker-direct-v2` Runner、固定镜像和 toolchain manifest。
+3. 固定 A+B compile/validate/differential 探针。
 4. Slice 0 最小 package reader/writer 和 fake workflow。
 5. 通过 Slice 0 后开始 Slice 1 SQLite 状态机和恢复协议。
 
