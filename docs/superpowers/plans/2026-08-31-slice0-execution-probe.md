@@ -1242,7 +1242,7 @@ git commit -m "phase1(slice-0): complete execution probe"
 
 Expected: the final Slice 0 stage commit exists after all exit conditions pass.
 
-- [ ] **Step 7: Verify the checkpoint**
+- [x] **Step 7: Verify the checkpoint**
 
 Run:
 
