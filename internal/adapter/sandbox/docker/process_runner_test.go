@@ -124,6 +124,51 @@ func TestRunnerRunImportsExecutableAcceptsBoundedStdinAndReturnsRawExit(t *testi
 	}
 }
 
+func TestWatchdogRunnerUsesProtocolACKsForEveryCreateAndTargetPhase(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	lock := toolchainLock(t)
+	identity := planIdentity()
+	controller, err := docker.NewInProcessWatchdogController("runner-watchdog-token-0000000000000000000000001", fixture.engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := docker.NewRunner(docker.RunnerOptions{
+		Engine: fixture.engine,
+		Config: docker.Config{
+			EngineEndpoint: "npipe:////./pipe/docker_engine", APIVersion: docker.RequiredAPIVersion,
+			BuilderImage: string(lock.Builder.ImageID), RuntimeImage: string(lock.Runtime.ImageID), TransferImage: string(lock.Transfer.ImageID),
+			ExecutionProtocol: docker.ExecutionProtocolDockerDirectV2,
+		},
+		Lock: lock, EngineIdentityDigest: identity.EngineIdentityDigest,
+		Blobs: fixture.blobs, Artifacts: &recordingArtifactSink{events: fixture.events}, Watchdog: controller,
+		Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Compile(context.Background(), fixture.auth, fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != domain.CompileOK || fixture.engine.resourceCount() != 0 {
+		t.Fatalf("watchdog-backed compile = %#v resources=%d", result, fixture.engine.resourceCount())
+	}
+}
+
+func TestWatchdogCleanupAcknowledgesStoppedTargetAfterStartFailure(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	fixture.engine.failStartRole = port.ContainerTarget
+	if _, err := fixture.runner.Compile(context.Background(), fixture.auth, fixture.request); err == nil {
+		t.Fatal("target Start failure was not reported")
+	}
+	events := fixture.events.snapshot()
+	stopped := indexOf(events, "watchdog-stopped:TARGET")
+	cleaned := indexOf(events, "watchdog-cleaned")
+	if stopped < 0 || cleaned < 0 || stopped >= cleaned {
+		t.Fatalf("cleanup watchdog acknowledgements are out of order: %#v", events)
+	}
+}
+
 type runFixture struct {
 	runner  *docker.Runner
 	auth    port.SandboxDispatchAuthorization

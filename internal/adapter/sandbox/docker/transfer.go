@@ -367,9 +367,6 @@ func VerifyHelperInspect(expected moby.ContainerCreateOptions, actual moby.Conta
 }
 
 func (op *operation) startContainer(ctx context.Context, owned *ownedContainer) error {
-	if err := op.runner.watchdog.BeforeStart(ctx, owned.resource, owned.id); err != nil {
-		return err
-	}
 	if _, err := op.runner.engine.ContainerStart(ctx, owned.id, moby.ContainerStartOptions{}); err != nil {
 		return err
 	}

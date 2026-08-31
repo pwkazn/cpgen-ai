@@ -194,11 +194,12 @@ func (op *operation) executeTarget(ctx context.Context, target *ownedContainer, 
 		_, copyErr := stdcopy.StdCopy(stdout, stderr, attached.Reader)
 		copyDone <- copyErr
 	}()
-	if err := op.runner.watchdog.BeforeStart(ctx, target.resource, target.id); err != nil {
+	if err := op.watchdog.TargetPhase(ctx, target.resource, target.id, hardLimit+op.runner.limits.CleanupTimeout); err != nil {
 		attached.Close()
 		<-copyDone
 		return processExecution{}, err
 	}
+	op.targetPhase = true
 	if err := ctx.Err(); err != nil {
 		attached.Close()
 		<-copyDone
@@ -331,6 +332,15 @@ func (op *operation) executeTarget(ctx context.Context, target *ownedContainer, 
 	evidence.EvidenceComplete = inspectComplete && monitor.err() == nil && (waitObserved || proof.WaitObserved)
 	if evidence.StartUnknown && evidence.Started {
 		evidence.StartUnknown = false
+	}
+	if evidence.Stopped {
+		ackCtx, cancelAck := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
+		ackErr := op.watchdog.Stopped(ackCtx, target.resource, target.id)
+		cancelAck()
+		if ackErr != nil {
+			return processExecution{}, fmt.Errorf("watchdog STOPPED acknowledgement: %w", ackErr)
+		}
+		op.targetStopped = true
 	}
 
 	copyErr := waitForAttachDrain(copyDone, attached, op.runner.limits.CleanupTimeout)

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -25,6 +26,7 @@ type versionOutput struct {
 type Dependencies struct {
 	GOOS        string
 	CheckDocker func(context.Context, dockersandbox.Config) (dockersandbox.StaticReport, error)
+	RunWatchdog func(context.Context, string) error
 }
 
 type doctorOutput struct {
@@ -42,6 +44,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return RunWithDependencies(args, stdout, stderr, Dependencies{
 		GOOS:        runtime.GOOS,
 		CheckDocker: dockersandbox.CheckStatic,
+		RunWatchdog: dockersandbox.RunWatchdogService,
 	})
 }
 
@@ -72,11 +75,35 @@ func RunWithDependencies(args []string, stdout, stderr io.Writer, dependencies D
 		return 0
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, dependencies)
+	case "sandbox-watchdog":
+		return runSandboxWatchdog(args[1:], stderr, dependencies)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		fmt.Fprintln(stderr, "run 'cpgen help' for usage")
 		return 2
 	}
+}
+
+func runSandboxWatchdog(args []string, stderr io.Writer, dependencies Dependencies) int {
+	flags := flag.NewFlagSet("sandbox-watchdog", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	control := flags.String("control", "", "owner-only watchdog control record")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || *control == "" || !filepath.IsAbs(*control) || filepath.Clean(*control) != *control {
+		fmt.Fprintln(stderr, "invalid sandbox watchdog invocation")
+		return 2
+	}
+	if dependencies.RunWatchdog == nil {
+		fmt.Fprintln(stderr, "sandbox watchdog dependency is not configured")
+		return 1
+	}
+	if err := dependencies.RunWatchdog(context.Background(), *control); err != nil {
+		fmt.Fprintf(stderr, "sandbox watchdog failed: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer, dependencies Dependencies) int {

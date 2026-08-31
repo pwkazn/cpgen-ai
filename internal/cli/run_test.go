@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -126,5 +127,41 @@ func TestUnknownCommandFailsWithoutExposingProbe(t *testing.T) {
 	code := cli.Run([]string{"probe"}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestWatchdogHiddenCommandRequiresOnlyAbsoluteOwnerControlPath(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := ""
+	control := filepath.Join(t.TempDir(), "control.json")
+	code := cli.RunWithDependencies([]string{"sandbox-watchdog", "--control", control}, &stdout, &stderr, cli.Dependencies{
+		RunWatchdog: func(_ context.Context, path string) error {
+			called = path
+			return nil
+		},
+	})
+	if code != 0 || called != control || stdout.Len() != 0 {
+		t.Fatalf("code=%d called=%q stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	for _, args := range [][]string{
+		{"sandbox-watchdog", "--control", "relative.json"},
+		{"sandbox-watchdog", "--control", control, "extra"},
+		{"sandbox-watchdog", "--control", control, "--engine-endpoint", "tcp://attacker"},
+	} {
+		called = ""
+		stdout.Reset()
+		stderr.Reset()
+		if code := cli.RunWithDependencies(args, &stdout, &stderr, cli.Dependencies{RunWatchdog: func(context.Context, string) error {
+			called = "called"
+			return nil
+		}}); code != 2 || called != "" {
+			t.Fatalf("args=%#v code=%d called=%q", args, code, called)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	cli.Run([]string{"help"}, &stdout, &stderr)
+	if strings.Contains(stdout.String(), "sandbox-watchdog") {
+		t.Fatal("hidden watchdog command appeared in help")
 	}
 }

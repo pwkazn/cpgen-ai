@@ -11,12 +11,14 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"time"
 
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
 	"cpgen/internal/transfer"
+	"cpgen/internal/watchdog"
 	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/volume"
@@ -24,9 +26,17 @@ import (
 )
 
 type WatchdogController interface {
-	BeforeCreate(context.Context, port.PlannedResource, map[string]string) error
+	TokenDigest() domain.Digest
+	Arm(context.Context, watchdog.ControlRecord) (WatchdogSession, error)
+}
+
+type WatchdogSession interface {
+	PreCreate(context.Context, port.PlannedResource, map[string]string) error
 	ResourceCreated(context.Context, port.PlannedResource, string) error
-	BeforeStart(context.Context, port.PlannedResource, string) error
+	TargetPhase(context.Context, port.PlannedResource, string, time.Duration) error
+	Stopped(context.Context, port.PlannedResource, string) error
+	Cleaned(context.Context) error
+	Close() error
 }
 
 type ControlLimits struct {
@@ -80,6 +90,9 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	}
 	if err := options.EngineIdentityDigest.Validate(); err != nil {
 		return nil, fmt.Errorf("Engine identity: %w", err)
+	}
+	if err := options.Watchdog.TokenDigest().Validate(); err != nil {
+		return nil, fmt.Errorf("watchdog token digest: %w", err)
 	}
 	if err := options.Limits.Validate(); err != nil {
 		return nil, err
@@ -139,6 +152,9 @@ type operation struct {
 	containers         []*ownedContainer
 	volumes            []*ownedVolume
 	writers            []*preparedArtifact
+	watchdog           WatchdogSession
+	targetPhase        bool
+	targetStopped      bool
 }
 
 var plannedNoncePattern = regexp.MustCompile(`^cpgen-s0-([0-9a-f]{32})-`)
@@ -178,6 +194,44 @@ func (r *Runner) newOperation(auth port.SandboxDispatchAuthorization) (*operatio
 	return &operation{runner: r, auth: auth, plan: plan, identity: identity}, nil
 }
 
+func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration) error {
+	if op.watchdog != nil {
+		return fmt.Errorf("watchdog is already armed")
+	}
+	if programLimit <= 0 {
+		return fmt.Errorf("program limit must be positive")
+	}
+	now := time.Now()
+	deadline := now.Add(programLimit + op.runner.limits.CleanupTimeout + 5*time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok {
+		bounded := contextDeadline.Add(5 * time.Second)
+		if bounded.Before(deadline) {
+			deadline = bounded
+		}
+	}
+	if !deadline.After(now) {
+		return fmt.Errorf("watchdog safety envelope is already exhausted")
+	}
+	record := watchdog.ControlRecord{
+		SchemaVersion: watchdog.ControlRecordSchemaVersion,
+		TokenDigest:   op.runner.watchdog.TokenDigest(), EngineEndpoint: op.runner.config.EngineEndpoint,
+		EngineIdentityDigest: op.identity.EngineIdentityDigest, LogicalOperationID: op.identity.LogicalOperationID,
+		Plan: op.plan.Clone(), SafetyDeadlineUTC: deadline.UTC(),
+	}
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	session, err := op.runner.watchdog.Arm(ctx, record)
+	if err != nil {
+		return err
+	}
+	if session == nil {
+		return fmt.Errorf("watchdog Arm returned no session")
+	}
+	op.watchdog = session
+	return nil
+}
+
 func (r *Runner) Compile(ctx context.Context, auth port.SandboxDispatchAuthorization, request port.CompileRequest) (result port.CompileResult, returnErr error) {
 	if err := request.Validate(); err != nil {
 		return result, err
@@ -205,6 +259,9 @@ func (r *Runner) Compile(ctx context.Context, auth port.SandboxDispatchAuthoriza
 	}
 	processArtifacts, err := r.prepareProcessArtifacts(ctx, op, "compile", request.SourceBundle.Digest, compileDiagnosticMaxBytes, compileDiagnosticMaxBytes)
 	if err != nil {
+		return result, err
+	}
+	if err := op.armWatchdog(ctx, request.Limits.Time); err != nil {
 		return result, err
 	}
 	if err := op.createVolumes(ctx, request.Limits.OutputBytes); err != nil {
@@ -294,6 +351,9 @@ func (r *Runner) Run(ctx context.Context, auth port.SandboxDispatchAuthorization
 	if err != nil {
 		return result, err
 	}
+	if err := op.armWatchdog(ctx, request.Limits.Time); err != nil {
+		return result, err
+	}
 	if err := op.createVolumes(ctx, outputTotal); err != nil {
 		return result, err
 	}
@@ -356,8 +416,63 @@ func (r *Runner) Run(ctx context.Context, auth port.SandboxDispatchAuthorization
 	}, nil
 }
 
-func (r *Runner) Probe(context.Context, port.SandboxDispatchAuthorization, port.DockerProbeRequest) (port.DockerProbeResult, error) {
-	return port.DockerProbeResult{}, fmt.Errorf("Docker probe harness is not installed")
+func (r *Runner) Probe(ctx context.Context, auth port.SandboxDispatchAuthorization, request port.DockerProbeRequest) (port.DockerProbeResult, error) {
+	profile := port.SandboxProfile(request.Profile)
+	if !profile.Valid() {
+		return port.DockerProbeResult{}, fmt.Errorf("invalid Docker probe profile %q", request.Profile)
+	}
+	if auth == nil {
+		return port.DockerProbeResult{}, fmt.Errorf("Docker probe authorization is required")
+	}
+	plan := auth.ContainerPlan()
+	identity := port.ProbeAuthorizationIdentity{
+		LogicalOperationID: auth.LogicalOperationID(), RunID: auth.RunID(), AttemptID: auth.AttemptID(), OwnerID: auth.OwnerID(),
+		LeaseEpoch: auth.LeaseEpoch(), ScopeDigest: auth.ScopeDigest(), PlanDigest: auth.PlanDigest(),
+	}
+	if err := identity.Validate(); err != nil {
+		return port.DockerProbeResult{}, err
+	}
+	if err := plan.Validate(); err != nil {
+		return port.DockerProbeResult{}, err
+	}
+	if len(plan.Resources) != 0 || plan.TransferBytesMax != 0 || plan.EngineIdentityDigest != r.engineIdentity || auth.PlanDigest() != plan.PlanDigest {
+		return port.DockerProbeResult{}, fmt.Errorf("Engine ping requires an exact empty plan for the configured Engine")
+	}
+	grant, err := auth.ClaimEnginePing(ctx)
+	if err != nil {
+		return port.DockerProbeResult{}, err
+	}
+	callID := grant.CallID()
+	if grant.RunID() != auth.RunID() || grant.AttemptID() != auth.AttemptID() || grant.OwnerID() != auth.OwnerID() || grant.LeaseEpoch() != auth.LeaseEpoch() || grant.ScopeDigest() != auth.ScopeDigest() {
+		return port.DockerProbeResult{}, fmt.Errorf("Engine ping grant identity mismatch")
+	}
+	trace := domain.CallTrace{
+		LogicalOperationID: auth.LogicalOperationID(), DispatchKind: domain.DispatchDispatched,
+		PhysicalAttemptCallIDs: []domain.AttemptCallID{callID}, ResultAttemptCallID: &callID,
+	}
+	result := port.DockerProbeResult{CallTrace: trace}
+	doctor, err := NewDoctor(r.engine, r.config, runtime.GOOS)
+	if err != nil {
+		return result, err
+	}
+	report, err := doctor.Check(ctx)
+	if err != nil {
+		return result, err
+	}
+	if report.EngineIdentityDigest != r.engineIdentity {
+		return result, checkFailure(domain.FailureProtocol, domain.FailureIncompatible, fmt.Errorf("Docker Engine identity changed during capability ping"))
+	}
+	cgroupVersion, err := strconv.Atoi(report.CgroupVersion)
+	if err != nil {
+		return result, checkFailure(domain.FailureProtocol, domain.FailureIncompatible, fmt.Errorf("invalid cgroup version %q", report.CgroupVersion))
+	}
+	result.Capabilities = port.CapabilitySnapshot{
+		Profile: profile, EngineIdentityDigest: report.EngineIdentityDigest, EndpointDigest: report.EndpointDigest,
+		ServerOS: report.ServerOS, APIVersion: report.APIVersion, CgroupVersion: cgroupVersion, Flags: map[string]bool{},
+		BuilderImageDigest: domain.Digest(report.BuilderImageID), RuntimeImageDigest: domain.Digest(report.RuntimeImageID),
+		TransferImageDigest: domain.Digest(report.TransferImageID), ExecutionProtocol: report.ExecutionProtocol,
+	}
+	return result, nil
 }
 
 func (r *Runner) preflightCompile(ctx context.Context, op *operation, request port.CompileRequest) ([]payloadGroup, error) {
@@ -484,7 +599,7 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 		}
 		owned := &ownedVolume{resource: resource, name: resource.DeterministicName, labels: maps.Clone(labels), driver: "local", options: maps.Clone(driverOptions)}
 		op.volumes = append(op.volumes, owned)
-		if err := op.runner.watchdog.BeforeCreate(ctx, resource, maps.Clone(labels)); err != nil {
+		if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
 			return err
 		}
 		created, err := op.runner.engine.VolumeCreate(ctx, moby.VolumeCreateOptions{Name: owned.name, Driver: owned.driver, DriverOpts: driverOptions, Labels: labels})
@@ -501,7 +616,7 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 		if err := verifyVolumeOwnership(inspected.Volume, owned); err != nil {
 			return err
 		}
-		if err := op.runner.watchdog.ResourceCreated(ctx, resource, owned.name); err != nil {
+		if err := op.watchdog.ResourceCreated(ctx, resource, owned.name); err != nil {
 			return err
 		}
 	}
@@ -544,7 +659,7 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 	labels := maps.Clone(options.Config.Labels)
 	owned := &ownedContainer{resource: resource, name: resource.DeterministicName, labels: labels}
 	op.containers = append(op.containers, owned)
-	if err := op.runner.watchdog.BeforeCreate(ctx, resource, maps.Clone(labels)); err != nil {
+	if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
 		return nil, "", err
 	}
 	op.physical = append(op.physical, callID)
@@ -556,7 +671,7 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 		return nil, callID, fmt.Errorf("Docker returned an empty container ID")
 	}
 	owned.id = created.ID
-	if err := op.runner.watchdog.ResourceCreated(ctx, resource, created.ID); err != nil {
+	if err := op.watchdog.ResourceCreated(ctx, resource, created.ID); err != nil {
 		return nil, callID, err
 	}
 	inspected, err := op.runner.engine.ContainerInspect(ctx, created.ID, moby.ContainerInspectOptions{})
@@ -676,10 +791,42 @@ func (op *operation) finish() error {
 	if err := op.auth.AbortRemaining(cleanupCtx); err != nil {
 		failures = append(failures, fmt.Errorf("abort unused container claims: %w", err))
 	}
-	if err := op.cleanup(cleanupCtx); err != nil {
-		failures = append(failures, err)
+	cleanupErr := op.cleanup(cleanupCtx)
+	if cleanupErr != nil {
+		failures = append(failures, cleanupErr)
+	}
+	if op.watchdog != nil {
+		ackCtx, cancelAck := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
+		defer cancelAck()
+		if cleanupErr == nil && op.targetPhase && !op.targetStopped {
+			target := op.targetContainer()
+			if target == nil || target.id == "" {
+				failures = append(failures, fmt.Errorf("target phase has no persisted target identity"))
+			} else if err := op.watchdog.Stopped(ackCtx, target.resource, target.id); err != nil {
+				failures = append(failures, fmt.Errorf("watchdog STOPPED acknowledgement after cleanup: %w", err))
+			} else {
+				op.targetStopped = true
+			}
+		}
+		if cleanupErr == nil {
+			if err := op.watchdog.Cleaned(ackCtx); err != nil {
+				failures = append(failures, fmt.Errorf("watchdog CLEANED acknowledgement: %w", err))
+			}
+		}
+		if err := op.watchdog.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close watchdog session: %w", err))
+		}
 	}
 	return errors.Join(failures...)
+}
+
+func (op *operation) targetContainer() *ownedContainer {
+	for _, candidate := range op.containers {
+		if candidate.resource.Role == port.ResourceTarget {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func (op *operation) cleanup(ctx context.Context) error {

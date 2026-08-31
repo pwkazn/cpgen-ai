@@ -20,6 +20,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/transfer"
+	"cpgen/internal/watchdog"
 	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/events"
@@ -338,16 +339,44 @@ func (w *recordingArtifactWriter) Abort(context.Context) error {
 
 type recordingWatchdog struct{ events *eventLog }
 
-func (w *recordingWatchdog) BeforeCreate(_ context.Context, resource port.PlannedResource, _ map[string]string) error {
+func (w *recordingWatchdog) TokenDigest() domain.Digest {
+	return domain.SumBytes([]byte("recording-watchdog-token"))
+}
+func (w *recordingWatchdog) Arm(_ context.Context, record watchdog.ControlRecord) (docker.WatchdogSession, error) {
+	if err := record.Validate(); err != nil {
+		return nil, err
+	}
+	if record.TokenDigest != w.TokenDigest() {
+		return nil, errors.New("recording watchdog token mismatch")
+	}
+	w.events.add("watchdog-arm")
+	return &recordingWatchdogSession{events: w.events}, nil
+}
+
+type recordingWatchdogSession struct{ events *eventLog }
+
+func (w *recordingWatchdogSession) PreCreate(_ context.Context, resource port.PlannedResource, _ map[string]string) error {
 	w.events.add("watchdog-before:" + string(resource.Role))
 	return nil
 }
-func (w *recordingWatchdog) ResourceCreated(_ context.Context, resource port.PlannedResource, _ string) error {
+func (w *recordingWatchdogSession) ResourceCreated(_ context.Context, resource port.PlannedResource, _ string) error {
 	w.events.add("watchdog-created:" + string(resource.Role))
 	return nil
 }
-func (w *recordingWatchdog) BeforeStart(_ context.Context, resource port.PlannedResource, _ string) error {
+func (w *recordingWatchdogSession) TargetPhase(_ context.Context, resource port.PlannedResource, _ string, _ time.Duration) error {
 	w.events.add("watchdog-start:" + string(resource.Role))
+	return nil
+}
+func (w *recordingWatchdogSession) Stopped(_ context.Context, resource port.PlannedResource, _ string) error {
+	w.events.add("watchdog-stopped:" + string(resource.Role))
+	return nil
+}
+func (w *recordingWatchdogSession) Cleaned(context.Context) error {
+	w.events.add("watchdog-cleaned")
+	return nil
+}
+func (w *recordingWatchdogSession) Close() error {
+	w.events.add("watchdog-close")
 	return nil
 }
 
@@ -378,6 +407,7 @@ type recordingDockerEngine struct {
 	receivedStdin          []byte
 	failCreateRole         port.ContainerRole
 	createForeignOnFailure bool
+	failStartRole          port.ContainerRole
 }
 
 func newRecordingDockerEngine(events *eventLog) *recordingDockerEngine {
@@ -468,6 +498,9 @@ func (e *recordingDockerEngine) ContainerStart(_ context.Context, id string, _ m
 	}
 	role := candidate.options.Config.Labels["org.cpgen.role"]
 	e.events.add("start:" + role)
+	if port.ContainerRole(role) == e.failStartRole {
+		return moby.ContainerStartResult{}, errors.New("simulated Start failure")
+	}
 	candidate.running = true
 	return moby.ContainerStartResult{}, nil
 }
