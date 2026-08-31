@@ -1,6 +1,6 @@
 # CP Problem Generator AI 开发 TODO
 
-> 当前阶段：Slice 0 实现中；M0 工程骨架与 ADR-0003 领域/Judge 契约已完成。
+> 当前阶段：Slice 0 已完成并通过真实 Docker 验证；下一阶段为 Slice 1 可恢复工作流核心。
 > 开发主线：Go 模块化单体 + SQLite + Docker `docker-direct-v2`。  
 > 详细约束以 [ARCHITECTURE.md](./ARCHITECTURE.md)、[实施计划](./docs/implementation-plan.md) 和对应 ADR 为准。
 
@@ -45,22 +45,22 @@
 
 ### Docker 探针
 
-- [ ] 固定 `cpgen-builder`、`cpgen-runtime`、`cpgen-transfer` 镜像 digest 和 toolchain manifest。
-- [ ] 实现显式本机 `unix://`/`npipe://` endpoint 校验，拒绝 TCP、SSH、remote context 和 ambient Docker context。
-- [ ] 验证 direct PID 1、非 root、CapDrop=ALL、只读 rootfs、network none、no-new-privileges。
-- [ ] 验证 `Memory=limit`、`MemorySwap=Memory`、`memory.swap.max=0`、PIDs 限制。
-- [ ] 验证 Engine volume 导入、quota tmpfs output volume、keeper 跨 target stop 和只读 export。
-- [ ] 验证 `LogConfig=none + Attach`、输出上限和 OLE 停止流程。
-- [ ] 验证 detached watchdog：预告计划、pre-create ACK、迟到 Create、deadline Stop/Kill 和 control-record ACL。
-- [ ] 验证 watchdog 异常退出/EOF 时 owner 禁止新 Start 并触发 cleanup。
-- [ ] 验证 release cgroup v2 的 path、nonce、owner epoch、inode/device 识别和 `populated=0` 回收。
+- [x] 固定 `cpgen-builder`、`cpgen-runtime`、`cpgen-transfer` 镜像 digest 和 toolchain manifest。
+- [x] 实现显式本机 `unix://`/`npipe://` endpoint 校验，拒绝 TCP、SSH、remote context 和 ambient Docker context。
+- [x] 验证 direct PID 1、非 root、CapDrop=ALL、只读 rootfs、network none、no-new-privileges。
+- [x] 验证 `Memory=limit`、`MemorySwap=Memory`、`memory.swap.max=0`、PIDs 限制。
+- [x] 验证 Engine volume 导入、quota tmpfs output volume、keeper 跨 target stop 和只读 export。
+- [x] 验证 `LogConfig=none + Attach`、输出上限和 OLE 停止流程。
+- [x] 验证 detached watchdog：预告计划、pre-create ACK、迟到 Create、deadline Stop/Kill 和 control-record ACL。
+- [x] 验证 watchdog 异常退出/EOF 时 owner 禁止新 Start 并触发 cleanup。
+- [x] 验证 Docker Desktop 不满足 release cgroup v2 profile 时返回 `capability_missing/INCOMPATIBLE`；完整 release cgroup path/nonce/epoch/inode/device/`populated=0` 证据按设计在 Slice 3 实现。
 
 ### Slice 0 退出条件
 
-- [ ] Docker 可用时完成最小 compile → validate → differential → package 探针。
-- [ ] Docker 不可用或能力不足时返回分类后的 `BLOCKED`，不 panic、不走 host process fallback。
-- [ ] 网络、Docker socket、宿主宽泛 mount、环境秘密和宿主执行记录对目标程序不可见。
-- [ ] Slice 0 不产生正式 `READY` 或 `PackageVerificationReceipt`。
+- [x] Docker 可用时完成最小 compile → validate → differential → package 探针。
+- [x] Docker 不可用或能力不足时返回分类后的 `BLOCKED`，不 panic、不走 host process fallback。
+- [x] 网络、Docker socket、宿主宽泛 mount、环境秘密和宿主执行记录对目标程序不可见。
+- [x] Slice 0 不产生正式 `READY` 或 `PackageVerificationReceipt`。
 
 ## Slice 1：可恢复的工作流核心
 
@@ -215,11 +215,11 @@
 
 按以下顺序开始编码：
 
-1. Slice 0 的本机 Docker endpoint 校验与静态 capability doctor。
-2. `docker-direct-v2` Runner、固定镜像和 toolchain manifest。
-3. 固定 A+B compile/validate/differential 探针。
-4. Slice 0 最小 package reader/writer 和 fake workflow。
-5. 通过 Slice 0 后开始 Slice 1 SQLite 状态机和恢复协议。
+1. Slice 1 SQLite migrations、Repository 和不可变 request snapshot。
+2. run/step/attempt 状态机、execution lease/fencing 与取消协议。
+3. CallOperation/AttemptCall、预算账户和 Blob/pin/occurrence。
+4. SandboxExecution、recovery intent、janitor 和 crash-injection 验证。
+5. 满足 Slice 1 退出条件并创建阶段 checkpoint。
 
 ## 通用验收命令
 

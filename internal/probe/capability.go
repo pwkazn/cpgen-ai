@@ -92,6 +92,24 @@ func (s *MemoryArtifactStore) configureCalls(plan port.ContainerPlan, calls []do
 	return nil
 }
 
+func (s *MemoryArtifactStore) configureProbeArtifactCall(callID domain.AttemptCallID) error {
+	if err := callID.Validate(); err != nil {
+		return err
+	}
+	callFor := map[domain.ArtifactRole]domain.AttemptCallID{}
+	for _, role := range []domain.ArtifactRole{
+		domain.ArtifactSource, domain.ArtifactProgram, domain.ArtifactInput, domain.ArtifactOutput,
+		domain.ArtifactStdout, domain.ArtifactStderr, domain.ArtifactCompileLog,
+		domain.ArtifactExecutionLog, domain.ArtifactEvidence,
+	} {
+		callFor[role] = callID
+	}
+	s.mu.Lock()
+	s.callFor = callFor
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *MemoryArtifactStore) OpenVerified(ctx context.Context, ref domain.BlobRef) (port.VerifiedReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

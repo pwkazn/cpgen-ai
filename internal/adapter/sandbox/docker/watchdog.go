@@ -177,22 +177,21 @@ func (r *dockerWatchdogReconciler) Stop(ctx context.Context, observation watchdo
 }
 
 type InProcessWatchdogController struct {
-	token      string
-	tokenHash  domain.Digest
-	reconciler watchdogprotocol.Reconciler
-	service    watchdogprotocol.Service
+	token     string
+	tokenHash domain.Digest
+	engine    Engine
+	service   watchdogprotocol.Service
 }
 
 func NewInProcessWatchdogController(token string, engine Engine) (*InProcessWatchdogController, error) {
 	if len(token) < 32 {
 		return nil, fmt.Errorf("watchdog token must contain at least 32 bytes")
 	}
-	reconciler, err := newDockerWatchdogReconciler(engine)
-	if err != nil {
-		return nil, err
+	if engine == nil {
+		return nil, fmt.Errorf("watchdog Engine is required")
 	}
 	return &InProcessWatchdogController{
-		token: token, tokenHash: domain.SumBytes([]byte(token)), reconciler: reconciler,
+		token: token, tokenHash: domain.SumBytes([]byte(token)), engine: engine,
 		service: watchdogprotocol.Service{PollInterval: 10 * time.Millisecond, LateCreateWindow: 100 * time.Millisecond, CleanupTimeout: 10 * time.Second},
 	}, nil
 }
@@ -207,8 +206,12 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	if err != nil {
 		return nil, err
 	}
+	reconciler, err := newDockerWatchdogReconciler(c.engine)
+	if err != nil {
+		return nil, err
+	}
 	owner, service := net.Pipe()
-	go func() { _ = c.service.Serve(context.Background(), service, envelope, c.reconciler) }()
+	go func() { _ = c.service.Serve(context.Background(), service, envelope, reconciler) }()
 	client, err := watchdogprotocol.NewClient(owner, c.token, envelope.RecordDigest)
 	if err != nil {
 		_ = owner.Close()

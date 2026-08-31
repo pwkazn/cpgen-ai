@@ -3,3 +3,4 @@ build/docker/builder/Dockerfile text eol=lf
 build/docker/runtime/Dockerfile text eol=lf
 build/docker/transfer/Dockerfile text eol=lf
 config/toolchains/docker-v1.lock.json text eol=lf
+internal/fixture/ab/*.cpp text eol=lf

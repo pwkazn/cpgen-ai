@@ -5,6 +5,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net"
 	"os"
@@ -90,6 +91,30 @@ func TestWatchdogEOFPreventsFurtherPreCreateAcknowledgement(t *testing.T) {
 		t.Fatal("dead watchdog acknowledged a new Create")
 	}
 	_ = session.Close()
+}
+
+func TestWatchdogInProcessControllerCanRearmImmediately(t *testing.T) {
+	engine := newWatchdogEngine()
+	controller, err := NewInProcessWatchdogController("watchdog-rearm-token-000000000000000000000001", engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.service.PollInterval = time.Microsecond
+	controller.service.LateCreateWindow = time.Microsecond
+	for iteration := 0; iteration < 250; iteration++ {
+		record := watchdogRecord(t, controller.TokenDigest(), time.Now().Add(time.Second))
+		record.LogicalOperationID = fmt.Sprintf("watchdog-rearm-%d", iteration)
+		session, err := controller.Arm(context.Background(), record)
+		if err != nil {
+			t.Fatalf("arm %d: %v", iteration, err)
+		}
+		if err := session.Cleaned(context.Background()); err != nil {
+			t.Fatalf("clean %d: %v", iteration, err)
+		}
+		if err := session.Close(); err != nil {
+			t.Fatalf("close %d: %v", iteration, err)
+		}
+	}
 }
 
 func TestWatchdogControlACLAndDetachedChildOwnerEOF(t *testing.T) {

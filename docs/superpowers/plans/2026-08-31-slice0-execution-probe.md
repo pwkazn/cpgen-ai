@@ -78,7 +78,7 @@
 - Consumes: the current untracked typed scaffold.
 - Produces: a reviewed, reproducible Go baseline on which all Slice 0 tasks build.
 
-- [ ] **Step 1: Re-read the working tree before taking ownership**
+- [x] **Step 1: Re-read the working tree before taking ownership**
 
 Run:
 
@@ -90,7 +90,7 @@ rg --files cmd internal .github
 
 Expected: only the known M0 scaffold, documentation status edits, this plan, and no secret/config credential files.
 
-- [ ] **Step 2: Verify the unmodified baseline**
+- [x] **Step 2: Verify the unmodified baseline**
 
 Run:
 
@@ -102,7 +102,7 @@ go test -race ./...
 
 Expected: all current packages PASS before new dependencies are introduced.
 
-- [ ] **Step 3: Pin the Slice 0 Go dependencies**
+- [x] **Step 3: Pin the Slice 0 Go dependencies**
 
 Run:
 
@@ -114,7 +114,7 @@ go mod download github.com/moby/moby/client@v0.5.1 github.com/moby/moby/api@v1.5
 
 Expected: go.mod remains at go 1.24; go.sum records the selected Moby modules without `go mod tidy` removing them before their first imports exist; no deprecated github.com/docker/docker module is added. Add golang.org/x/text@v0.29.0 in Task 12 immediately before its normalization package is first imported.
 
-- [ ] **Step 4: Record approval in the design**
+- [x] **Step 4: Record approval in the design**
 
 Change the design status line to:
 
@@ -122,7 +122,7 @@ Change the design status line to:
 状态：已批准，按 Slice 0 → 5 顺序交付
 ~~~
 
-- [ ] **Step 5: Re-run the baseline and inspect staged scope**
+- [x] **Step 5: Re-run the baseline and inspect staged scope**
 
 Run:
 
@@ -135,7 +135,7 @@ git status --short
 
 Expected: PASS; only explicit M0/design/plan files are ready to stage.
 
-- [ ] **Step 6: Commit the reviewed scaffold**
+- [x] **Step 6: Commit the reviewed scaffold**
 
 Run:
 
@@ -167,7 +167,7 @@ Expected: one baseline commit; unrelated files remain untouched.
   - build-tagged port.NewSlice0ProbeAuthorization(identity ProbeAuthorizationIdentity, plan ContainerPlan, claims ProbeClaimStore) (SandboxDispatchAuthorization, error)
   - probe.Ledger implementing port.ProbeClaimStore under cpgen_slice0_probe.
 
-- [ ] **Step 1: Write failing canonical-plan and one-shot-claim tests**
+- [x] **Step 1: Write failing canonical-plan and one-shot-claim tests**
 
 Add table tests that assert:
 
@@ -199,7 +199,7 @@ func TestProbeLedgerRejectsWrongOrderAndDuplicateClaim(t *testing.T) {
 }
 ~~~
 
-- [ ] **Step 2: Run the tests and verify the expected compile failure**
+- [x] **Step 2: Run the tests and verify the expected compile failure**
 
 Run:
 
@@ -209,7 +209,7 @@ go test -tags=cpgen_slice0_probe ./internal/port ./internal/probe
 
 Expected: FAIL because PlannedResource, NewContainerPlan, ProbeClaimStore, and the probe factory do not exist.
 
-- [ ] **Step 3: Define the exact plan and capability types**
+- [x] **Step 3: Define the exact plan and capability types**
 
 Implement these public shapes with strict enum JSON decoding and validation:
 
@@ -274,7 +274,7 @@ type CapabilitySnapshot struct {
 
 Canonical hashing must length-prefix schema version, engine digest, transfer limit, and every resource field in ordinal order. Validation requires contiguous ordinals, exactly one TARGET container, IMPORT*→KEEPER?→TARGET→EXPORT ordering, unique names, and exact CreateCallOrdinal mapping. The sole exception is an empty zero-transfer plan, which represents the mutually exclusive Engine-ping probe described by the authoritative sandbox design.
 
-- [ ] **Step 4: Implement the build-tagged authorization**
+- [x] **Step 4: Implement the build-tagged authorization**
 
 Place the factory behind:
 
@@ -293,7 +293,7 @@ type ProbeClaimStore interface {
 
 The in-memory ledger must CAS AUTHORIZED→DISPATCHING once, enforce run/attempt/owner/epoch/scope/plan identity, and expose a read-only claim snapshot for tests. It must never be compiled without cpgen_slice0_probe.
 
-- [ ] **Step 5: Run focused and full tests**
+- [x] **Step 5: Run focused and full tests**
 
 Run:
 
@@ -304,7 +304,7 @@ go test ./...
 
 Expected: PASS, including unknown enum rejection and deep-copy tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -332,7 +332,7 @@ git commit -m "phase1(slice-0): seal probe dispatch plans"
   - Doctor.Check(ctx) (StaticReport, error)
   - public cpgen doctor --json --engine-endpoint ... read-only command.
 
-- [ ] **Step 1: Write failing endpoint and environment-isolation tests**
+- [x] **Step 1: Write failing endpoint and environment-isolation tests**
 
 Cover this matrix:
 
@@ -349,7 +349,7 @@ tests := []struct{ goos, raw string; ok bool }{
 
 Set DOCKER_HOST and DOCKER_CONTEXT to hostile values, inject a client constructor spy, and assert only the explicit endpoint reaches client.WithHost.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -359,7 +359,7 @@ go test ./internal/adapter/sandbox/docker ./internal/cli -run "Test(ParseLocalEn
 
 Expected: FAIL because the docker adapter package does not exist.
 
-- [ ] **Step 3: Implement strict config and a narrow Engine interface**
+- [x] **Step 3: Implement strict config and a narrow Engine interface**
 
 Use:
 
@@ -384,11 +384,11 @@ type Engine interface {
 
 Construct the production client with client.New(client.WithHost(endpoint), client.WithAPIVersion("1.55")); do not pass client.FromEnv or client.WithAPIVersionFromEnv. Close idle connections through a Close method on the wrapper.
 
-- [ ] **Step 4: Implement static capability and engine identity checks**
+- [x] **Step 4: Implement static capability and engine identity checks**
 
 StaticReport must contain endpoint digest, daemon ID, server/API/OS/arch, cgroup/security options, the three inspected image IDs, and EngineIdentityDigest. It must reject non-Linux servers, missing/mismatched pinned images, protocol other than docker-direct-v2, or API below 1.40. Map connection failures to domain.PortFailure{Code: unavailable, Class: BLOCKED}; version/OS/image mismatch maps to incompatible.
 
-- [ ] **Step 5: Add a read-only doctor command**
+- [x] **Step 5: Add a read-only doctor command**
 
 The command accepts explicit flags and emits versioned JSON:
 
@@ -398,7 +398,7 @@ The command accepts explicit flags and emits versioned JSON:
 
 It must not create a container, call the probe factory, read ambient Docker variables, or write workflow state. Unknown/missing flags exit 2; unreachable Engine exits 10 with status BLOCKED; healthy exits 0.
 
-- [ ] **Step 6: Run focused and full tests**
+- [x] **Step 6: Run focused and full tests**
 
 Run:
 
@@ -410,7 +410,7 @@ go vet ./...
 
 Expected: PASS; fake Engine call log contains Ping, Version, Info, and three ImageInspect calls only.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 
@@ -441,7 +441,7 @@ git commit -m "phase1(slice-0): add explicit docker doctor"
   - transfer.Keep(ctx context.Context) error
   - a static cpgen-transfer binary with import, export, and keep subcommands.
 
-- [ ] **Step 1: Write failing traversal and protocol tests**
+- [x] **Step 1: Write failing traversal and protocol tests**
 
 Tests must create nested regular files and attempt traversal, absolute paths, symlinks, hardlinks, directories, FIFO/socket where supported, duplicate paths, declared-size underflow/overflow, and limit+1 payloads. The accepted path must be read from the exact file handle returned by securefs.OpenRegular.
 
@@ -465,7 +465,7 @@ type ExportPlan struct {
 
 Each frame is uint32 big-endian header length, strict JSON header, uint64 big-endian data length, then exactly Size bytes. A zero header length terminates the stream.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -475,15 +475,15 @@ go test ./internal/securefs ./internal/transfer ./cmd/cpgen-transfer
 
 Expected: FAIL because the packages do not exist.
 
-- [ ] **Step 3: Implement same-handle safe opening**
+- [x] **Step 3: Implement same-handle safe opening**
 
 Use os.OpenRoot. For every directory component compare parent.Lstat(component) with childRoot.Stat(".") using os.SameFile; reject a symlink mode before descending. For the final component compare Root.Lstat(path) with openedFile.Stat(), require Mode().IsRegular(), and require platform link count 1 when requested. Continue reading only from the opened handle.
 
-- [ ] **Step 4: Implement import/export/keeper**
+- [x] **Step 4: Implement import/export/keeper**
 
 Import creates only declared directories below the opened root, uses O_CREATE|O_EXCL, writes exactly Size bytes, fsyncs, chmods 0444, and rejects trailing frames. Export opens only planned paths, checks link count/type/size, writes through the same handle, and enforces file plus aggregate limits before the terminating frame. Keep waits for SIGTERM/SIGINT without opening any path.
 
-- [ ] **Step 5: Run tests and build a static Linux helper**
+- [x] **Step 5: Run tests and build a static Linux helper**
 
 Run:
 
@@ -498,7 +498,7 @@ Remove-Item Env:CGO_ENABLED,Env:GOOS,Env:GOARCH
 
 Expected: tests PASS and the Linux binary builds without cgo.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -527,7 +527,7 @@ git commit -m "phase1(slice-0): add trusted volume transfer helper"
   - Lock.Validate() error
   - a trusted image-lock command that writes a complete lock atomically after three successful digest builds.
 
-- [ ] **Step 1: Write failing strict-lock tests**
+- [x] **Step 1: Write failing strict-lock tests**
 
 Use a known-good JSON fixture and reject unknown fields, floating tags, uppercase/malformed digests, duplicate toolchain IDs, testlib hash mismatch, protocol mismatch, and missing compiler flags.
 
@@ -543,7 +543,7 @@ type Lock struct {
 }
 ~~~
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -553,7 +553,7 @@ go test ./internal/toolchain ./cmd/cpgen-image-lock
 
 Expected: FAIL because the manifest package does not exist.
 
-- [ ] **Step 3: Vendor the exact testlib source**
+- [x] **Step 3: Vendor the exact testlib source**
 
 Fetch commit 1e4e8a24c79c6bad3becbdb5a332ffc352b7d5dd and verify:
 
@@ -564,7 +564,7 @@ testlib VERSION = 0.9.45
 
 NOTICE must record the upstream repository, commit, file hash, version, and upstream permissive notice. Treat the fetched header as a mechanical vendored asset; never edit its contents.
 
-- [ ] **Step 4: Implement reproducible Dockerfiles**
+- [x] **Step 4: Implement reproducible Dockerfiles**
 
 Builder base:
 
@@ -607,11 +607,11 @@ build
 
 with GO111MODULE=off, GOPROXY=off, GOSUMDB=off, CGO_ENABLED=0.
 
-- [ ] **Step 5: Implement image-lock generation**
+- [x] **Step 5: Implement image-lock generation**
 
 The command checks that both pinned base refs already exist locally, then runs docker build --pull=false --iidfile for builder, runtime, and transfer. It validates each iid as sha256:<64 lowercase hex>, inspects labels, and writes config/toolchains/docker-v1.lock.json through create-temp → fsync → rename. It must remove the temp file on any failed build and never emit a partial lock.
 
-- [ ] **Step 6: Pull the exact bases, build, and generate the lock**
+- [x] **Step 6: Pull the exact bases, build, and generate the lock**
 
 Run:
 
@@ -623,7 +623,7 @@ go run ./cmd/cpgen-image-lock --output config/toolchains/docker-v1.lock.json
 
 Expected: the lock contains three distinct sha256 image IDs and exact toolchain/testlib metadata; no floating image tag is used by runtime config.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 Run:
 
@@ -652,7 +652,7 @@ git commit -m "phase1(slice-0): pin sandbox images and toolchains"
   - TargetCreateOptions(...) (client.ContainerCreateOptions, error)
   - VerifyTargetInspect(expected, client.ContainerInspectResult) error.
 
-- [ ] **Step 1: Write failing exact-spec tests**
+- [x] **Step 1: Write failing exact-spec tests**
 
 Assert the target options contain:
 
@@ -674,7 +674,7 @@ want := TargetSecurity{
 
 Also assert fixed LANG=C.UTF-8, TZ=UTC, HOME/TMPDIR under /work; WorkingDir=/work; ShmSize, ulimits, tmpfs, NoCopy volumes; no bind mount, device, privileged, host namespace, inherited environment, shell, or image from the request.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -684,21 +684,21 @@ go test ./internal/adapter/sandbox/docker -run "Test(Build.*Plan|TargetCreateOpt
 
 Expected: FAIL because plan/spec functions do not exist.
 
-- [ ] **Step 3: Extend the Engine interface only for required calls**
+- [x] **Step 3: Extend the Engine interface only for required calls**
 
 Add typed Moby v0.5.1 methods for ContainerCreate/Start/Attach/Wait/Inspect/Stop/Kill/Remove, VolumeCreate/Inspect/Remove, Events, and ImageInspect. Keep the interface local to the adapter so unit tests use a deterministic fake Engine.
 
-- [ ] **Step 4: Implement plans and immutable create options**
+- [x] **Step 4: Implement plans and immutable create options**
 
 Compile plans are IMPORT*→KEEPER→TARGET→EXPORT because the program artifact is declared output. Run plans without file outputs are IMPORT*→TARGET; with outputs they are IMPORT*→KEEPER→TARGET→EXPORT. Names derive from random operation nonce plus ordinal; labels contain run, attempt, logical operation, call, lease epoch, role, plan digest, and engine digest.
 
 Target command is an argument array selected from the lock; Run always starts /program/main directly. Compile starts the locked compiler directly. The request cannot inject a command, environment, image, mount, capability, network, or compiler flag.
 
-- [ ] **Step 5: Implement post-create inspect verification**
+- [x] **Step 5: Implement post-create inspect verification**
 
 Before Start, compare exact image ID, user, entrypoint/cmd, read-only root, security options, capabilities, resource limits, network mode, log config, restart policy, AutoRemove, and every mount destination/type/read-only/NoCopy property. Any unexpected image Config.Volumes or writable mount fails closed and triggers cleanup.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 Run:
 
@@ -721,7 +721,7 @@ git commit -m "phase1(slice-0): lock docker resource plans"
 - Consumes: port.VerifiedBlobReader, port.MeteredArtifactSink, sealed grants, trusted transfer image.
 - Produces: docker.Runner implementing port.DockerSandbox with transfer-safe Compile/Run scaffolding.
 
-- [ ] **Step 1: Write failing plan-dispatch and blob-integrity tests**
+- [x] **Step 1: Write failing plan-dispatch and blob-integrity tests**
 
 Use a fake Engine, fake VerifiedBlobReader, and fake ArtifactSink to assert:
 
@@ -732,7 +732,7 @@ Use a fake Engine, fake VerifiedBlobReader, and fake ArtifactSink to assert:
 - export PendingArtifact.CallID is the export grant call;
 - failure releases unconsumed claims/tokens and removes only matching planned resources.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -742,7 +742,7 @@ go test -tags=cpgen_slice0_probe ./internal/adapter/sandbox/docker -run "Test(Ve
 
 Expected: FAIL because Runner and transfer lifecycle do not exist.
 
-- [ ] **Step 3: Implement Runner dependencies and call-trace assembly**
+- [x] **Step 3: Implement Runner dependencies and call-trace assembly**
 
 ~~~go
 type Runner struct {
@@ -758,7 +758,7 @@ type Runner struct {
 
 Runner recomputes plan and engine identity, validates the authorization copy, opens all input blobs, prepares all declared artifact writers, and only then begins resource creation. PhysicalAttemptCallIDs are appended only after the associated Engine dispatch begins; ResultAttemptCallID is target unless an import/keeper/export failure determines the result.
 
-- [ ] **Step 4: Implement volume lifecycle**
+- [x] **Step 4: Implement volume lifecycle**
 
 Readonly payload uses ordinary named volumes populated by the trusted import container. Declared output uses local-driver tmpfs:
 
@@ -770,11 +770,11 @@ o=size=<sum>,uid=65532,gid=65532,nosuid,nodev,noexec
 
 Start keeper before target and retain it through export. Export mounts output read-only, sends the exact ExportPlan, and streams frames into predeclared artifact writers. Persist the returned PendingArtifact values in the result before keeper/volume removal.
 
-- [ ] **Step 5: Add strict cleanup ownership**
+- [x] **Step 5: Add strict cleanup ownership**
 
 Remove by persisted ID or deterministic name only after engine identity and exact labels match. A name collision with different labels is an error, never a deletion target. Cleanup uses a fresh bounded context derived from context.Background().
 
-- [ ] **Step 6: Run focused and full tests**
+- [x] **Step 6: Run focused and full tests**
 
 Run:
 
@@ -785,7 +785,7 @@ go test ./...
 
 Expected: PASS; fake Engine call logs prove claim/open/create/start/stop/export order.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 
@@ -811,7 +811,7 @@ git commit -m "phase1(slice-0): add verified docker transfer lifecycle"
   - classifyProcess(Evidence) (domain.ProcessOutcome, error)
   - Runner Compile/Run complete implementations.
 
-- [ ] **Step 1: Write failing outcome-priority tests**
+- [x] **Step 1: Write failing outcome-priority tests**
 
 Cover the documented order:
 
@@ -833,7 +833,7 @@ tests := []struct{
 
 Add tests for each ExecutionCause racing TLE/OOM/exit; the result must be domain.ExecutionInterrupted, never a late ProcessOutcome.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -843,23 +843,23 @@ go test ./internal/adapter/sandbox/docker -run "Test(ProcessOutcomePriority|Exec
 
 Expected: FAIL because evidence/process/cleanup units do not exist.
 
-- [ ] **Step 3: Implement attach and limit+1 accounting**
+- [x] **Step 3: Implement attach and limit+1 accounting**
 
 Attach before Start with Tty=false, stdout/stderr selected, stdin only when declared. Demultiplex with Moby stdcopy. Keep separate counters; when either reads limit+1, set OLE evidence, trigger Stop/Kill, and continue drain/discard until the attach stream closes. Never rely on daemon json-file logs.
 
-- [ ] **Step 4: Implement authoritative timing and OOM evidence**
+- [x] **Step 4: Implement authoritative timing and OOM evidence**
 
 Record start_boundary immediately before ContainerStart, arm the program timer from that boundary, subscribe to OOM/die events first, and reconcile Start/Wait/Inspect. For mvp-v2, only target OOM events or State.OOMKilled prove MLE. Unknown Start or contradictory evidence becomes INFRA_ERROR/UNKNOWN evidence, not TLE.
 
-- [ ] **Step 5: Implement portable stop proof**
+- [x] **Step 5: Implement portable stop proof**
 
 Use SIGTERM with fixed grace, SIGKILL, Wait(NotRunning), then Inspect. A stopped proof is Wait success, exact-ID Inspect Running=false/Pid=0, or NotFound plus a terminal Create claim and watchdog final scan. Never return CANCELLED/BLOCKED/READY while target stop is unproven.
 
-- [ ] **Step 6: Produce immutable execution records**
+- [x] **Step 6: Produce immutable execution records**
 
 Store protocol, started, outcome, raw exit/signal evidence, wall time, optional CPU/RSS, profile, byte counts, truncation flags, OOM flag, engine/plan/call identities. Target containers have no writable mount or writer token for this record.
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 Run:
 
@@ -890,7 +890,7 @@ git commit -m "phase1(slice-0): classify bounded docker processes"
   - Session.PreCreate/ResourceCreated/TargetPhase/Stopped/Cleaned acknowledgements
   - hidden cpgen sandbox-watchdog --control <owner-only-path>.
 
-- [ ] **Step 1: Write failing protocol, ACL, and late-create tests**
+- [x] **Step 1: Write failing protocol, ACL, and late-create tests**
 
 ControlRecord must contain:
 
@@ -908,7 +908,7 @@ type ControlRecord struct {
 
 Test invalid token/digest, widened plan, mismatched labels, deadline expiry, Create returning after deadline, owner EOF, watchdog EOF, and same-name foreign resource. Foreign resources must be reported and never removed.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -918,19 +918,19 @@ go test -tags=cpgen_slice0_probe ./internal/watchdog ./internal/adapter/sandbox/
 
 Expected: FAIL because watchdog packages do not exist.
 
-- [ ] **Step 3: Implement owner-only platform IPC**
+- [x] **Step 3: Implement owner-only platform IPC**
 
 Windows uses a random npipe path and go-winio PipeConfig SecurityDescriptor restricted to the current user SID plus SYSTEM. Unix uses a 0700 control directory, 0600 record, Unix socket, and detached process group. The token exists only in the owner-only control record/channel; logs, artifacts, labels, and containers receive only its digest.
 
-- [ ] **Step 4: Implement detached reconcile**
+- [x] **Step 4: Implement detached reconcile**
 
 Before any Create, the watchdog validates the full immutable plan, subscribes to Docker events, lists the plan names/labels, and ACKs. Each resource requires PRECREATE ACK then resource-ID ACK before Start. At the monotonic deadline or owner EOF, repeatedly Stop/Kill matching containers and reconcile names/labels until all create claims are terminal, no matching running resource remains, and the harness reports CLEANED.
 
-- [ ] **Step 5: Wire the hidden CLI command**
+- [x] **Step 5: Wire the hidden CLI command**
 
 The command is absent from help, requires an absolute owner-only control path, does not accept Docker flags/image/mount/command input, and delegates only to watchdog.Service. Normal cpgen users still cannot construct a probe authorization.
 
-- [ ] **Step 6: Run child-process tests**
+- [x] **Step 6: Run child-process tests**
 
 Run:
 
@@ -940,7 +940,7 @@ go test -tags=cpgen_slice0_probe ./internal/watchdog ./internal/adapter/sandbox/
 
 Expected: PASS; child owner termination leaves watchdog alive until the labeled target is stopped.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 
@@ -965,11 +965,11 @@ git commit -m "phase1(slice-0): add detached sandbox watchdog"
   - Harness.Probe(ctx, profile) (port.DockerProbeResult, error)
   - a versioned CapabilitySnapshot with a complete CallTrace.
 
-- [ ] **Step 1: Write failing fake-engine canary aggregation tests**
+- [x] **Step 1: Write failing fake-engine canary aggregation tests**
 
 Assert Engine ping has exactly one DOCKER_ENGINE_PING claim and no sandbox-run claim. Container canaries have no ping row and one claim per ContainerCreate. Missing, duplicate, or out-of-order claims fail before Engine dispatch. A failed mandatory canary yields capability_missing and BLOCKED, not a partial healthy snapshot.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -979,7 +979,7 @@ go test -tags=cpgen_slice0_probe ./internal/probe -run "Test(Capability|Probe)"
 
 Expected: FAIL because Harness and canary aggregation do not exist.
 
-- [ ] **Step 3: Implement compile and mvp execute canaries**
+- [x] **Step 3: Implement compile and mvp execute canaries**
 
 The Docker integration test must prove:
 
@@ -994,11 +994,11 @@ The Docker integration test must prove:
 
 Release canary on Docker Desktop must return INCOMPATIBLE/BLOCKED with explicit release-cgroup evidence; it must not pretend release-v2 passed.
 
-- [ ] **Step 4: Add Docker-unavailable classification**
+- [x] **Step 4: Add Docker-unavailable classification**
 
 Inject a failing Engine and also test an unused local pipe/socket. Probe returns domain.PortFailure{Code: unavailable, Class: BLOCKED}, a valid NO_DISPATCH or dispatched ping trace as appropriate, and creates no formal run/READY state.
 
-- [ ] **Step 5: Run the real canary**
+- [x] **Step 5: Run the real canary**
 
 Run:
 
@@ -1008,7 +1008,7 @@ go test -tags=cpgen_slice0_probe ./internal/probe -run TestSlice0DockerCapabilit
 
 Expected on this host: compile-v2 and execute-mvp-v2 HEALTHY; execute-release-v2 explicitly BLOCKED because Docker Desktop is not an allowlisted rootful Linux release Engine.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -1034,7 +1034,7 @@ git commit -m "phase1(slice-0): verify docker capability profile"
 - Consumes: Harness.Compile/Run, role adapters, trusted fixture blobs.
 - Produces: Harness.RunVertical(ctx) (VerticalReport, error).
 
-- [ ] **Step 1: Write failing deterministic fixture and route tests**
+- [x] **Step 1: Write failing deterministic fixture and route tests**
 
 The sources implement:
 
@@ -1049,7 +1049,7 @@ Validator accepts exactly two integers in [-1000000000, 1000000000] and EOF. Che
 
 Test valid/invalid, AC/WA/PE-or-DIRT, validator unknown, checker FAIL/unknown, solution nonzero/signal, TLE, MLE, OLE, and differential agreement.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -1059,15 +1059,15 @@ go test -tags=cpgen_slice0_probe ./internal/fixture/ab ./internal/probe -run "Te
 
 Expected: FAIL because fixtures and vertical harness do not exist.
 
-- [ ] **Step 3: Implement fixture blob loading and canonical bundle digests**
+- [x] **Step 3: Implement fixture blob loading and canonical bundle digests**
 
 Embed only repository-controlled fixture bytes, insert them through ProbeArtifactSink, and build SourceBundleManifest with canonical sorted path/blob digest. Never pass a host path or archive into Runner.
 
-- [ ] **Step 4: Implement the vertical sequence**
+- [x] **Step 4: Implement the vertical sequence**
 
 Compile reference, brute, validator, checker, generator; validate legal and illegal input; generate fixed small inputs; run reference and brute; run checker for both; compare through CheckerOutcome rather than raw strings. Every call returns and validates a CallTrace. A Docker infrastructure failure yields a typed blocked report; content failure yields a failed probe report.
 
-- [ ] **Step 5: Run the real vertical probe**
+- [x] **Step 5: Run the real vertical probe**
 
 Run:
 
@@ -1077,7 +1077,7 @@ go test -tags=cpgen_slice0_probe ./internal/probe -run TestSlice0ABVertical -cou
 
 Expected: compile → validate → differential sequence PASS with deterministic artifact digests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Run:
 
@@ -1107,11 +1107,11 @@ git commit -m "phase1(slice-0): add fixed vertical judge probe"
   - packageprobe.Import(ctx, root, Limits, sink) (VerifiedProblem, []PendingArtifact, error)
   - Harness.RunVertical returns StructuralPackageReport.
 
-- [ ] **Step 1: Write failing structural and attack tests**
+- [x] **Step 1: Write failing structural and attack tests**
 
 Cover path traversal, backslash/drive/NUL/control chars, NFC and case-fold collisions, link/special file, missing/extra file, hash/size tampering, duplicate test IDs, input without answer, unknown Schema fields, wrong package ID, manifest self-entry, total/file count limits, and concurrent replacement. The reverse reader must consume the same opened handles or freshly verified imported Blobs, never the observed path after import.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -1121,7 +1121,7 @@ go test ./internal/packageprobe
 
 Expected: FAIL because packageprobe does not exist.
 
-- [ ] **Step 3: Implement strict minimal package models**
+- [x] **Step 3: Implement strict minimal package models**
 
 Use schema_version cpgen.package/v1. The model includes manifest, statement/samples, reference/brute, validator/checker/generator, at least one .in/.ans pair, package-safe similarity report, synthetic prepackage report, provenance, toolchain manifest digest, and file entries. JSON decoding uses DisallowUnknownFields.
 
@@ -1134,17 +1134,17 @@ go get golang.org/x/text@v0.29.0
 go mod tidy
 ~~~
 
-- [ ] **Step 4: Implement safe build and read**
+- [x] **Step 4: Implement safe build and read**
 
 Builder writes only predeclared SafeRelPath files beneath an os.Root with O_CREATE|O_EXCL, calculates every digest/size, then writes manifest last. Reader walks with hard file/byte limits, rejects undeclared entries and all links/special files, verifies through same handles, and reconstructs VerifiedProblem.
 
 Import prepares fixed ProbeArtifactSink declarations first, streams each verified same-handle file, validates PendingArtifact producer metadata, and reverse-reads only OpenVerified Blobs.
 
-- [ ] **Step 5: Prove Slice 0 cannot create formal verification state**
+- [x] **Step 5: Prove Slice 0 cannot create formal verification state**
 
 Keep PackageVerificationReceipt, READY, SQLite repository, and package occurrence types out of packageprobe and internal/probe. Add a source-level test that rejects imports of future persistence/workflow packages and asserts the report kind is PROBE_STRUCTURAL_ONLY.
 
-- [ ] **Step 6: Run package and vertical tests**
+- [x] **Step 6: Run package and vertical tests**
 
 Run:
 
@@ -1155,7 +1155,7 @@ go test -tags=cpgen_slice0_probe ./internal/probe -run TestSlice0ABVertical -cou
 
 Expected: StructuralGate PASS and stable package ID; tamper fixtures fail.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 
@@ -1176,7 +1176,7 @@ git commit -m "phase1(slice-0): add structural probe package"
 - Consumes: all Slice 0 tests and real Docker evidence.
 - Produces: requirement-by-requirement evidence and the user-requested Slice 0 completion commit.
 
-- [ ] **Step 1: Run formatting and static checks**
+- [x] **Step 1: Run formatting and static checks**
 
 Run:
 
@@ -1190,7 +1190,7 @@ go test -race ./...
 
 Expected: no gofmt output; all commands PASS.
 
-- [ ] **Step 2: Run fresh Docker verification**
+- [x] **Step 2: Run fresh Docker verification**
 
 Run:
 
@@ -1202,7 +1202,7 @@ go test -tags=cpgen_slice0_probe ./internal/probe -run "TestSlice0(DockerCapabil
 
 Expected: mvp capability and vertical probe PASS; release capability is an explicit typed BLOCKED on Docker Desktop, not an omitted or false PASS.
 
-- [ ] **Step 3: Prove security and cleanup evidence**
+- [x] **Step 3: Prove security and cleanup evidence**
 
 Inspect test logs/results and Docker by the cpgen Slice 0 labels:
 
@@ -1213,11 +1213,11 @@ docker volume ls --filter "label=org.cpgen.slice=0"
 
 Expected: no running/stopped probe containers and no leftover volumes. The evidence document records direct PID 1, UID, limits/no-swap, mount/network/socket/secret tests, OLE stop, OOM, keeper/export, watchdog/late-create, claim counts, CallTrace, package ID, and cleanup result.
 
-- [ ] **Step 4: Update the tracking documents only from proven evidence**
+- [x] **Step 4: Update the tracking documents only from proven evidence**
 
 Mark every proven Slice 0 tracking item and exit condition complete. Keep any unproven requirement unchecked and continue implementation instead of claiming Slice 0 complete. README must say Slice 0 complete and point to Slice 1 only after all required evidence exists.
 
-- [ ] **Step 5: Check the implementation plan itself**
+- [x] **Step 5: Check the implementation plan itself**
 
 Mark every completed checkbox in this plan. Scan:
 
@@ -1230,7 +1230,7 @@ git diff --check
 
 Expected: no plan placeholders after filtering the literal scan command and TODO.md filenames.
 
-- [ ] **Step 6: Create the Slice 0 checkpoint commit**
+- [x] **Step 6: Create the Slice 0 checkpoint commit**
 
 Run:
 

@@ -7,7 +7,7 @@
 - 产品计划：已形成 MVP 范围。
 - 系统架构：v1.0 已冻结，最新审查的 P0/P1/P2/P3 均已闭环。
 - 详细设计：已覆盖工作流、LLM/Prompt、状态恢复、预算、存储、DockerSandbox、Judge、TestPlan/数据流水线、Similarity、配置、题包、CLI 和测试。
-- 实现：Slice 0 进行中；Go 工程骨架、领域 outcome、公共端口契约、Fake adapters、testlib role adapter 和 ADR-0003 固定向量已落地。
+- 实现：Slice 0 已完成；显式本机 Docker 执行基座、固定镜像/toolchain、detached watchdog、A+B 纵向探针和结构包探针均已通过验证。逐项证据见 [Slice 0 验证记录](./docs/evidence/slice0-verification.md)。
 
 ## 核心技术决策
 
@@ -39,4 +39,4 @@
 
 ## 下一步
 
-继续 [Slice 0](./docs/implementation-plan.md#2-slice-0纵向技术探针)：实现本机 Docker endpoint 校验、`docker-direct-v2` Runner、固定镜像/toolchain manifest 和 A+B 纵向探针，不接真实 LLM。
+进入 [Slice 1](./docs/implementation-plan.md#3-slice-1可恢复骨架)：实现 SQLite 状态机、租约/围栏、预算/制品计量和崩溃恢复协议。
