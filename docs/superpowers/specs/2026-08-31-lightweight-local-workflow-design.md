@@ -1,12 +1,14 @@
 # Lightweight Local Workflow Design
 
-Status: approved direction; awaiting written-spec review
+Status: Accepted
 
 Date: 2026-08-31
 
 ## 1. Decision
 
 Phase 1 uses one foreground Go CLI executor per run on a single host, a local SQLite database, private content-addressed artifact storage, and the existing detached Docker watchdog. Different runs may use separate CLI processes concurrently. It does not require Temporal, LangGraph, AutoGen, CrewAI, a daemon, a task queue, or any other workflow-hosting service.
+
+The normative contract is: one foreground executor per run, a per-run process lock, a fixed pipeline, and no workflow-hosting service.
 
 The workflow is a fixed, statically assembled CPGen pipeline. SQLite persists the current run and stage projection for audit and restart; it is not an event-sourced general workflow engine. Restart recovery reruns or reconciles the current domain stage under a local process lock. The design does not attempt distributed ownership, generic DAG scheduling, or exactly-once execution across external systems.
 
