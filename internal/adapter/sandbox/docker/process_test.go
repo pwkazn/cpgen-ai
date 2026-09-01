@@ -41,8 +41,8 @@ func TestExecutionCauseRaceAlwaysReturnsInterrupted(t *testing.T) {
 		{Started: true, EvidenceComplete: true, Stopped: true, ExitCode: &zero},
 	}
 	causes := []domain.ExecutionCause{
-		domain.CauseUserCancel, domain.CauseQuiesce, domain.CauseRevisionInvalidated,
-		domain.CauseLeaseLost, domain.CauseStepDeadline, domain.CauseRunBudgetDeadline,
+		domain.CauseUserCancel, domain.CauseRevisionInvalidated, domain.CauseStepDeadline,
+		domain.CauseRunBudgetDeadline,
 	}
 	for _, cause := range causes {
 		for _, evidence := range evidenceCases {

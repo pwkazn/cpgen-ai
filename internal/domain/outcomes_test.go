@@ -22,6 +22,16 @@ func TestDomainEnumsRejectUnknownJSONValues(t *testing.T) {
 	}
 }
 
+func TestExecutionCauseRejectsObsoleteOwnershipModes(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{`"quiesce"`, `"lease_lost"`} {
+		var cause domain.ExecutionCause
+		if err := json.Unmarshal([]byte(raw), &cause); err == nil {
+			t.Fatalf("obsolete execution cause %s was accepted", raw)
+		}
+	}
+}
+
 func TestDomainEnumsAcceptKnownJSONValues(t *testing.T) {
 	t.Parallel()
 	var outcome domain.ProcessOutcome

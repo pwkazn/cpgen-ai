@@ -65,3 +65,17 @@ func TestSchemaVersionAndIDValidation(t *testing.T) {
 		t.Fatalf("generated id is invalid: %v", err)
 	}
 }
+
+// TestWorkflowIDsRejectMalformedJSON catches a future lifecycle record gaining
+// an identifier that can bypass the common strict lowercase-prefixed ID rule.
+func TestWorkflowIDsRejectMalformedJSON(t *testing.T) {
+	t.Parallel()
+	for _, target := range []any{
+		new(domain.ReviewDecisionID), new(domain.ControlRequestID), new(domain.CallRecordID),
+		new(domain.ArtifactDeclarationID), new(domain.ArtifactOccurrenceID), new(domain.CacheReuseRecordID),
+	} {
+		if err := json.Unmarshal([]byte(`"not-an-id"`), target); err == nil {
+			t.Fatalf("%T accepted malformed JSON ID", target)
+		}
+	}
+}

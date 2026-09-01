@@ -113,16 +113,14 @@ type ExecutionCause string
 
 const (
 	CauseUserCancel          ExecutionCause = "user_cancel"
-	CauseQuiesce             ExecutionCause = "quiesce"
 	CauseRevisionInvalidated ExecutionCause = "revision_invalidated"
-	CauseLeaseLost           ExecutionCause = "lease_lost"
 	CauseStepDeadline        ExecutionCause = "step_deadline"
 	CauseRunBudgetDeadline   ExecutionCause = "run_budget_deadline"
 )
 
 func (v ExecutionCause) Valid() bool {
 	switch v {
-	case CauseUserCancel, CauseQuiesce, CauseRevisionInvalidated, CauseLeaseLost, CauseStepDeadline, CauseRunBudgetDeadline:
+	case CauseUserCancel, CauseRevisionInvalidated, CauseStepDeadline, CauseRunBudgetDeadline:
 		return true
 	default:
 		return false
