@@ -34,7 +34,7 @@ Different runs may execute concurrently in separate CLI processes. A single run 
 
 ## 3. System context
 
-The user interacts only with the cpgen CLI. Stateful commands load configuration, open and migrate SQLite, acquire the shared artifact-usage lock and the run-specific execution lock, reconcile unfinished sandbox resources for that run, perform one command, and exit.
+The user interacts only with the cpgen CLI. Ordinary stateful run commands load configuration, open and migrate SQLite, acquire the shared artifact-usage lock and the run-specific execution lock, reconcile unfinished sandbox resources for that run, perform one command, and exit. GC is an explicit maintenance command: it acquires the exclusive global artifact lock, takes no per-run lock, and never executes a run stage.
 
 External dependencies are limited to explicitly configured model and similarity providers plus the local Docker Engine. Adapters normalize provider results into typed domain outcomes. Ordinary tests use deterministic Fake adapters; real-service smoke tests are opt-in.
 
