@@ -48,24 +48,3 @@
 | Package/Export | [package.md](./design/package.md) |
 | Slice 0 夹具 | [testing.md](./design/testing.md#2-slice-0-固定夹具) |
 | CLI/E2E | [cli.md](./design/cli.md)、[testing.md](./design/testing.md#9-packagecli-测试) |
-## JSON Demo 可执行追踪
-
-以下各行仅标记当前 `codex/cpgen-json-demo` checkout 已有可执行证据的能力；未出现在本表中的 MVP 行仍按原设计文档推进，不应从本 demo 推断为已实现。
-
-| Demo 行 | 对应需求/约束 | 当前可执行证据 | 本 demo 未覆盖部分 |
-|---|---|---|---|
-| D01 | F01 接收出题请求 | `cpgen generate --request ...` 严格读取 JSON；`cpgen show --task-id ...` 回读任务快照；`internal/domain` 与 `cmd/cpgen` 测试覆盖未知字段拒绝和单 JSON envelope 输出。 | manual/random 多入口、配置快照审计仍未做。 |
-| D02 | F02/F03 创意与结构化题面 | `Generate` 顺序执行 `idea -> statement`，并把 typed 结果写入 `steps/` 与 `checkpoints/`；`--offline` 用 fake LLM 复现实例。 | 多候选排序、revision 链、正式 Sample Gate 不在本 demo。 |
-| D03 | F04 语义查重 | `internal/similarity` 提供真实 `POST /api/search` adapter，`--offline` 提供 fake adapter；分数 `>= 0.85` 会把任务置为 `NEEDS_REVIEW`。 | 两级缓存、完整 evidence/provenance 与 release 健康探测不在本 demo。 |
-| D04 | F05/F06/F07 解法、数据与自动判题 | `solution`/`data` step 生成 `reference.cpp`、`brute.cpp`、`generator.cpp`、`validator.cpp` 和固定测试；`verify.DifferentialRunner` 通过 Docker 编译并按输入逐例对拍。 | 复杂度证据、正式 validator gate、SPJ 和正式数据提升不在本 demo。 |
-| D05 | F08 质量门禁 | 任务状态机实际可落 `READY`、`BLOCKED`、`NEEDS_REVIEW`、`FAILED`；workflow 测试覆盖依赖故障、高相似度和对拍失败分类。 | 完整 revision evidence、waive/reject 审核流和不可豁免门禁矩阵不在本 demo。 |
-| D06 | F09 题目包导出 | `packager.Build` 生成 `output/<task-id>/` 与 `output/<task-id>.zip`，包内固定包含 `manifest.json`、题面、源码、测试和报告；路径安全、重复 ID、防覆盖由 `internal/packager` 测试覆盖。 | Polygon 导出、reverse reader、occurrence 分层审计不在本 demo。 |
-| D07 | F10 缓存与恢复 | 当前 demo 的任务事实来源是 `tasks/<task-id>/task.json`、`request.json`、`steps/*.json` 与 `checkpoints/*.json`，原子 temp-file + rename 写入可由 `cpgen show` 回读。 | SQLite 单写者事务、lease、ABANDONED/retry/recovery intent 不在本 demo。 |
-| D08 | Go-first / Docker-only / 外部服务可替换 | 代码路径保持 Go-only；`--offline` 仅替换 LLM/Similarity，Docker 仍为真实固定镜像 `gcc:14.2.0-bookworm`，且无 host compiler fallback；真实/假适配器都通过端口装配。 | release 级 Docker capability probe、真实凭据 smoke 和 Polygon contract fixture 不在本 demo。 |
-
-## Demo 明确排除项
-
-- SQLite 持久化、单写者事务和相关审计语义仍属于冻结架构目标，不属于本次 JSON task demo。
-- worker lease、后台恢复、`ABANDONED` 收敛和完整审核命令流未进入当前 runnable slice。
-- Polygon 导出、固定 Polygon contract fixture 和 OJ 发布链路仍在范围外；当前仅验证 internal package v1。
-- 当前 Docker 对拍只验证标程与暴力程序的功能输出；尚未采集可权威判定的 CPU time。因此它不能通过 Resource Gate、不能证明题面时限，也不能把 wall-clock timeout 当作正式 CPU-TLE。
