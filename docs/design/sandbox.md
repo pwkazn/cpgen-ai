@@ -6,6 +6,12 @@
 
 MVP 连接本机 Docker Engine：Windows 使用 Docker Desktop/WSL2，Linux 使用 Docker Engine。不存在 host process fallback。`cpgen sandbox-watchdog` 是同一 Go 二进制的脱离式安全子进程，不执行题目内容，只在 owner 消失后按持久化 `watchdog_safety_deadline` 收敛已标记 Docker 资源；它不是调度服务或本地进程执行后端。
 
+### 1.1 CPU 时间 TLE 的验证要求
+
+题解验证中的 TLE 是正确性/资源门禁的一部分，正式 `Resource Gate` 必须能够以选定 profile 的权威证据判定目标程序是否超过 `CPUTimeLimit`；`--cpus` 只限制容器可获得的 CPU 配额，不能替代累计 CPU 时间的测量。wall-clock deadline 始终保留，用于停止死循环、Docker/Engine 卡住和清理失控，但单独命中它只证明安全超时，不能证明程序已超过题目 CPU 时限。
+
+过渡期的 `mvp-v2` 可以继续执行编译、样例和标程/暴力程序的功能性对拍；若 `cpu_time_ms` 不可权威判定，运行记录必须写为 `null`，且不得把该执行作为通过 Resource Gate 或证明题目时限的证据。此时 Resource Gate 应为 `BLOCKED(capability_missing=cpu_time_measurement)`，而不是用 wall time 伪造 CPU-TLE。只有具备并通过 CPU-time capability canary 的 release profile 才能产生可用于最终验证的 TLE 证据。
+
 ## 2. 启动能力检查
 
 Runner 启动时只做不创建容器的静态检查（Engine ping/version/OS、镜像 digest、显式配置）。首次 run 需要某 profile、缓存 TTL/Engine identity 失效或 BLOCKED resume 时，由该 run 的 `MeteredDependencyProber` 执行版本化 canary 并缓存下面的 CapabilitySnapshot：
