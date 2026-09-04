@@ -68,11 +68,13 @@ func TestLifecycleValuesValidatePersistentInvariants(t *testing.T) {
 	runID := domain.RunID("run_0123456789abcdef0123456789abcdef")
 	request := domain.CreateRunRequest{
 		RunID:                         runID,
-		SubmittedRequestJSON:          []byte(`{"schema":"cpgen.request/v1"}`),
-		SubmittedRequestDigest:        domain.SumBytes([]byte(`{"schema":"cpgen.request/v1"}`)),
+		SubmittedRequestJSON:          []byte(`{"schema_version":"cpgen.request/v1"}`),
+		SubmittedRequestDigest:        domain.SumBytes([]byte(`{"schema_version":"cpgen.request/v1"}`)),
 		EffectiveSeed:                 1,
 		RedactedEffectiveConfigJSON:   []byte(`{"schema":"cpgen.config/v1"}`),
 		RedactedEffectiveConfigDigest: domain.SumBytes([]byte(`{"schema":"cpgen.config/v1"}`)),
+		WorkflowRevision:              "slice1/v1",
+		SchemaVersion:                 "cpgen.request/v1",
 		WorkflowDigest:                digest,
 		BudgetLimits:                  domain.BudgetLimits{MaxLLMCalls: 1, MaxActiveTimeMilliseconds: 1},
 		StageSequence:                 []domain.StageName{"idea"},
@@ -136,6 +138,7 @@ func TestLifecycleStateFieldMatrices(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	digest := domain.SumBytes([]byte("state matrix"))
+	nonWaivable := false
 	runID := domain.RunID("run_0123456789abcdef0123456789abcdef")
 	attemptID := domain.AttemptID("attempt_0123456789abcdef0123456789abcdef")
 	for _, tc := range []struct {
@@ -147,7 +150,7 @@ func TestLifecycleStateFieldMatrices(t *testing.T) {
 		{"running", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageRunning, Version: 1, InputDigest: digest, AttemptCount: 1, CurrentAttemptID: &attemptID, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
 		{"succeeded", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageSucceeded, Version: 1, InputDigest: digest, OutputDigest: &digest, AttemptCount: 1, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
 		{"blocked", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageBlocked, Version: 1, InputDigest: digest, AttemptCount: 1, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
-		{"needs review", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageNeedsReview, Version: 1, InputDigest: digest, AttemptCount: 1, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
+		{"needs review", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageNeedsReview, Version: 1, InputDigest: digest, AttemptCount: 1, ReviewEvidenceDigest: &digest, ReviewPolicyDigest: &digest, ReviewWaivable: &nonWaivable, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
 		{"failed", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageFailed, Version: 1, InputDigest: digest, AttemptCount: 1, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
 		{"cancelled before first attempt", true, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StageCancelled, Version: 1, InputDigest: digest, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
 		{"pending rejects current attempt", false, domain.StageSnapshot{RunID: runID, Name: "idea", Ordinal: 1, State: domain.StagePending, Version: 1, InputDigest: digest, CurrentAttemptID: &attemptID, LogicalIdempotencyKey: "stage_0123456789abcdef0123456789abcdef", CreatedAt: now, UpdatedAt: now}},
@@ -233,6 +236,7 @@ func TestTransitionMatricesAreClosed(t *testing.T) {
 	legalRuns := map[[2]domain.RunState]bool{
 		{domain.RunCreated, domain.RunRunning}:       true,
 		{domain.RunCreated, domain.RunCancelled}:     true,
+		{domain.RunRunning, domain.RunCreated}:       true,
 		{domain.RunRunning, domain.RunRunning}:       true,
 		{domain.RunRunning, domain.RunBlocked}:       true,
 		{domain.RunRunning, domain.RunNeedsReview}:   true,
@@ -268,6 +272,7 @@ func TestTransitionMatricesAreClosed(t *testing.T) {
 		{domain.StageRunning, domain.StageNeedsReview}:   true,
 		{domain.StageRunning, domain.StageFailed}:        true,
 		{domain.StageRunning, domain.StageCancelled}:     true,
+		{domain.StageRunning, domain.StagePending}:       true,
 		{domain.StageBlocked, domain.StageRunning}:       true,
 		{domain.StageBlocked, domain.StageCancelled}:     true,
 		{domain.StageNeedsReview, domain.StagePending}:   true,
@@ -377,11 +382,13 @@ func TestApplyReviewRequiresCurrentStageInvalidation(t *testing.T) {
 	digest := domain.SumBytes([]byte("review binding"))
 	newInput := domain.SumBytes([]byte("revised input"))
 	newConfig := domain.SumBytes([]byte("revised config"))
+	newConfigJSON := []byte(`{"schema_version":"cpgen.config/v2"}`)
+	newConfig = domain.SumBytes(newConfigJSON)
 	command := domain.ApplyReviewCommand{
 		RunID: "run_00000000000000000000000000000001", ExpectedRunVersion: 3,
 		ReviewDecisionID: "review_00000000000000000000000000000001",
 		StageName:        "prepare", StageInputDigest: digest, EvidenceDigest: digest, PolicyDigest: digest,
-		NewInputDigest: &newInput, NewConfigDigest: &newConfig,
+		NewInputDigest: &newInput, NewConfigJSON: newConfigJSON, NewConfigDigest: &newConfig,
 		InvalidatedStages: []domain.StageName{"exercise"},
 		IdempotencyKey:    "reviewapply_00000000000000000000000000000001", At: now,
 	}
@@ -391,5 +398,106 @@ func TestApplyReviewRequiresCurrentStageInvalidation(t *testing.T) {
 	command.InvalidatedStages = append(command.InvalidatedStages, command.StageName)
 	if err := command.Validate(); err != nil {
 		t.Fatalf("REVISE application with current stage invalidated: %v", err)
+	}
+}
+
+// TestCreateRunRequiresExplicitRevisionAndMatchingSchema catches deriving a
+// workflow revision from a digest or accepting a schema binding detached from
+// the immutable canonical request bytes.
+func TestCreateRunRequiresExplicitRevisionAndMatchingSchema(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	requestJSON := []byte(`{"schema_version":"cpgen.request/v1"}`)
+	configJSON := []byte(`{"schema_version":"cpgen.config/v1"}`)
+	valid := domain.CreateRunRequest{
+		RunID:                "run_00000000000000000000000000000011",
+		SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: domain.SumBytes(requestJSON),
+		EffectiveSeed:               1,
+		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: domain.SumBytes(configJSON),
+		WorkflowRevision: "slice1/v1", SchemaVersion: "cpgen.request/v1",
+		WorkflowDigest: domain.SumBytes([]byte("workflow")),
+		StageSequence:  []domain.StageName{"prepare"}, CreatedAt: now,
+		IdempotencyKey: "create_00000000000000000000000000000011",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid create request: %v", err)
+	}
+	for _, mutate := range []func(*domain.CreateRunRequest){
+		func(value *domain.CreateRunRequest) { value.WorkflowRevision = "" },
+		func(value *domain.CreateRunRequest) { value.SchemaVersion = "" },
+		func(value *domain.CreateRunRequest) { value.SchemaVersion = "cpgen.request/v2" },
+	} {
+		invalid := valid
+		mutate(&invalid)
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("invalid explicit binding accepted: %+v", invalid)
+		}
+	}
+}
+
+// TestRecoveredPendingStageAndReviewBindings catches disagreement between the
+// recovery projection and the strict review-field state matrix.
+func TestRecoveredPendingStageAndReviewBindings(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	runID := domain.RunID("run_00000000000000000000000000000012")
+	digest := domain.SumBytes([]byte("binding"))
+	recovered := domain.StageSnapshot{
+		RunID: runID, Name: "prepare", Ordinal: 1, State: domain.StagePending, Version: 3,
+		InputDigest: digest, AttemptCount: 2,
+		LogicalIdempotencyKey: "stage_00000000000000000000000000000012", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := recovered.Validate(); err != nil {
+		t.Fatalf("recovered PENDING stage: %v", err)
+	}
+	waivable := true
+	review := recovered
+	review.State = domain.StageNeedsReview
+	review.ReviewEvidenceDigest = &digest
+	review.ReviewPolicyDigest = &digest
+	review.ReviewWaivable = &waivable
+	if err := review.Validate(); err != nil {
+		t.Fatalf("bound NEEDS_REVIEW stage: %v", err)
+	}
+	for _, state := range []domain.StageState{domain.StageFailed, domain.StageCancelled} {
+		invalid := review
+		invalid.State = state
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("%s accepted review bindings", state)
+		}
+	}
+}
+
+// TestFinishStageValidationUsesStrictOutcomeAndPersistedTime catches smuggling
+// success-only fields into a non-success result and moving audit time backward.
+func TestFinishStageValidationUsesStrictOutcomeAndPersistedTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 1, 0, 0, 2, 0, time.UTC)
+	digest := domain.SumBytes([]byte("finish"))
+	base := domain.FinishStageCommand{
+		RunID: "run_00000000000000000000000000000013", ExpectedRunVersion: 2,
+		StageName: "prepare", AttemptID: "attempt_00000000000000000000000000000013",
+		AttemptState: domain.StageAttemptFailed, RunState: domain.RunFailed,
+		IdempotencyKey: "finish_00000000000000000000000000000013", At: now,
+	}
+	for _, mutate := range []func(*domain.FinishStageCommand){
+		func(value *domain.FinishStageCommand) { value.NextStage = "exercise" },
+		func(value *domain.FinishStageCommand) { value.NextInputDigest = &digest },
+		func(value *domain.FinishStageCommand) { value.ReviewEvidenceDigest = &digest },
+	} {
+		invalid := base
+		mutate(&invalid)
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("non-success finish accepted success/review fields: %+v", invalid)
+		}
+	}
+	if err := base.ValidateAgainst(now.Add(-2*time.Second), now.Add(-time.Second)); err != nil {
+		t.Fatalf("monotone finish time: %v", err)
+	}
+	if err := base.ValidateAgainst(now.Add(time.Second), now.Add(-time.Second)); err == nil {
+		t.Fatal("finish before attempt start was accepted")
+	}
+	if err := base.ValidateAgainst(now.Add(-time.Second), now.Add(time.Second)); err == nil {
+		t.Fatal("finish before current projection update was accepted")
 	}
 }

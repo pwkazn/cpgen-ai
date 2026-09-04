@@ -46,16 +46,21 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			return wrap(ErrReviewPending, "run already has a pending review", nil)
 		}
 		var stageState, inputDigest, evidenceDigest, policyDigest string
+		var stageWaivable int
 		if err := tx.QueryRowContext(ctx, `
-			SELECT state, input_digest, review_evidence_digest, review_policy_digest
+			SELECT state, input_digest, review_evidence_digest, review_policy_digest, review_waivable
 			FROM stage_records WHERE run_id = ? AND stage_name = ?`,
 			string(request.RunID), string(request.StageName),
-		).Scan(&stageState, &inputDigest, &evidenceDigest, &policyDigest); err != nil {
+		).Scan(&stageState, &inputDigest, &evidenceDigest, &policyDigest, &stageWaivable); err != nil {
 			return err
 		}
 		if stageState != string(domain.StageNeedsReview) || inputDigest != string(request.StageInputDigest) ||
 			evidenceDigest != string(request.EvidenceDigest) || policyDigest != string(request.PolicyDigest) {
 			return wrap(ErrConsistency, "review binding does not match the current stage snapshot", nil)
+		}
+		waivable := request.Kind == domain.ReviewWaive
+		if waivable && stageWaivable != 1 {
+			return wrap(ErrInvalidTransition, "persisted review gate is not waivable", nil)
 		}
 		newVersion := run.Version + 1
 		result = domain.ReviewDecision{
@@ -65,8 +70,11 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			StageInputDigest: request.StageInputDigest, EvidenceDigest: request.EvidenceDigest, PolicyDigest: request.PolicyDigest,
 			RequestedEditsDigest: request.RequestedEditsDigest, WaiverScopeDigest: request.WaiverScopeDigest,
 			ExternalConditionDigest: request.ExternalConditionDigest, BudgetIncrease: request.BudgetIncrease,
-			WaivableGate: request.WaivableGate, Reviewer: request.Reviewer, Reason: request.Reason,
+			WaivableGate: waivable, Reviewer: request.Reviewer, Reason: request.Reason,
 			CreatedAt: request.At,
+		}
+		if err := result.Validate(); err != nil {
+			return wrap(ErrConsistency, "derived review decision is invalid", err)
 		}
 		resultJSON, err := marshalResult(result)
 		if err != nil {
@@ -89,9 +97,9 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			}
 			budgetJSON = encoded
 		}
-		waivable := 0
-		if request.WaivableGate {
-			waivable = 1
+		waivableValue := 0
+		if waivable {
+			waivableValue = 1
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO review_decisions(
@@ -104,7 +112,7 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			string(request.ID), string(request.RunID), string(request.Kind), request.ExpectedRunVersion, newVersion,
 			request.WorkflowRevision, string(request.StageName), string(request.StageInputDigest),
 			string(request.EvidenceDigest), string(request.PolicyDigest), edits, waiver, condition,
-			budgetJSON, waivable, request.Reviewer, request.Reason,
+			budgetJSON, waivableValue, request.Reviewer, request.Reason,
 			request.IdempotencyKey, string(commandDigest), formatTime(request.At),
 		); err != nil {
 			return fmt.Errorf("insert review decision: %w", err)
@@ -169,22 +177,24 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 			return wrap(ErrConsistency, "review application binding changed", nil)
 		}
 		var stageState, stageInput, stageEvidence, stagePolicy string
+		var stageWaivable int
 		if err := tx.QueryRowContext(ctx, `
-			SELECT state, input_digest, review_evidence_digest, review_policy_digest
+			SELECT state, input_digest, review_evidence_digest, review_policy_digest, review_waivable
 			FROM stage_records WHERE run_id = ? AND stage_name = ?`,
 			string(command.RunID), string(command.StageName),
-		).Scan(&stageState, &stageInput, &stageEvidence, &stagePolicy); err != nil {
+		).Scan(&stageState, &stageInput, &stageEvidence, &stagePolicy, &stageWaivable); err != nil {
 			return err
 		}
 		if stageState != string(domain.StageNeedsReview) || stageInput != string(decision.StageInputDigest) ||
-			stageEvidence != string(decision.EvidenceDigest) || stagePolicy != string(decision.PolicyDigest) {
+			stageEvidence != string(decision.EvidenceDigest) || stagePolicy != string(decision.PolicyDigest) ||
+			(decision.Kind == domain.ReviewWaive && stageWaivable != 1) {
 			return wrap(ErrConsistency, "persisted stage snapshot no longer matches the review decision", nil)
 		}
 		if decision.Kind == domain.ReviewRevise {
-			if command.NewInputDigest == nil || command.NewConfigDigest == nil || len(command.InvalidatedStages) == 0 {
+			if command.NewInputDigest == nil || command.NewConfigDigest == nil || len(command.NewConfigJSON) == 0 || len(command.InvalidatedStages) == 0 {
 				return wrap(ErrConsistency, "REVISE application lacks revised digests or invalidation", nil)
 			}
-		} else if command.NewInputDigest != nil || command.NewConfigDigest != nil || len(command.InvalidatedStages) != 0 {
+		} else if command.NewInputDigest != nil || command.NewConfigDigest != nil || len(command.NewConfigJSON) != 0 || len(command.InvalidatedStages) != 0 {
 			return wrap(ErrConsistency, "non-REVISE application carries revision payload", nil)
 		}
 		newRunState := domain.RunCreated
@@ -199,24 +209,59 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 		if err := domain.ValidateStageTransition(domain.StageNeedsReview, newStageState); err != nil {
 			return err
 		}
+		restartStage, restartOrdinal := run.CurrentStage, run.CurrentStageOrdinal
 		if decision.Kind == domain.ReviewRevise {
-			for _, stage := range command.InvalidatedStages {
-				var count int
-				if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM stage_records WHERE run_id = ? AND stage_name = ?`,
-					string(command.RunID), string(stage)).Scan(&count); err != nil {
+			rows, err := tx.QueryContext(ctx, `
+				SELECT stage_name, ordinal FROM stage_records WHERE run_id = ? ORDER BY ordinal`, string(command.RunID))
+			if err != nil {
+				return err
+			}
+			type stagePosition struct {
+				name    domain.StageName
+				ordinal int
+			}
+			var pipeline []stagePosition
+			for rows.Next() {
+				var raw string
+				var ordinal int
+				if err := rows.Scan(&raw, &ordinal); err != nil {
+					_ = rows.Close()
 					return err
 				}
-				if count != 1 {
-					return wrap(ErrConsistency, "invalidated stage is outside the fixed pipeline", nil)
+				pipeline = append(pipeline, stagePosition{name: domain.StageName(raw), ordinal: ordinal})
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			start := -1
+			for index := range pipeline {
+				if pipeline[index].name == command.InvalidatedStages[0] {
+					start = index
+					break
 				}
+			}
+			if start < 0 || len(command.InvalidatedStages) != len(pipeline)-start {
+				return wrap(ErrConsistency, "REVISE invalidation is not the exact downstream suffix", nil)
+			}
+			for offset, stage := range command.InvalidatedStages {
+				if pipeline[start+offset].name != stage {
+					return wrap(ErrConsistency, "REVISE invalidation has a gap or is out of order", nil)
+				}
+			}
+			restartStage, restartOrdinal = pipeline[start].name, pipeline[start].ordinal
+			for index, stage := range command.InvalidatedStages {
 				input := any(nil)
-				if stage == command.StageName {
+				if index == 0 {
 					input = string(*command.NewInputDigest)
 				}
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE stage_records SET state = 'PENDING', version = version + 1,
 						input_digest = COALESCE(?, input_digest), output_digest = NULL, current_attempt_id = NULL,
-						review_evidence_digest = NULL, review_policy_digest = NULL, updated_at = ?
+						review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL, updated_at = ?
 					WHERE run_id = ? AND stage_name = ?`, input, formatTime(command.At), string(command.RunID), string(stage)); err != nil {
 					return err
 				}
@@ -224,7 +269,7 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 		} else {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE stage_records SET state = ?, version = version + 1, output_digest = NULL,
-					current_attempt_id = NULL, review_evidence_digest = NULL, review_policy_digest = NULL, updated_at = ?
+					current_attempt_id = NULL, review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL, updated_at = ?
 				WHERE run_id = ? AND stage_name = ?`,
 				string(newStageState), formatTime(command.At), string(command.RunID), string(command.StageName)); err != nil {
 				return err
@@ -234,19 +279,45 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 			string(newReviewState), formatTime(command.At), string(command.ReviewDecisionID)); err != nil {
 			return err
 		}
-		configDigest := run.ConfigDigest
-		if command.NewConfigDigest != nil {
-			configDigest = *command.NewConfigDigest
-		}
 		newVersion := run.Version + 1
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE runs SET state = ?, redacted_effective_config_digest = ?, version = ?, updated_at = ? WHERE run_id = ?`,
-			string(newRunState), string(configDigest), newVersion, formatTime(command.At), string(command.RunID)); err != nil {
+		if decision.Kind == domain.ReviewRevise {
+			var nextConfigRevision int
+			if err := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(revision), 0) + 1 FROM run_config_revisions WHERE run_id = ?`,
+				string(command.RunID),
+			).Scan(&nextConfigRevision); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO run_config_revisions(
+					run_id, revision, redacted_effective_config_json, redacted_effective_config_digest,
+					source_review_id, created_at
+				) VALUES (?, ?, ?, ?, ?, ?)`,
+				string(command.RunID), nextConfigRevision, command.NewConfigJSON, string(*command.NewConfigDigest),
+				string(command.ReviewDecisionID), formatTime(command.At),
+			); err != nil {
+				return fmt.Errorf("insert revised config binding: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE runs SET state = ?, current_stage = ?, current_stage_ordinal = ?,
+					redacted_effective_config_json = ?, redacted_effective_config_digest = ?,
+					version = ?, updated_at = ? WHERE run_id = ?`,
+				string(newRunState), string(restartStage), restartOrdinal,
+				command.NewConfigJSON, string(*command.NewConfigDigest), newVersion, formatTime(command.At), string(command.RunID),
+			); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `
+			UPDATE runs SET state = ?, version = ?, updated_at = ? WHERE run_id = ?`,
+			string(newRunState), newVersion, formatTime(command.At), string(command.RunID)); err != nil {
 			return err
 		}
 		result, err = readRun(ctx, tx, command.RunID)
 		if err != nil {
 			return err
+		}
+		if err := result.Validate(); err != nil {
+			return wrap(ErrConsistency, "review application produced an invalid run projection", err)
 		}
 		resultJSON, err := marshalResult(result)
 		if err != nil {
@@ -328,6 +399,9 @@ func scanReview(row *sql.Row) (*domain.ReviewDecision, error) {
 			return nil, err
 		}
 		result.AppliedAt = &value
+	}
+	if err := result.Validate(); err != nil {
+		return nil, wrap(ErrConsistency, "stored review decision is invalid", err)
 	}
 	return &result, nil
 }

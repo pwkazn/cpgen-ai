@@ -136,7 +136,7 @@ func ValidateRunTransition(from, to RunState) error {
 	}
 	legal := map[[2]RunState]struct{}{
 		{RunCreated, RunRunning}: {}, {RunCreated, RunCancelled}: {},
-		{RunRunning, RunRunning}: {}, {RunRunning, RunBlocked}: {},
+		{RunRunning, RunCreated}: {}, {RunRunning, RunRunning}: {}, {RunRunning, RunBlocked}: {},
 		{RunRunning, RunNeedsReview}: {}, {RunRunning, RunFailed}: {},
 		{RunRunning, RunCancelled}: {}, {RunBlocked, RunRunning}: {},
 		{RunBlocked, RunCancelled}: {}, {RunNeedsReview, RunCreated}: {},
@@ -154,7 +154,7 @@ func ValidateStageTransition(from, to StageState) error {
 	}
 	legal := map[[2]StageState]struct{}{
 		{StagePending, StageRunning}: {}, {StagePending, StageCancelled}: {},
-		{StageRunning, StageSucceeded}: {}, {StageRunning, StageBlocked}: {},
+		{StageRunning, StagePending}: {}, {StageRunning, StageSucceeded}: {}, {StageRunning, StageBlocked}: {},
 		{StageRunning, StageNeedsReview}: {}, {StageRunning, StageFailed}: {},
 		{StageRunning, StageCancelled}: {}, {StageBlocked, StageRunning}: {},
 		{StageBlocked, StageCancelled}: {}, {StageNeedsReview, StagePending}: {},
@@ -287,17 +287,19 @@ func uniqueNonEmpty(kind string, values []string) error {
 }
 
 type CreateRunRequest struct {
-	RunID                         RunID        `json:"run_id"`
-	SubmittedRequestJSON          []byte       `json:"submitted_request_json"`
-	SubmittedRequestDigest        Digest       `json:"submitted_request_digest"`
-	EffectiveSeed                 int64        `json:"effective_seed"`
-	RedactedEffectiveConfigJSON   []byte       `json:"redacted_effective_config_json"`
-	RedactedEffectiveConfigDigest Digest       `json:"redacted_effective_config_digest"`
-	WorkflowDigest                Digest       `json:"workflow_digest"`
-	BudgetLimits                  BudgetLimits `json:"budget_limits"`
-	StageSequence                 []StageName  `json:"stage_sequence"`
-	CreatedAt                     time.Time    `json:"created_at"`
-	IdempotencyKey                string       `json:"idempotency_key"`
+	RunID                         RunID         `json:"run_id"`
+	SubmittedRequestJSON          []byte        `json:"submitted_request_json"`
+	SubmittedRequestDigest        Digest        `json:"submitted_request_digest"`
+	EffectiveSeed                 int64         `json:"effective_seed"`
+	RedactedEffectiveConfigJSON   []byte        `json:"redacted_effective_config_json"`
+	RedactedEffectiveConfigDigest Digest        `json:"redacted_effective_config_digest"`
+	WorkflowRevision              string        `json:"workflow_revision"`
+	SchemaVersion                 SchemaVersion `json:"schema_version"`
+	WorkflowDigest                Digest        `json:"workflow_digest"`
+	BudgetLimits                  BudgetLimits  `json:"budget_limits"`
+	StageSequence                 []StageName   `json:"stage_sequence"`
+	CreatedAt                     time.Time     `json:"created_at"`
+	IdempotencyKey                string        `json:"idempotency_key"`
 }
 
 func (v CreateRunRequest) Validate() error {
@@ -309,6 +311,21 @@ func (v CreateRunRequest) Validate() error {
 	}
 	if err := validateCanonicalDigest("redacted effective config", v.RedactedEffectiveConfigJSON, v.RedactedEffectiveConfigDigest); err != nil {
 		return err
+	}
+	if strings.TrimSpace(v.WorkflowRevision) == "" {
+		return errors.New("workflow revision is empty")
+	}
+	if err := v.SchemaVersion.Validate(); err != nil {
+		return fmt.Errorf("schema version: %w", err)
+	}
+	var submitted struct {
+		SchemaVersion SchemaVersion `json:"schema_version"`
+	}
+	if err := json.Unmarshal(v.SubmittedRequestJSON, &submitted); err != nil {
+		return fmt.Errorf("decode submitted request schema version: %w", err)
+	}
+	if submitted.SchemaVersion != v.SchemaVersion {
+		return errors.New("schema version does not match submitted request JSON")
 	}
 	if err := v.WorkflowDigest.Validate(); err != nil {
 		return fmt.Errorf("workflow digest: %w", err)
@@ -376,7 +393,7 @@ type RunSnapshot struct {
 	State                     RunState      `json:"state"`
 	Version                   int64         `json:"version"`
 	WorkflowRevision          string        `json:"workflow_revision"`
-	SchemaVersion             string        `json:"schema_version"`
+	SchemaVersion             SchemaVersion `json:"schema_version"`
 	RequestDigest             Digest        `json:"request_digest"`
 	ConfigDigest              Digest        `json:"config_digest"`
 	WorkflowDigest            Digest        `json:"workflow_digest"`
@@ -400,6 +417,12 @@ func (v RunSnapshot) Validate() error {
 	if v.Version <= 0 {
 		return errors.New("run version must be positive")
 	}
+	if strings.TrimSpace(v.WorkflowRevision) == "" {
+		return errors.New("run workflow revision is empty")
+	}
+	if err := v.SchemaVersion.Validate(); err != nil {
+		return err
+	}
 	if err := validateUTCTime("created at", v.CreatedAt); err != nil {
 		return err
 	}
@@ -411,6 +434,9 @@ func (v RunSnapshot) Validate() error {
 	}
 	if v.ActiveElapsed < 0 || (v.ActiveStartedAt == nil) != (v.LastAccountingHeartbeatAt == nil) {
 		return errors.New("run active-time fields are invalid")
+	}
+	if v.ActiveStartedAt != nil && v.State != RunRunning {
+		return errors.New("only a RUNNING run may have an active-time interval")
 	}
 	if v.ActiveStartedAt != nil {
 		if err := validateUTCTime("active started at", *v.ActiveStartedAt); err != nil {
@@ -460,6 +486,9 @@ type StageSnapshot struct {
 	AttemptCount          int        `json:"attempt_count"`
 	CurrentAttemptID      *AttemptID `json:"current_attempt_id,omitempty"`
 	LogicalIdempotencyKey string     `json:"logical_idempotency_key"`
+	ReviewEvidenceDigest  *Digest    `json:"review_evidence_digest,omitempty"`
+	ReviewPolicyDigest    *Digest    `json:"review_policy_digest,omitempty"`
+	ReviewWaivable        *bool      `json:"review_waivable,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -483,6 +512,13 @@ func (v StageSnapshot) Validate() error {
 	if v.OutputDigest != nil {
 		if err := v.OutputDigest.Validate(); err != nil {
 			return err
+		}
+	}
+	for _, digest := range []*Digest{v.ReviewEvidenceDigest, v.ReviewPolicyDigest} {
+		if digest != nil {
+			if err := digest.Validate(); err != nil {
+				return err
+			}
 		}
 	}
 	if v.CurrentAttemptID != nil {
@@ -657,7 +693,7 @@ func (v ReviewDecision) Validate() error {
 	if strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Reason) == "" {
 		return errors.New("reviewer and reason are required")
 	}
-	if err := validateReviewPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease, v.WaivableGate); err != nil {
+	if err := validateReviewDecisionPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease, v.WaivableGate); err != nil {
 		return err
 	}
 	if err := validateUTCTime("created at", v.CreatedAt); err != nil {
@@ -731,6 +767,7 @@ const (
 	EventStageFinished       RunEventType = "STAGE_FINISHED"
 	EventStageInterrupted    RunEventType = "STAGE_INTERRUPTED"
 	EventCancelRequested     RunEventType = "CANCEL_REQUESTED"
+	EventCancelFinalized     RunEventType = "CANCEL_FINALIZED"
 	EventActiveTimeAccounted RunEventType = "ACTIVE_TIME_ACCOUNTED"
 	EventReviewCreated       RunEventType = "REVIEW_CREATED"
 	EventReviewApplied       RunEventType = "REVIEW_APPLIED"
@@ -739,7 +776,7 @@ const (
 func (v RunEventType) Valid() bool {
 	switch v {
 	case EventRunCreated, EventStageBegan, EventStageFinished, EventStageInterrupted,
-		EventCancelRequested, EventActiveTimeAccounted, EventReviewCreated, EventReviewApplied:
+		EventCancelRequested, EventCancelFinalized, EventActiveTimeAccounted, EventReviewCreated, EventReviewApplied:
 		return true
 	}
 	return false
@@ -811,6 +848,7 @@ type FinishStageCommand struct {
 	NextInputDigest      *Digest           `json:"next_input_digest,omitempty"`
 	ReviewEvidenceDigest *Digest           `json:"review_evidence_digest,omitempty"`
 	ReviewPolicyDigest   *Digest           `json:"review_policy_digest,omitempty"`
+	ReviewGateWaivable   bool              `json:"review_gate_waivable,omitempty"`
 	Cause                *ExecutionCause   `json:"cause,omitempty"`
 	IdempotencyKey       string            `json:"idempotency_key"`
 	At                   time.Time         `json:"at"`
@@ -851,28 +889,58 @@ func (v FinishStageCommand) Validate() error {
 	}
 	switch v.AttemptState {
 	case StageAttemptSucceeded:
-		if v.RunState != RunRunning || v.OutputDigest == nil || v.NextStage == "" || v.NextInputDigest == nil {
+		if v.RunState != RunRunning || v.OutputDigest == nil || v.NextStage == "" || v.NextInputDigest == nil ||
+			v.ReviewEvidenceDigest != nil || v.ReviewPolicyDigest != nil || v.ReviewGateWaivable || v.Cause != nil {
 			return errors.New("successful finish requires RUNNING next-stage binding")
 		}
 		if err := v.NextStage.Validate(); err != nil {
 			return err
 		}
 	case StageAttemptBlocked:
-		if v.RunState != RunBlocked || v.OutputDigest != nil {
+		if v.RunState != RunBlocked || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil {
 			return errors.New("blocked finish fields are invalid")
 		}
 	case StageAttemptNeedsReview:
-		if v.RunState != RunNeedsReview || v.OutputDigest != nil || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil {
+		if v.RunState != RunNeedsReview || hasSuccessOnlyFinishFields(v) || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.Cause != nil {
 			return errors.New("review finish fields are invalid")
 		}
 	case StageAttemptFailed:
-		if v.RunState != RunFailed || v.OutputDigest != nil {
+		if v.RunState != RunFailed || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil {
 			return errors.New("failed finish fields are invalid")
 		}
 	case StageAttemptCancelled:
-		if v.RunState != RunCancelled || v.OutputDigest != nil || v.Cause == nil || *v.Cause != CauseUserCancel {
+		if v.RunState != RunCancelled || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause == nil || *v.Cause != CauseUserCancel {
 			return errors.New("cancelled finish fields are invalid")
 		}
+	}
+	return nil
+}
+
+func hasSuccessOnlyFinishFields(v FinishStageCommand) bool {
+	return v.OutputDigest != nil || v.NextStage != "" || v.NextInputDigest != nil
+}
+
+func hasReviewFinishFields(v FinishStageCommand) bool {
+	return v.ReviewEvidenceDigest != nil || v.ReviewPolicyDigest != nil || v.ReviewGateWaivable
+}
+
+// ValidateAgainst binds the command timestamp to the persisted attempt and
+// current projection timestamps that the store rereads under its write lock.
+func (v FinishStageCommand) ValidateAgainst(attemptStartedAt, currentUpdatedAt time.Time) error {
+	if err := v.Validate(); err != nil {
+		return err
+	}
+	if err := validateUTCTime("attempt started at", attemptStartedAt); err != nil {
+		return err
+	}
+	if err := validateUTCTime("current projection updated at", currentUpdatedAt); err != nil {
+		return err
+	}
+	if v.At.Before(attemptStartedAt) {
+		return errors.New("finish time precedes attempt start")
+	}
+	if v.At.Before(currentUpdatedAt) {
+		return errors.New("finish time precedes current projection update")
 	}
 	return nil
 }
@@ -910,6 +978,27 @@ type CancelRequest struct {
 	Reason             string           `json:"reason"`
 	IdempotencyKey     string           `json:"idempotency_key"`
 	At                 time.Time        `json:"at"`
+}
+
+// FinalizeCancelCommand is the named projection transition invoked only after
+// the caller has completed its later exact-resource reconciliation boundary.
+type FinalizeCancelCommand struct {
+	RunID                RunID            `json:"run_id"`
+	ExpectedRunVersion   int64            `json:"expected_run_version"`
+	ControlRequestID     ControlRequestID `json:"control_request_id"`
+	ReconciliationDigest Digest           `json:"reconciliation_digest"`
+	IdempotencyKey       string           `json:"idempotency_key"`
+	At                   time.Time        `json:"at"`
+}
+
+func (v FinalizeCancelCommand) Validate() error {
+	if err := validateMutation(v.RunID, v.ExpectedRunVersion, v.IdempotencyKey, v.At); err != nil {
+		return err
+	}
+	if err := v.ControlRequestID.Validate(); err != nil {
+		return err
+	}
+	return v.ReconciliationDigest.Validate()
 }
 
 func (v CancelRequest) Validate() error {
@@ -1027,7 +1116,6 @@ type CreateReviewRequest struct {
 	WaiverScopeDigest       *Digest            `json:"waiver_scope_digest,omitempty"`
 	ExternalConditionDigest *Digest            `json:"external_condition_digest,omitempty"`
 	BudgetIncrease          BudgetLimits       `json:"budget_increase"`
-	WaivableGate            bool               `json:"waivable_gate"`
 	Reviewer                string             `json:"reviewer"`
 	Reason                  string             `json:"reason"`
 	IdempotencyKey          string             `json:"idempotency_key"`
@@ -1059,7 +1147,7 @@ func (v CreateReviewRequest) Validate() error {
 			}
 		}
 	}
-	return validateReviewPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease, v.WaivableGate)
+	return validateReviewRequestPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease)
 }
 
 type ApplyReviewCommand struct {
@@ -1071,6 +1159,7 @@ type ApplyReviewCommand struct {
 	EvidenceDigest     Digest           `json:"evidence_digest"`
 	PolicyDigest       Digest           `json:"policy_digest"`
 	NewInputDigest     *Digest          `json:"new_input_digest,omitempty"`
+	NewConfigJSON      []byte           `json:"new_config_json,omitempty"`
 	NewConfigDigest    *Digest          `json:"new_config_digest,omitempty"`
 	InvalidatedStages  []StageName      `json:"invalidated_stages,omitempty"`
 	IdempotencyKey     string           `json:"idempotency_key"`
@@ -1092,14 +1181,14 @@ func (v ApplyReviewCommand) Validate() error {
 			return err
 		}
 	}
-	if (v.NewInputDigest == nil) != (v.NewConfigDigest == nil) {
-		return errors.New("revised input and config digests must be supplied together")
+	if (v.NewInputDigest == nil) != (v.NewConfigDigest == nil) || (v.NewConfigDigest == nil) != (len(v.NewConfigJSON) == 0) {
+		return errors.New("revised input and canonical config binding must be supplied together")
 	}
 	if v.NewInputDigest != nil {
 		if err := v.NewInputDigest.Validate(); err != nil {
 			return err
 		}
-		if err := v.NewConfigDigest.Validate(); err != nil {
+		if err := validateCanonicalDigest("revised redacted effective config", v.NewConfigJSON, *v.NewConfigDigest); err != nil {
 			return err
 		}
 		if len(v.InvalidatedStages) == 0 {
@@ -1124,33 +1213,46 @@ func (v ApplyReviewCommand) Validate() error {
 	return nil
 }
 
-func validateReviewPayload(kind ReviewDecisionKind, edits, waiver, condition *Digest, budget BudgetLimits, waivable bool) error {
+func validateReviewRequestPayload(kind ReviewDecisionKind, edits, waiver, condition *Digest, budget BudgetLimits) error {
 	if err := budget.Validate(); err != nil {
 		return err
 	}
 	hasBudget := budget != (BudgetLimits{})
 	switch kind {
 	case ReviewRevise:
-		if edits == nil || waiver != nil || condition != nil || hasBudget || waivable {
+		if edits == nil || waiver != nil || condition != nil || hasBudget {
 			return errors.New("REVISE payload is invalid")
 		}
 	case ReviewRetry:
-		if edits != nil || waiver != nil || (!hasBudget && condition == nil) || waivable {
+		if edits != nil || waiver != nil || (!hasBudget && condition == nil) {
 			return errors.New("RETRY requires a positive budget increase or external condition")
 		}
 		if hasBudget && !budgetIncreasePositive(budget) {
 			return errors.New("RETRY budget increase must be positive")
 		}
 	case ReviewWaive:
-		if edits != nil || waiver == nil || condition != nil || hasBudget || !waivable {
-			return errors.New("WAIVE requires a policy-declared gate and scope")
+		if edits != nil || waiver == nil || condition != nil || hasBudget {
+			return errors.New("WAIVE requires a scope")
 		}
 	case ReviewReject:
-		if edits != nil || waiver != nil || condition != nil || hasBudget || waivable {
+		if edits != nil || waiver != nil || condition != nil || hasBudget {
 			return errors.New("REJECT payload is invalid")
 		}
 	default:
 		return errors.New("review kind is invalid")
+	}
+	return nil
+}
+
+func validateReviewDecisionPayload(kind ReviewDecisionKind, edits, waiver, condition *Digest, budget BudgetLimits, waivable bool) error {
+	if err := validateReviewRequestPayload(kind, edits, waiver, condition, budget); err != nil {
+		return err
+	}
+	if kind == ReviewWaive && !waivable {
+		return errors.New("WAIVE decision is not bound to a waivable gate")
+	}
+	if kind != ReviewWaive && waivable {
+		return errors.New("non-WAIVE decision carries a waivable-gate assertion")
 	}
 	return nil
 }
@@ -1187,25 +1289,31 @@ func validateUTCTime(name string, value time.Time) error {
 }
 
 func validateStageStateFields(v StageSnapshot) error {
+	hasReviewBinding := v.ReviewEvidenceDigest != nil || v.ReviewPolicyDigest != nil || v.ReviewWaivable != nil
 	switch v.State {
 	case StagePending:
-		if v.AttemptCount != 0 || v.CurrentAttemptID != nil || v.OutputDigest != nil {
+		if v.CurrentAttemptID != nil || v.OutputDigest != nil || hasReviewBinding {
 			return errors.New("pending stage has execution fields")
 		}
 	case StageRunning:
-		if v.AttemptCount <= 0 || v.CurrentAttemptID == nil || v.OutputDigest != nil {
+		if v.AttemptCount <= 0 || v.CurrentAttemptID == nil || v.OutputDigest != nil || hasReviewBinding {
 			return errors.New("running stage has invalid execution fields")
 		}
 	case StageSucceeded:
-		if v.AttemptCount <= 0 || v.CurrentAttemptID != nil || v.OutputDigest == nil {
+		if v.AttemptCount <= 0 || v.CurrentAttemptID != nil || v.OutputDigest == nil || hasReviewBinding {
 			return errors.New("succeeded stage has invalid execution fields")
 		}
-	case StageBlocked, StageNeedsReview, StageFailed:
-		if v.AttemptCount <= 0 || v.CurrentAttemptID != nil || v.OutputDigest != nil {
+	case StageBlocked, StageFailed:
+		if v.AttemptCount <= 0 || v.CurrentAttemptID != nil || v.OutputDigest != nil || hasReviewBinding {
 			return fmt.Errorf("%s stage has invalid execution fields", v.State)
 		}
+	case StageNeedsReview:
+		if v.AttemptCount <= 0 || v.CurrentAttemptID != nil || v.OutputDigest != nil ||
+			v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.ReviewWaivable == nil {
+			return errors.New("NEEDS_REVIEW stage has invalid review binding")
+		}
 	case StageCancelled:
-		if v.CurrentAttemptID != nil || v.OutputDigest != nil {
+		if v.CurrentAttemptID != nil || v.OutputDigest != nil || hasReviewBinding {
 			return errors.New("cancelled stage has invalid execution fields")
 		}
 	default:

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -24,13 +25,28 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 	err = s.immediate(ctx, func(tx *immediateTx) error {
 		var storedDigest string
 		var storedResult []byte
+		legacyReplay := false
 		err := tx.QueryRowContext(ctx,
 			"SELECT create_command_digest, create_result_json FROM runs WHERE create_idempotency_key = ?",
 			request.IdempotencyKey,
 		).Scan(&storedDigest, &storedResult)
 		if err == nil {
 			if storedDigest != string(commandDigest) {
-				return wrap(ErrConsistency, "create idempotency key was reused with different content", nil)
+				legacyDigest, err := legacyCreateRunDigestV691b611(request)
+				if err != nil {
+					return err
+				}
+				if storedDigest != string(legacyDigest) {
+					return wrap(ErrConsistency, "create idempotency key was reused with different content", nil)
+				}
+				if err := validateLegacyCreateRunReplay(ctx, tx, request, legacyDigest, storedResult); err != nil {
+					return err
+				}
+				legacyReplay = true
+			}
+			if legacyReplay {
+				result, err = unmarshalLegacyCreateRunResultV691b611(storedResult, request)
+				return err
 			}
 			return json.Unmarshal(storedResult, &result)
 		}
@@ -44,16 +60,17 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 		if existing != 0 {
 			return wrap(ErrConsistency, "run id already exists under another create identity", nil)
 		}
-		workflowRevision := string(request.WorkflowDigest)
-		schemaVersion := requestSchemaVersion(request.SubmittedRequestJSON)
 		result = domain.RunSnapshot{
 			RunID: request.RunID, State: domain.RunCreated, Version: 1,
-			WorkflowRevision: workflowRevision, SchemaVersion: schemaVersion,
+			WorkflowRevision: request.WorkflowRevision, SchemaVersion: request.SchemaVersion,
 			RequestDigest:  request.SubmittedRequestDigest,
 			ConfigDigest:   request.RedactedEffectiveConfigDigest,
 			WorkflowDigest: request.WorkflowDigest,
 			CurrentStage:   request.StageSequence[0], CurrentStageOrdinal: 1,
 			CreatedAt: request.CreatedAt, UpdatedAt: request.CreatedAt,
+		}
+		if err := result.Validate(); err != nil {
+			return wrap(ErrConsistency, "new run projection is invalid", err)
 		}
 		resultJSON, err := marshalResult(result)
 		if err != nil {
@@ -73,7 +90,7 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 			string(request.RunID), request.SubmittedRequestJSON, string(request.SubmittedRequestDigest), request.EffectiveSeed,
 			request.RedactedEffectiveConfigJSON, string(request.RedactedEffectiveConfigDigest), string(request.WorkflowDigest),
-			workflowRevision, schemaVersion,
+			request.WorkflowRevision, string(request.SchemaVersion),
 			limits.MaxLLMCalls, limits.MaxSimilarityCalls, limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens,
 			limits.MaxLLMCostMicroUSD, limits.MaxSandboxCreates, limits.MaxArtifactBytes, limits.MaxPackageBytes,
 			limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds*int64(time.Millisecond),
@@ -86,15 +103,26 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 		for index, stage := range request.StageSequence {
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO stage_records(
-					run_id, stage_name, ordinal, state, version, input_digest, attempt_count,
+					run_id, stage_name, ordinal, workflow_revision, schema_version,
+					state, version, input_digest, attempt_count,
 					logical_idempotency_key, created_at, updated_at
-				) VALUES (?, ?, ?, 'PENDING', 1, ?, 0, ?, ?, ?)`,
-				string(request.RunID), string(stage), index+1, string(request.SubmittedRequestDigest),
+				) VALUES (?, ?, ?, ?, ?, 'PENDING', 1, ?, 0, ?, ?, ?)`,
+				string(request.RunID), string(stage), index+1, request.WorkflowRevision, string(request.SchemaVersion),
+				string(request.SubmittedRequestDigest),
 				request.IdempotencyKey+":"+string(stage), formatTime(request.CreatedAt), formatTime(request.CreatedAt),
 			)
 			if err != nil {
 				return fmt.Errorf("insert stage %q: %w", stage, err)
 			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO run_config_revisions(
+				run_id, revision, redacted_effective_config_json, redacted_effective_config_digest, created_at
+			) VALUES (?, 1, ?, ?, ?)`,
+			string(request.RunID), request.RedactedEffectiveConfigJSON,
+			string(request.RedactedEffectiveConfigDigest), formatTime(request.CreatedAt),
+		); err != nil {
+			return fmt.Errorf("insert initial config revision: %w", err)
 		}
 		return insertEvent(ctx, tx, result.RunID, 1, domain.EventRunCreated, "", request.IdempotencyKey, commandDigest, resultJSON, request.CreatedAt)
 	})
@@ -244,6 +272,9 @@ func (s *Store) BeginStage(ctx context.Context, command domain.BeginStageCommand
 			Ordinal: attemptCount + 1, State: domain.StageAttemptRunning,
 			InputDigest: command.InputDigest, StartedAt: command.At,
 		}
+		if err := result.Validate(); err != nil {
+			return wrap(ErrConsistency, "new attempt violates persisted domain invariants", err)
+		}
 		resultJSON, err := marshalResult(result)
 		if err != nil {
 			return err
@@ -318,8 +349,9 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		var stageState string
 		var currentAttempt sql.NullString
 		var stageOrdinal int
-		if err := tx.QueryRowContext(ctx, `SELECT state, current_attempt_id, ordinal FROM stage_records WHERE run_id = ? AND stage_name = ?`,
-			string(command.RunID), string(command.StageName)).Scan(&stageState, &currentAttempt, &stageOrdinal); err != nil {
+		var stageUpdatedRaw string
+		if err := tx.QueryRowContext(ctx, `SELECT state, current_attempt_id, ordinal, updated_at FROM stage_records WHERE run_id = ? AND stage_name = ?`,
+			string(command.RunID), string(command.StageName)).Scan(&stageState, &currentAttempt, &stageOrdinal, &stageUpdatedRaw); err != nil {
 			return err
 		}
 		if stageState != string(domain.StageRunning) || !currentAttempt.Valid || currentAttempt.String != string(command.AttemptID) {
@@ -328,6 +360,46 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		newStageState := stageStateForAttempt(command.AttemptState)
 		if err := domain.ValidateStageTransition(domain.StageRunning, newStageState); err != nil {
 			return err
+		}
+		var attemptState, attemptInput, attemptStartedRaw string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT state, input_digest, started_at FROM stage_attempts
+			WHERE attempt_id = ? AND run_id = ? AND stage_name = ?`,
+			string(command.AttemptID), string(command.RunID), string(command.StageName),
+		).Scan(&attemptState, &attemptInput, &attemptStartedRaw); err != nil {
+			return err
+		}
+		if attemptState != string(domain.StageAttemptRunning) {
+			return wrap(ErrInvalidTransition, "finish requires a RUNNING persisted attempt", nil)
+		}
+		attemptStarted, err := parseTime(attemptStartedRaw)
+		if err != nil {
+			return err
+		}
+		stageUpdated, err := parseTime(stageUpdatedRaw)
+		if err != nil {
+			return err
+		}
+		currentUpdated := run.UpdatedAt
+		if stageUpdated.After(currentUpdated) {
+			currentUpdated = stageUpdated
+		}
+		if err := command.ValidateAgainst(attemptStarted, currentUpdated); err != nil {
+			return err
+		}
+		finishedAt := command.At
+		persistedAttempt := domain.StageAttempt{
+			AttemptID: command.AttemptID, RunID: command.RunID, StageName: command.StageName,
+			Ordinal: stageOrdinal, State: command.AttemptState, InputDigest: domain.Digest(attemptInput),
+			OutputDigest: command.OutputDigest, Cause: command.Cause, StartedAt: attemptStarted, FinishedAt: &finishedAt,
+		}
+		var attemptOrdinal int
+		if err := tx.QueryRowContext(ctx, `SELECT ordinal FROM stage_attempts WHERE attempt_id = ?`, string(command.AttemptID)).Scan(&attemptOrdinal); err != nil {
+			return err
+		}
+		persistedAttempt.Ordinal = attemptOrdinal
+		if err := persistedAttempt.Validate(); err != nil {
+			return wrap(ErrConsistency, "finished attempt would violate persisted domain invariants", err)
 		}
 		var output, cause, reviewEvidence, reviewPolicy any
 		if command.OutputDigest != nil {
@@ -342,6 +414,13 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		if command.ReviewPolicyDigest != nil {
 			reviewPolicy = string(*command.ReviewPolicyDigest)
 		}
+		var reviewWaivable any
+		if command.AttemptState == domain.StageAttemptNeedsReview {
+			reviewWaivable = 0
+			if command.ReviewGateWaivable {
+				reviewWaivable = 1
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE stage_attempts SET state = ?, output_digest = ?, cause = ?, finished_at = ?
 			WHERE attempt_id = ? AND state = 'RUNNING'`,
@@ -351,9 +430,9 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE stage_records SET state = ?, version = version + 1, output_digest = ?, current_attempt_id = NULL,
-				review_evidence_digest = ?, review_policy_digest = ?, updated_at = ?
+				review_evidence_digest = ?, review_policy_digest = ?, review_waivable = ?, updated_at = ?
 			WHERE run_id = ? AND stage_name = ?`,
-			string(newStageState), output, reviewEvidence, reviewPolicy, formatTime(command.At),
+			string(newStageState), output, reviewEvidence, reviewPolicy, reviewWaivable, formatTime(command.At),
 			string(command.RunID), string(command.StageName),
 		); err != nil {
 			return err
@@ -430,13 +509,39 @@ func (s *Store) InterruptStage(ctx context.Context, command domain.InterruptStag
 		if run.State != domain.RunRunning || run.CurrentStage != command.StageName || run.ActiveStartedAt != nil {
 			return wrap(ErrInvalidTransition, "interrupt requires a RUNNING stage with closed accounting", nil)
 		}
-		var state string
-		if err := tx.QueryRowContext(ctx, "SELECT state FROM stage_attempts WHERE attempt_id = ? AND run_id = ? AND stage_name = ?",
-			string(command.AttemptID), string(command.RunID), string(command.StageName)).Scan(&state); err != nil {
+		if err := domain.ValidateRunTransition(run.State, domain.RunCreated); err != nil {
+			return wrap(ErrInvalidTransition, err.Error(), err)
+		}
+		if err := domain.ValidateStageTransition(domain.StageRunning, domain.StagePending); err != nil {
+			return wrap(ErrInvalidTransition, err.Error(), err)
+		}
+		var state, inputDigest, startedRaw string
+		var ordinal int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT state, input_digest, ordinal, started_at FROM stage_attempts
+			WHERE attempt_id = ? AND run_id = ? AND stage_name = ?`,
+			string(command.AttemptID), string(command.RunID), string(command.StageName),
+		).Scan(&state, &inputDigest, &ordinal, &startedRaw); err != nil {
 			return err
 		}
 		if state != string(domain.StageAttemptRunning) {
 			return wrap(ErrInvalidTransition, "only a RUNNING attempt can be interrupted", nil)
+		}
+		startedAt, err := parseTime(startedRaw)
+		if err != nil {
+			return err
+		}
+		if command.At.Before(startedAt) || command.At.Before(run.UpdatedAt) {
+			return wrap(ErrConsistency, "interrupt time precedes the persisted attempt or projection", nil)
+		}
+		finishedAt := command.At
+		persistedAttempt := domain.StageAttempt{
+			AttemptID: command.AttemptID, RunID: command.RunID, StageName: command.StageName,
+			Ordinal: ordinal, State: domain.StageAttemptInterrupted, InputDigest: domain.Digest(inputDigest),
+			Cause: &command.Cause, StartedAt: startedAt, FinishedAt: &finishedAt,
+		}
+		if err := persistedAttempt.Validate(); err != nil {
+			return wrap(ErrConsistency, "interrupted attempt would violate persisted domain invariants", err)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE stage_attempts SET state = 'INTERRUPTED', cause = ?, finished_at = ? WHERE attempt_id = ?`,
 			string(command.Cause), formatTime(command.At), string(command.AttemptID)); err != nil {
@@ -444,7 +549,7 @@ func (s *Store) InterruptStage(ctx context.Context, command domain.InterruptStag
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE stage_records SET state = 'PENDING', version = version + 1, current_attempt_id = NULL,
-				output_digest = NULL, review_evidence_digest = NULL, review_policy_digest = NULL, updated_at = ?
+				output_digest = NULL, review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL, updated_at = ?
 			WHERE run_id = ? AND stage_name = ?`, formatTime(command.At), string(command.RunID), string(command.StageName)); err != nil {
 			return err
 		}
@@ -533,6 +638,103 @@ func (s *Store) PendingCancel(ctx context.Context, runID domain.RunID) (*domain.
 	}
 	defer connection.Close()
 	return pendingCancelTx(ctx, connection, runID)
+}
+
+// FinalizeCancel commits the terminal projection only after the caller has
+// crossed its later exact-resource reconciliation boundary.
+func (s *Store) FinalizeCancel(ctx context.Context, command domain.FinalizeCancelCommand) (domain.RunSnapshot, error) {
+	if err := command.Validate(); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	commandDigest, _, err := digestJSON(command)
+	if err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	var result domain.RunSnapshot
+	err = s.immediate(ctx, func(tx *immediateTx) error {
+		if replayed, err := replayEvent(ctx, tx, command.RunID, command.IdempotencyKey, commandDigest, &result); err != nil || replayed {
+			return err
+		}
+		run, err := readRun(ctx, tx, command.RunID)
+		if err != nil {
+			return err
+		}
+		if run.Version != command.ExpectedRunVersion {
+			return wrap(ErrVersionConflict, "finalize cancel expected version does not match", nil)
+		}
+		if run.ActiveStartedAt != nil {
+			return wrap(ErrInvalidTransition, "finalize cancel requires closed active-time accounting", nil)
+		}
+		if run.State != domain.RunCreated && run.State != domain.RunBlocked && run.State != domain.RunNeedsReview {
+			return wrap(ErrInvalidTransition, "finalize cancel requires a paused or interrupted run", nil)
+		}
+		if err := domain.ValidateRunTransition(run.State, domain.RunCancelled); err != nil {
+			return wrap(ErrInvalidTransition, err.Error(), err)
+		}
+		pending, err := pendingCancelTx(ctx, tx, command.RunID)
+		if err != nil {
+			return err
+		}
+		if pending == nil || pending.ID != command.ControlRequestID {
+			return wrap(ErrConsistency, "finalize cancel does not match the active control request", nil)
+		}
+		var stageState string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT state FROM stage_records WHERE run_id = ? AND stage_name = ?`,
+			string(command.RunID), string(run.CurrentStage),
+		).Scan(&stageState); err != nil {
+			return err
+		}
+		if err := domain.ValidateStageTransition(domain.StageState(stageState), domain.StageCancelled); err != nil {
+			return wrap(ErrInvalidTransition, err.Error(), err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE stage_records SET state = 'CANCELLED', version = version + 1,
+				output_digest = NULL, current_attempt_id = NULL,
+				review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL,
+				updated_at = ?
+			WHERE run_id = ? AND stage_name = ?`,
+			formatTime(command.At), string(command.RunID), string(run.CurrentStage),
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE control_requests SET state = 'APPLIED', applied_at = ?
+			WHERE control_id = ? AND run_id = ? AND state = 'PENDING'`,
+			formatTime(command.At), string(command.ControlRequestID), string(command.RunID),
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE review_decisions SET state = 'STALE', applied_at = ?
+			WHERE run_id = ? AND state = 'PENDING'`,
+			formatTime(command.At), string(command.RunID),
+		); err != nil {
+			return err
+		}
+		newVersion := run.Version + 1
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE runs SET state = 'CANCELLED', version = ?, cancel_summary = ?, updated_at = ?
+			WHERE run_id = ?`,
+			newVersion, pending.Reason, formatTime(command.At), string(command.RunID),
+		); err != nil {
+			return err
+		}
+		result, err = readRun(ctx, tx, command.RunID)
+		if err != nil {
+			return err
+		}
+		if err := result.Validate(); err != nil {
+			return wrap(ErrConsistency, "finalized cancellation projection is invalid", err)
+		}
+		resultJSON, err := marshalResult(result)
+		if err != nil {
+			return err
+		}
+		return insertEvent(ctx, tx, command.RunID, newVersion, domain.EventCancelFinalized, run.CurrentStage,
+			command.IdempotencyKey, commandDigest, resultJSON, command.At)
+	})
+	return result, err
 }
 
 func (s *Store) AccountActiveTime(ctx context.Context, command domain.ActiveTimeCommand) (domain.ActiveTimeResult, error) {
@@ -687,6 +889,9 @@ func readRun(ctx context.Context, queryer rowQuerier, runID domain.RunID) (domai
 	if cancel.Valid {
 		result.CancelSummary = cancel.String
 	}
+	if err := result.Validate(); err != nil {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "stored run projection is invalid", err)
+	}
 	return result, nil
 }
 
@@ -733,23 +938,205 @@ func digestJSON(value any) (domain.Digest, []byte, error) {
 	return domain.SumBytes(encoded), encoded, nil
 }
 
+// legacyCreateRunDigestV691b611 reproduces the CreateRun command format used
+// before workflow revision and schema version became explicit request fields.
+// It exists only to recognize an exact, persisted 691b611 idempotent replay.
+func legacyCreateRunDigestV691b611(request domain.CreateRunRequest) (domain.Digest, error) {
+	type createRunRequestV691b611 struct {
+		RunID                         domain.RunID        `json:"run_id"`
+		SubmittedRequestJSON          []byte              `json:"submitted_request_json"`
+		SubmittedRequestDigest        domain.Digest       `json:"submitted_request_digest"`
+		EffectiveSeed                 int64               `json:"effective_seed"`
+		RedactedEffectiveConfigJSON   []byte              `json:"redacted_effective_config_json"`
+		RedactedEffectiveConfigDigest domain.Digest       `json:"redacted_effective_config_digest"`
+		WorkflowDigest                domain.Digest       `json:"workflow_digest"`
+		BudgetLimits                  domain.BudgetLimits `json:"budget_limits"`
+		StageSequence                 []domain.StageName  `json:"stage_sequence"`
+		CreatedAt                     time.Time           `json:"created_at"`
+		IdempotencyKey                string              `json:"idempotency_key"`
+	}
+	encoded, err := json.Marshal(createRunRequestV691b611{
+		RunID: request.RunID, SubmittedRequestJSON: request.SubmittedRequestJSON, SubmittedRequestDigest: request.SubmittedRequestDigest,
+		EffectiveSeed: request.EffectiveSeed, RedactedEffectiveConfigJSON: request.RedactedEffectiveConfigJSON,
+		RedactedEffectiveConfigDigest: request.RedactedEffectiveConfigDigest, WorkflowDigest: request.WorkflowDigest,
+		BudgetLimits: request.BudgetLimits, StageSequence: request.StageSequence, CreatedAt: request.CreatedAt,
+		IdempotencyKey: request.IdempotencyKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode 691b611 CreateRun command: %w", err)
+	}
+	return domain.SumBytes(encoded), nil
+}
+
+// validateLegacyCreateRunReplay makes the versioned digest fallback safe: a
+// matching pre-versioned digest is insufficient unless every immutable run,
+// stage, and creation-event binding still matches the submitted command.
+func validateLegacyCreateRunReplay(ctx context.Context, tx *immediateTx, request domain.CreateRunRequest, legacyDigest domain.Digest, storedResult []byte) error {
+	var (
+		storedRunID, storedRequestDigest, storedConfigDigest, storedWorkflowDigest string
+		storedWorkflowRevision, storedSchemaVersion, storedIdempotencyKey          string
+		storedRequestJSON, storedConfigJSON                                        []byte
+		storedSeed                                                                 int64
+		storedLimits                                                               domain.BudgetLimits
+		storedCreatedAt                                                            string
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT run_id, submitted_request_json, submitted_request_digest, effective_seed,
+			redacted_effective_config_json, redacted_effective_config_digest, workflow_digest,
+			workflow_revision, schema_version,
+			max_llm_calls, max_similarity_calls, max_llm_input_tokens, max_llm_output_tokens,
+			max_llm_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
+			max_mutations_per_stage, max_active_time_ns, create_idempotency_key, created_at
+		FROM runs WHERE create_idempotency_key = ?`, request.IdempotencyKey,
+	).Scan(
+		&storedRunID, &storedRequestJSON, &storedRequestDigest, &storedSeed,
+		&storedConfigJSON, &storedConfigDigest, &storedWorkflowDigest,
+		&storedWorkflowRevision, &storedSchemaVersion,
+		&storedLimits.MaxLLMCalls, &storedLimits.MaxSimilarityCalls, &storedLimits.MaxLLMInputTokens, &storedLimits.MaxLLMOutputTokens,
+		&storedLimits.MaxLLMCostMicroUSD, &storedLimits.MaxSandboxCreates, &storedLimits.MaxArtifactBytes, &storedLimits.MaxPackageBytes,
+		&storedLimits.MaxMutationsPerStage, &storedLimits.MaxActiveTimeMilliseconds, &storedIdempotencyKey, &storedCreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("read legacy create replay bindings: %w", err)
+	}
+	if storedLimits.MaxActiveTimeMilliseconds%int64(time.Millisecond) != 0 {
+		return wrap(ErrConsistency, "legacy create active-time binding is invalid", nil)
+	}
+	storedLimits.MaxActiveTimeMilliseconds /= int64(time.Millisecond)
+	createdAt, err := parseTime(storedCreatedAt)
+	if err != nil {
+		return wrap(ErrConsistency, "legacy create timestamp is invalid", err)
+	}
+	if storedRunID != string(request.RunID) ||
+		!bytes.Equal(storedRequestJSON, request.SubmittedRequestJSON) || storedRequestDigest != string(request.SubmittedRequestDigest) ||
+		storedSeed != request.EffectiveSeed ||
+		!bytes.Equal(storedConfigJSON, request.RedactedEffectiveConfigJSON) || storedConfigDigest != string(request.RedactedEffectiveConfigDigest) ||
+		storedWorkflowDigest != string(request.WorkflowDigest) ||
+		storedWorkflowRevision != string(request.WorkflowDigest) || storedWorkflowRevision != request.WorkflowRevision ||
+		storedSchemaVersion != string(request.SchemaVersion) ||
+		storedLimits != request.BudgetLimits || storedIdempotencyKey != request.IdempotencyKey ||
+		!createdAt.Equal(request.CreatedAt) {
+		return wrap(ErrConsistency, "legacy create idempotency content does not match persisted bindings", nil)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT stage_name, ordinal, workflow_revision, schema_version, logical_idempotency_key
+		FROM stage_records WHERE run_id = ? ORDER BY ordinal`, string(request.RunID))
+	if err != nil {
+		return fmt.Errorf("read legacy create stage bindings: %w", err)
+	}
+	defer rows.Close()
+	for index, stage := range request.StageSequence {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate legacy create stage bindings: %w", err)
+			}
+			return wrap(ErrConsistency, "legacy create stage sequence does not match persisted bindings", nil)
+		}
+		var storedStage, storedRevision, storedSchema, storedKey string
+		var storedOrdinal int
+		if err := rows.Scan(&storedStage, &storedOrdinal, &storedRevision, &storedSchema, &storedKey); err != nil {
+			return fmt.Errorf("scan legacy create stage binding: %w", err)
+		}
+		if storedStage != string(stage) || storedOrdinal != index+1 ||
+			storedRevision != request.WorkflowRevision || storedSchema != string(request.SchemaVersion) ||
+			storedKey != request.IdempotencyKey+":"+string(stage) {
+			return wrap(ErrConsistency, "legacy create stage sequence does not match persisted bindings", nil)
+		}
+	}
+	if rows.Next() {
+		return wrap(ErrConsistency, "legacy create stage sequence does not match persisted bindings", nil)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate legacy create stage bindings: %w", err)
+	}
+
+	var eventType, eventKey, eventDigest, eventOccurred string
+	var eventResult []byte
+	err = tx.QueryRowContext(ctx, `
+		SELECT event_type, idempotency_key, command_digest, result_json, occurred_at
+		FROM run_events WHERE run_id = ? AND version = 1`, string(request.RunID),
+	).Scan(&eventType, &eventKey, &eventDigest, &eventResult, &eventOccurred)
+	if err != nil {
+		return fmt.Errorf("read legacy create event binding: %w", err)
+	}
+	occurredAt, err := parseTime(eventOccurred)
+	if err != nil {
+		return wrap(ErrConsistency, "legacy create event timestamp is invalid", err)
+	}
+	if eventType != string(domain.EventRunCreated) || eventKey != request.IdempotencyKey || eventDigest != string(legacyDigest) ||
+		!bytes.Equal(eventResult, storedResult) || !occurredAt.Equal(request.CreatedAt) {
+		return wrap(ErrConsistency, "legacy create event does not match persisted bindings", nil)
+	}
+	return nil
+}
+
+// unmarshalLegacyCreateRunResultV691b611 preserves the historical idempotent
+// result while adapting its formerly derived schema field to the current type.
+func unmarshalLegacyCreateRunResultV691b611(storedResult []byte, request domain.CreateRunRequest) (domain.RunSnapshot, error) {
+	type runSnapshotV691b611 struct {
+		RunID                     domain.RunID     `json:"run_id"`
+		State                     domain.RunState  `json:"state"`
+		Version                   int64            `json:"version"`
+		WorkflowRevision          string           `json:"workflow_revision"`
+		SchemaVersion             string           `json:"schema_version"`
+		RequestDigest             domain.Digest    `json:"request_digest"`
+		ConfigDigest              domain.Digest    `json:"config_digest"`
+		WorkflowDigest            domain.Digest    `json:"workflow_digest"`
+		CurrentStage              domain.StageName `json:"current_stage"`
+		CurrentStageOrdinal       int              `json:"current_stage_ordinal"`
+		CreatedAt                 time.Time        `json:"created_at"`
+		UpdatedAt                 time.Time        `json:"updated_at"`
+		ActiveElapsed             time.Duration    `json:"active_elapsed"`
+		ActiveStartedAt           *time.Time       `json:"active_started_at,omitempty"`
+		LastAccountingHeartbeatAt *time.Time       `json:"last_accounting_heartbeat_at,omitempty"`
+		CancelSummary             string           `json:"cancel_summary,omitempty"`
+	}
+	var legacy runSnapshotV691b611
+	if err := json.Unmarshal(storedResult, &legacy); err != nil {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "stored legacy create result is invalid", err)
+	}
+	legacySchemaVersion, err := legacyCreateRunSchemaVersionV691b611(request.SubmittedRequestJSON)
+	if err != nil {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "decode legacy create schema version", err)
+	}
+	if legacy.RunID != request.RunID || legacy.WorkflowRevision != string(request.WorkflowDigest) ||
+		legacy.SchemaVersion != legacySchemaVersion || legacy.RequestDigest != request.SubmittedRequestDigest ||
+		legacy.ConfigDigest != request.RedactedEffectiveConfigDigest || legacy.WorkflowDigest != request.WorkflowDigest {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "stored legacy create result does not match persisted bindings", nil)
+	}
+	result := domain.RunSnapshot{
+		RunID: legacy.RunID, State: legacy.State, Version: legacy.Version,
+		WorkflowRevision: legacy.WorkflowRevision, SchemaVersion: request.SchemaVersion,
+		RequestDigest: legacy.RequestDigest, ConfigDigest: legacy.ConfigDigest, WorkflowDigest: legacy.WorkflowDigest,
+		CurrentStage: legacy.CurrentStage, CurrentStageOrdinal: legacy.CurrentStageOrdinal,
+		CreatedAt: legacy.CreatedAt, UpdatedAt: legacy.UpdatedAt,
+		ActiveElapsed: legacy.ActiveElapsed, ActiveStartedAt: legacy.ActiveStartedAt,
+		LastAccountingHeartbeatAt: legacy.LastAccountingHeartbeatAt, CancelSummary: legacy.CancelSummary,
+	}
+	if err := result.Validate(); err != nil {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "stored legacy create result is invalid", err)
+	}
+	return result, nil
+}
+
+// legacyCreateRunSchemaVersionV691b611 retains the schema lookup used by the
+// old CreateRun result before Migration 2 supplied the explicit binding.
+func legacyCreateRunSchemaVersionV691b611(submittedRequestJSON []byte) (string, error) {
+	var value map[string]any
+	if err := json.Unmarshal(submittedRequestJSON, &value); err != nil {
+		return "", err
+	}
+	schema, _ := value["schema"].(string)
+	return schema, nil
+}
+
 func marshalResult(value any) ([]byte, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("encode idempotent result: %w", err)
 	}
 	return encoded, nil
-}
-
-func requestSchemaVersion(encoded []byte) string {
-	var value map[string]any
-	if err := json.Unmarshal(encoded, &value); err != nil {
-		return ""
-	}
-	if schema, ok := value["schema"].(string); ok {
-		return schema
-	}
-	return ""
 }
 
 func parseTime(value string) (time.Time, error) {

@@ -16,6 +16,7 @@ type RuntimeStore interface {
 	InterruptStage(context.Context, domain.InterruptStageCommand) (domain.RunSnapshot, error)
 	RequestCancel(context.Context, domain.CancelRequest) (domain.ControlRequest, error)
 	PendingCancel(context.Context, domain.RunID) (*domain.ControlRequest, error)
+	FinalizeCancel(context.Context, domain.FinalizeCancelCommand) (domain.RunSnapshot, error)
 	AccountActiveTime(context.Context, domain.ActiveTimeCommand) (domain.ActiveTimeResult, error)
 }
 

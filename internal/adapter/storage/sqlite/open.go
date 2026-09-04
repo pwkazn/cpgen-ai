@@ -21,6 +21,10 @@ type Config struct {
 	Path        string
 	BusyTimeout time.Duration
 	MaxReaders  int
+
+	// migrationStartHook is a package-private test seam used to line up real
+	// simultaneous first opens before writer serialization begins.
+	migrationStartHook func()
 }
 
 type Error struct {

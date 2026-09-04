@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -366,6 +367,201 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 	})
 }
 
+// TestRuntimePersistsExplicitWorkflowAndSchemaBindings catches deriving the
+// revision from a digest or omitting compatibility bindings from stage rows.
+func TestRuntimePersistsExplicitWorkflowAndSchemaBindings(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "workflow.db"), clock.NewFake(testNow))
+	request := testCreateRunRequest(testRunID, testNow, 30*time.Second)
+	request.WorkflowRevision = "compiled-fake/v7"
+	created := mustCreateRun(t, store, request)
+	if created.WorkflowRevision != request.WorkflowRevision || created.SchemaVersion != request.SchemaVersion {
+		t.Fatalf("created bindings = revision:%q schema:%q", created.WorkflowRevision, created.SchemaVersion)
+	}
+	var mismatched int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM stage_records
+		WHERE run_id = ? AND (workflow_revision <> ? OR schema_version <> ?)`,
+		string(testRunID), request.WorkflowRevision, string(request.SchemaVersion),
+	).Scan(&mismatched); err != nil {
+		t.Fatalf("query stage bindings: %v", err)
+	}
+	if mismatched != 0 {
+		t.Fatalf("stage rows with mismatched bindings = %d", mismatched)
+	}
+	invalid := testCreateRunRequest("run_00000000000000000000000000000021", testNow, time.Second)
+	invalid.SchemaVersion = "cpgen.request/v2"
+	invalid.IdempotencyKey = "create_00000000000000000000000000000021"
+	if _, err := store.CreateRun(ctx, invalid); err == nil {
+		t.Fatal("CreateRun accepted schema version detached from canonical request JSON")
+	}
+}
+
+// TestFinalizeCancelHandlesPausedAndInterruptedRuns catches active CANCEL rows
+// that can never reach a named, versioned terminal transition after external
+// reconciliation has completed.
+func TestFinalizeCancelHandlesPausedAndInterruptedRuns(t *testing.T) {
+	t.Parallel()
+	for _, state := range []domain.RunState{domain.RunCreated, domain.RunBlocked, domain.RunNeedsReview} {
+		state := state
+		t.Run(string(state), func(t *testing.T) {
+			ctx := context.Background()
+			suffix := map[domain.RunState]string{
+				domain.RunCreated: "22", domain.RunBlocked: "23", domain.RunNeedsReview: "24",
+			}[state]
+			suffixNumber := map[domain.RunState]int{
+				domain.RunCreated: 22, domain.RunBlocked: 23, domain.RunNeedsReview: 24,
+			}[state]
+			runID := domain.RunID("run_000000000000000000000000000000" + suffix)
+			attemptID := domain.AttemptID("attempt_000000000000000000000000000000" + suffix)
+			store := openRuntimeStore(t, filepath.Join(t.TempDir(), "workflow.db"), clock.NewFake(testNow))
+			request := testCreateRunRequest(runID, testNow, 30*time.Second)
+			request.IdempotencyKey = "create_000000000000000000000000000000" + suffix
+			snapshot := mustCreateRun(t, store, request)
+			if state != domain.RunCreated {
+				input := domain.SumBytes([]byte("cancel pause " + suffix))
+				mustBeginStage(t, store, runID, attemptID, 1, "prepare", input, testNow.Add(time.Second), "begin_000000000000000000000000000000"+suffix)
+				finish := domain.FinishStageCommand{
+					RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID,
+					IdempotencyKey: "finish_000000000000000000000000000000" + suffix,
+					At:             testNow.Add(2 * time.Second),
+				}
+				if state == domain.RunBlocked {
+					finish.AttemptState, finish.RunState = domain.StageAttemptBlocked, domain.RunBlocked
+				} else {
+					evidence := domain.SumBytes([]byte("review evidence " + suffix))
+					policy := domain.SumBytes([]byte("review policy " + suffix))
+					finish.AttemptState, finish.RunState = domain.StageAttemptNeedsReview, domain.RunNeedsReview
+					finish.ReviewEvidenceDigest, finish.ReviewPolicyDigest = &evidence, &policy
+					finish.ReviewGateWaivable = false
+				}
+				var err error
+				snapshot, err = store.FinishStage(ctx, finish)
+				if err != nil {
+					t.Fatalf("pause run: %v", err)
+				}
+			}
+			controlID := domain.ControlRequestID("control_000000000000000000000000000000" + suffix)
+			control, err := store.RequestCancel(ctx, domain.CancelRequest{
+				ID: controlID, RunID: runID, ExpectedRunVersion: snapshot.Version,
+				Reason:         "operator cancel " + suffix,
+				IdempotencyKey: "cancel_000000000000000000000000000000" + suffix,
+				At:             testNow.Add(3 * time.Second),
+			})
+			if err != nil {
+				t.Fatalf("RequestCancel: %v", err)
+			}
+			command := domain.FinalizeCancelCommand{
+				RunID: runID, ExpectedRunVersion: control.RunVersion, ControlRequestID: controlID,
+				ReconciliationDigest: domain.SumBytes([]byte("reconciled exact resources " + suffix)),
+				IdempotencyKey:       fmt.Sprintf("cancelfinalize_%032x", suffixNumber),
+				At:                   testNow.Add(4 * time.Second),
+			}
+			cancelled, err := store.FinalizeCancel(ctx, command)
+			if err != nil {
+				t.Fatalf("FinalizeCancel: %v", err)
+			}
+			if cancelled.State != domain.RunCancelled || cancelled.CancelSummary == "" {
+				t.Fatalf("cancelled snapshot = %+v", cancelled)
+			}
+			replayed, err := store.FinalizeCancel(ctx, command)
+			if err != nil || !reflect.DeepEqual(replayed, cancelled) {
+				t.Fatalf("FinalizeCancel replay = %+v, %v", replayed, err)
+			}
+		})
+	}
+
+	t.Run("RUNNING requires interruption before finalize", func(t *testing.T) {
+		ctx := context.Background()
+		runID := domain.RunID("run_00000000000000000000000000000025")
+		attemptID := domain.AttemptID("attempt_00000000000000000000000000000025")
+		store := openRuntimeStore(t, filepath.Join(t.TempDir(), "workflow.db"), clock.NewFake(testNow))
+		request := testCreateRunRequest(runID, testNow, 30*time.Second)
+		request.IdempotencyKey = "create_00000000000000000000000000000025"
+		mustCreateRun(t, store, request)
+		input := domain.SumBytes([]byte("running cancel"))
+		mustBeginStage(t, store, runID, attemptID, 1, "prepare", input, testNow.Add(time.Second), "begin_00000000000000000000000000000025")
+		control, err := store.RequestCancel(ctx, domain.CancelRequest{
+			ID: "control_00000000000000000000000000000025", RunID: runID, ExpectedRunVersion: 2,
+			Reason: "stop running", IdempotencyKey: "cancel_00000000000000000000000000000025", At: testNow.Add(2 * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("RequestCancel: %v", err)
+		}
+		finalize := domain.FinalizeCancelCommand{
+			RunID: runID, ExpectedRunVersion: control.RunVersion,
+			ControlRequestID:     "control_00000000000000000000000000000025",
+			ReconciliationDigest: domain.SumBytes([]byte("resources stopped")),
+			IdempotencyKey:       fmt.Sprintf("cancelfinalize_%032x", 25), At: testNow.Add(3 * time.Second),
+		}
+		if _, err := store.FinalizeCancel(ctx, finalize); !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("FinalizeCancel while RUNNING = %v, want ErrInvalidTransition", err)
+		}
+		interrupted, err := store.InterruptStage(ctx, domain.InterruptStageCommand{
+			RunID: runID, ExpectedRunVersion: control.RunVersion, StageName: "prepare", AttemptID: attemptID,
+			Cause: domain.CauseUserCancel, IdempotencyKey: "interrupt_00000000000000000000000000000025", At: testNow.Add(3 * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("InterruptStage with pending cancel: %v", err)
+		}
+		finalize.ExpectedRunVersion = interrupted.Version
+		finalize.At = testNow.Add(4 * time.Second)
+		cancelled, err := store.FinalizeCancel(ctx, finalize)
+		if err != nil || cancelled.State != domain.RunCancelled {
+			t.Fatalf("FinalizeCancel after interrupt = %+v, %v", cancelled, err)
+		}
+	})
+}
+
+// TestFinishStageRejectsNonMonotonePersistedTime catches an accepted command
+// that would make the stored attempt fail its own domain validation.
+func TestFinishStageRejectsNonMonotonePersistedTime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "workflow.db"), clock.NewFake(testNow))
+	mustCreateRun(t, store, testCreateRunRequest(testRunID, testNow, 30*time.Second))
+	input := domain.SumBytes([]byte("time input"))
+	mustBeginStage(t, store, testRunID, testAttemptID, 1, "prepare", input, testNow.Add(2*time.Second), "begin_00000000000000000000000000000031")
+	_, err := store.FinishStage(ctx, domain.FinishStageCommand{
+		RunID: testRunID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: testAttemptID,
+		AttemptState: domain.StageAttemptFailed, RunState: domain.RunFailed,
+		IdempotencyKey: "finish_00000000000000000000000000000031", At: testNow.Add(time.Second),
+	})
+	if err == nil {
+		t.Fatal("FinishStage accepted time before attempt start/current update")
+	}
+}
+
+// TestWorkflowSQLStateConstraintsRejectDirectAttacks proves callers cannot
+// bypass the domain matrices with direct SQL writes.
+func TestWorkflowSQLStateConstraintsRejectDirectAttacks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "workflow.db"), clock.NewFake(testNow))
+	mustCreateRun(t, store, testCreateRunRequest(testRunID, testNow, 30*time.Second))
+	digest := string(domain.SumBytes([]byte("attack")))
+	for name, statement := range map[string]string{
+		"active interval outside running": `UPDATE runs SET active_started_at = '2026-09-01T08:00:00Z', last_accounting_heartbeat_at = '2026-09-01T08:00:00Z' WHERE run_id = '` + string(testRunID) + `'`,
+		"empty run workflow revision":     `UPDATE runs SET workflow_revision = '' WHERE run_id = '` + string(testRunID) + `'`,
+		"empty stage schema":              `UPDATE stage_records SET schema_version = '' WHERE run_id = '` + string(testRunID) + `' AND stage_name = 'prepare'`,
+		"failed review binding":           `UPDATE stage_records SET state = 'FAILED', attempt_count = 1, review_evidence_digest = '` + digest + `', review_policy_digest = '` + digest + `', review_waivable = 1 WHERE run_id = '` + string(testRunID) + `' AND stage_name = 'prepare'`,
+		"cancelled review binding":        `UPDATE stage_records SET state = 'CANCELLED', review_evidence_digest = '` + digest + `', review_policy_digest = '` + digest + `', review_waivable = 1 WHERE run_id = '` + string(testRunID) + `' AND stage_name = 'prepare'`,
+	} {
+		if _, err := store.db.ExecContext(ctx, statement); err == nil {
+			t.Fatalf("direct SQL attack %q succeeded", name)
+		}
+	}
+	input := domain.SumBytes([]byte("attempt attack"))
+	mustBeginStage(t, store, testRunID, testAttemptID, 1, "prepare", input, testNow.Add(2*time.Second), "begin_00000000000000000000000000000032")
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE stage_attempts SET state = 'FAILED', finished_at = ? WHERE attempt_id = ?`,
+		formatTime(testNow.Add(time.Second)), string(testAttemptID),
+	); err == nil {
+		t.Fatal("direct SQL accepted finished_at before started_at")
+	}
+}
+
 func openRuntimeStore(t *testing.T, path string, source clock.Clock) *Store {
 	t.Helper()
 	store, err := OpenWithClock(context.Background(), Config{Path: path, BusyTimeout: time.Second, MaxReaders: 3}, source)
@@ -377,13 +573,14 @@ func openRuntimeStore(t *testing.T, path string, source clock.Clock) *Store {
 }
 
 func testCreateRunRequest(runID domain.RunID, now time.Time, activeLimit time.Duration) domain.CreateRunRequest {
-	requestJSON := []byte(`{"brief":"test","schema":"cpgen.request/v1"}`)
+	requestJSON := []byte(`{"brief":"test","schema_version":"cpgen.request/v1"}`)
 	configJSON := []byte(`{"schema":"cpgen.config/v1"}`)
 	return domain.CreateRunRequest{
 		RunID:                runID,
 		SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: domain.SumBytes(requestJSON),
 		EffectiveSeed:               7,
 		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: domain.SumBytes(configJSON),
+		WorkflowRevision: "slice1/v1", SchemaVersion: "cpgen.request/v1",
 		WorkflowDigest: domain.SumBytes([]byte("slice1-workflow-v1")),
 		BudgetLimits: domain.BudgetLimits{
 			MaxLLMCalls: 3, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000, MaxLLMOutputTokens: 1000,

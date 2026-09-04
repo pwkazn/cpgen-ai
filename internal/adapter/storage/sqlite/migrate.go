@@ -66,26 +66,28 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	applied, err := s.appliedMigrations(ctx)
-	if err != nil {
-		return err
+	if s.config.migrationStartHook != nil {
+		s.config.migrationStartHook()
 	}
-	if len(applied) > len(migrations) {
-		return wrap(ErrMigrationGap, "database contains an unknown future migration", nil)
-	}
-	for index, record := range applied {
-		expectedVersion := index + 1
-		if record.version != expectedVersion {
-			return wrap(ErrMigrationGap, fmt.Sprintf("database is missing migration version %d", expectedVersion), nil)
+	return s.immediate(ctx, func(tx *immediateTx) error {
+		applied, err := appliedMigrationsTx(ctx, tx)
+		if err != nil {
+			return err
 		}
-		expected := migrations[index]
-		if record.name != expected.name || record.hash != expected.hash {
-			return wrap(ErrMigrationDrift, fmt.Sprintf("migration %d name or hash changed", record.version), nil)
+		if len(applied) > len(migrations) {
+			return wrap(ErrMigrationGap, "database contains an unknown future migration", nil)
 		}
-	}
-	for _, item := range migrations[len(applied):] {
-		item := item
-		if err := s.immediate(ctx, func(tx *immediateTx) error {
+		for index, record := range applied {
+			expectedVersion := index + 1
+			if record.version != expectedVersion {
+				return wrap(ErrMigrationGap, fmt.Sprintf("database is missing migration version %d", expectedVersion), nil)
+			}
+			expected := migrations[index]
+			if record.name != expected.name || record.hash != expected.hash {
+				return wrap(ErrMigrationDrift, fmt.Sprintf("migration %d name or hash changed", record.version), nil)
+			}
+		}
+		for _, item := range migrations[len(applied):] {
 			if _, err := tx.ExecContext(ctx, item.sql); err != nil {
 				return fmt.Errorf("execute migration %d: %w", item.version, err)
 			}
@@ -97,12 +99,12 @@ func (s *Store) migrate(ctx context.Context) error {
 				"INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)",
 				item.version, item.name, item.hash, formatTime(appliedAt),
 			)
-			return err
-		}); err != nil {
-			return err
+			if err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 type appliedMigration struct {
@@ -111,14 +113,9 @@ type appliedMigration struct {
 	hash    string
 }
 
-func (s *Store) appliedMigrations(ctx context.Context) ([]appliedMigration, error) {
-	connection, err := s.connection(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer connection.Close()
+func appliedMigrationsTx(ctx context.Context, tx *immediateTx) ([]appliedMigration, error) {
 	var exists int
-	if err := connection.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
 	).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("inspect migration table: %w", err)
@@ -126,7 +123,7 @@ func (s *Store) appliedMigrations(ctx context.Context) ([]appliedMigration, erro
 	if exists == 0 {
 		return nil, nil
 	}
-	rows, err := connection.QueryContext(ctx, "SELECT version, name, sha256 FROM schema_migrations ORDER BY version")
+	rows, err := tx.QueryContext(ctx, "SELECT version, name, sha256 FROM schema_migrations ORDER BY version")
 	if err != nil {
 		return nil, fmt.Errorf("read applied migrations: %w", err)
 	}
@@ -176,4 +173,6 @@ func (s *Store) checkIntegrity(ctx context.Context) error {
 	return nil
 }
 
-func formatTime(value time.Time) string { return value.Format(time.RFC3339Nano) }
+const sqliteTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatTime(value time.Time) string { return value.Format(sqliteTimeFormat) }
