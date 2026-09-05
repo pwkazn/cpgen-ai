@@ -446,6 +446,21 @@ type SandboxDispatchAuthorization interface {
 	sealSandboxDispatchAuthorization()
 }
 
+// SandboxExecutionIdentity is implemented by current sandbox authorizations.
+// It is optional on the legacy Slice 0 interface so old probe fixtures can be
+// replayed while callers migrate to durable SandboxExecution identities.
+type SandboxExecutionIdentity interface {
+	SandboxExecutionID() domain.SandboxExecutionID
+}
+
+func SandboxExecutionIDOf(value any) (domain.SandboxExecutionID, bool) {
+	identity, ok := value.(SandboxExecutionIdentity)
+	if !ok {
+		return "", false
+	}
+	return identity.SandboxExecutionID(), true
+}
+
 type DockerProbeRequest struct {
 	Profile string `json:"profile"`
 }

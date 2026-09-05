@@ -20,6 +20,7 @@ import (
 type PlanIdentity struct {
 	RunID                domain.RunID
 	AttemptID            domain.AttemptID
+	SandboxExecutionID   domain.SandboxExecutionID
 	LogicalOperationID   string
 	LeaseEpoch           int64
 	OperationNonce       string
@@ -35,10 +36,15 @@ func (i PlanIdentity) Validate() error {
 	if err := i.AttemptID.Validate(); err != nil {
 		return err
 	}
+	if i.SandboxExecutionID != "" {
+		if err := i.SandboxExecutionID.Validate(); err != nil {
+			return err
+		}
+	}
 	if i.LogicalOperationID == "" || len(i.LogicalOperationID) > 256 || !utf8.ValidString(i.LogicalOperationID) || strings.IndexFunc(i.LogicalOperationID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return fmt.Errorf("invalid logical operation ID %q", i.LogicalOperationID)
 	}
-	if i.LeaseEpoch <= 0 {
+	if i.SandboxExecutionID == "" && i.LeaseEpoch <= 0 {
 		return fmt.Errorf("lease epoch must be positive")
 	}
 	if !operationNoncePattern.MatchString(i.OperationNonce) {
@@ -226,12 +232,11 @@ func ResourceLabels(identity PlanIdentity, plan port.ContainerPlan, resource por
 }
 
 func baseResourceLabels(identity PlanIdentity, resource port.PlannedResource) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"org.cpgen.attempt":            string(identity.AttemptID),
 		"org.cpgen.engine-digest":      string(identity.EngineIdentityDigest),
 		"org.cpgen.execution-protocol": ExecutionProtocolDockerDirectV2,
 		"org.cpgen.kind":               string(resource.Kind),
-		"org.cpgen.lease-epoch":        strconv.FormatInt(identity.LeaseEpoch, 10),
 		"org.cpgen.logical-operation":  identity.LogicalOperationID,
 		"org.cpgen.name":               resource.DeterministicName,
 		"org.cpgen.ordinal":            strconv.Itoa(resource.Ordinal),
@@ -239,6 +244,13 @@ func baseResourceLabels(identity PlanIdentity, resource port.PlannedResource) ma
 		"org.cpgen.run":                string(identity.RunID),
 		"org.cpgen.slice":              "0",
 	}
+	if identity.SandboxExecutionID != "" {
+		labels["org.cpgen.sandbox-execution"] = string(identity.SandboxExecutionID)
+	} else {
+		// Compatibility for the pre-SandboxExecution Slice 0 canary only.
+		labels["org.cpgen.lease-epoch"] = strconv.FormatInt(identity.LeaseEpoch, 10)
+	}
+	return labels
 }
 
 func digestLabels(labels map[string]string) domain.Digest {

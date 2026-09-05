@@ -21,6 +21,8 @@ type CallRecordID string
 type ArtifactDeclarationID string
 type ArtifactOccurrenceID string
 type CacheReuseRecordID string
+type SandboxExecutionID string
+type SandboxResourceID string
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}_[0-9a-f]{32}$`)
 
@@ -74,6 +76,8 @@ func (id ArtifactOccurrenceID) Validate() error {
 	return validateID("artifact occurrence id", string(id))
 }
 func (id CacheReuseRecordID) Validate() error { return validateID("cache reuse record id", string(id)) }
+func (id SandboxExecutionID) Validate() error { return validateID("sandbox execution id", string(id)) }
+func (id SandboxResourceID) Validate() error  { return validateID("sandbox resource id", string(id)) }
 
 func (id *RunID) UnmarshalJSON(data []byte) error {
 	return unmarshalID(data, "run id", (*string)(id))
@@ -113,4 +117,10 @@ func (id *ArtifactOccurrenceID) UnmarshalJSON(data []byte) error {
 }
 func (id *CacheReuseRecordID) UnmarshalJSON(data []byte) error {
 	return unmarshalID(data, "cache reuse record id", (*string)(id))
+}
+func (id *SandboxExecutionID) UnmarshalJSON(data []byte) error {
+	return unmarshalID(data, "sandbox execution id", (*string)(id))
+}
+func (id *SandboxResourceID) UnmarshalJSON(data []byte) error {
+	return unmarshalID(data, "sandbox resource id", (*string)(id))
 }

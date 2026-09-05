@@ -306,13 +306,17 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 		"org.cpgen.engine-digest":      labels["org.cpgen.engine-digest"],
 		"org.cpgen.execution-protocol": labels["org.cpgen.execution-protocol"],
 		"org.cpgen.kind":               labels["org.cpgen.kind"],
-		"org.cpgen.lease-epoch":        labels["org.cpgen.lease-epoch"],
 		"org.cpgen.logical-operation":  labels["org.cpgen.logical-operation"],
 		"org.cpgen.name":               labels["org.cpgen.name"],
 		"org.cpgen.ordinal":            labels["org.cpgen.ordinal"],
 		"org.cpgen.role":               labels["org.cpgen.role"],
 		"org.cpgen.run":                labels["org.cpgen.run"],
 		"org.cpgen.slice":              labels["org.cpgen.slice"],
+	}
+	if labels["org.cpgen.sandbox-execution"] != "" {
+		base["org.cpgen.sandbox-execution"] = labels["org.cpgen.sandbox-execution"]
+	} else {
+		base["org.cpgen.lease-epoch"] = labels["org.cpgen.lease-epoch"]
 	}
 	encoded, err := json.Marshal(base)
 	if err != nil {

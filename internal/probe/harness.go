@@ -26,16 +26,16 @@ type Dependencies struct {
 }
 
 type Harness struct {
-	mu        sync.Mutex
-	runner    port.DockerSandbox
-	lock      toolchain.Lock
-	artifacts *MemoryArtifactStore
-	engine    domain.Digest
-	runID     domain.RunID
-	attemptID domain.AttemptID
-	ownerID   domain.OwnerID
-	scope     domain.Digest
-	ordinal   uint64
+	mu                 sync.Mutex
+	runner             port.DockerSandbox
+	lock               toolchain.Lock
+	artifacts          *MemoryArtifactStore
+	engine             domain.Digest
+	runID              domain.RunID
+	attemptID          domain.AttemptID
+	sandboxExecutionID domain.SandboxExecutionID
+	scope              domain.Digest
+	ordinal            uint64
 }
 
 func NewSlice0ProbeHarness(dependencies Dependencies) (*Harness, error) {
@@ -56,14 +56,14 @@ func NewSlice0ProbeHarness(dependencies Dependencies) (*Harness, error) {
 	if err != nil {
 		return nil, err
 	}
-	ownerID, err := domain.NewID("owner")
+	sandboxID, err := domain.NewID("sandbox")
 	if err != nil {
 		return nil, err
 	}
 	return &Harness{
 		runner: dependencies.Runner, lock: dependencies.Lock, artifacts: dependencies.Artifacts,
 		engine: dependencies.EngineIdentityDigest, runID: domain.RunID(runID), attemptID: domain.AttemptID(attemptID),
-		ownerID: domain.OwnerID(ownerID), scope: domain.SumBytes([]byte(runID + ":slice0-probe")),
+		sandboxExecutionID: domain.SandboxExecutionID(sandboxID), scope: domain.SumBytes([]byte(runID + ":slice0-probe")),
 	}, nil
 }
 
@@ -281,15 +281,15 @@ func (h *Harness) planIdentity(logical string) (docker.PlanIdentity, error) {
 		return docker.PlanIdentity{}, err
 	}
 	return docker.PlanIdentity{
-		RunID: h.runID, AttemptID: h.attemptID, LogicalOperationID: logical, LeaseEpoch: 1,
+		RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: h.sandboxExecutionID, LogicalOperationID: logical,
 		OperationNonce: hex.EncodeToString(nonce[:]), EngineIdentityDigest: h.engine,
 	}, nil
 }
 
 func (h *Harness) probeIdentity(logical string, plan domain.Digest) port.ProbeAuthorizationIdentity {
 	return port.ProbeAuthorizationIdentity{
-		LogicalOperationID: logical, RunID: h.runID, AttemptID: h.attemptID, OwnerID: h.ownerID,
-		LeaseEpoch: 1, ScopeDigest: h.scope, PlanDigest: plan,
+		LogicalOperationID: logical, RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: h.sandboxExecutionID,
+		EngineIdentityDigest: h.engine, ScopeDigest: h.scope, PlanDigest: plan,
 	}
 }
 

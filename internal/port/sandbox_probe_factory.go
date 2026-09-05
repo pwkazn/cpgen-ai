@@ -41,8 +41,11 @@ func (a *probeSandboxDispatchAuthorization) LogicalOperationID() string {
 }
 func (a *probeSandboxDispatchAuthorization) RunID() domain.RunID         { return a.identity.RunID }
 func (a *probeSandboxDispatchAuthorization) AttemptID() domain.AttemptID { return a.identity.AttemptID }
-func (a *probeSandboxDispatchAuthorization) OwnerID() domain.OwnerID     { return a.identity.OwnerID }
-func (a *probeSandboxDispatchAuthorization) LeaseEpoch() int64           { return a.identity.LeaseEpoch }
+func (a *probeSandboxDispatchAuthorization) SandboxExecutionID() domain.SandboxExecutionID {
+	return a.identity.SandboxExecutionID
+}
+func (a *probeSandboxDispatchAuthorization) OwnerID() domain.OwnerID { return a.identity.OwnerID }
+func (a *probeSandboxDispatchAuthorization) LeaseEpoch() int64       { return a.identity.LeaseEpoch }
 func (a *probeSandboxDispatchAuthorization) ScopeDigest() domain.Digest {
 	return a.identity.ScopeDigest
 }
@@ -127,7 +130,10 @@ type probeDispatchGrant struct {
 func (g probeDispatchGrant) CallID() domain.AttemptCallID { return g.callID }
 func (g probeDispatchGrant) RunID() domain.RunID          { return g.identity.RunID }
 func (g probeDispatchGrant) AttemptID() domain.AttemptID  { return g.identity.AttemptID }
-func (g probeDispatchGrant) OwnerID() domain.OwnerID      { return g.identity.OwnerID }
-func (g probeDispatchGrant) LeaseEpoch() int64            { return g.identity.LeaseEpoch }
-func (g probeDispatchGrant) ScopeDigest() domain.Digest   { return g.identity.ScopeDigest }
-func (g probeDispatchGrant) sealDispatchAuthorization()   {}
+func (g probeDispatchGrant) SandboxExecutionID() domain.SandboxExecutionID {
+	return g.identity.SandboxExecutionID
+}
+func (g probeDispatchGrant) OwnerID() domain.OwnerID    { return g.identity.OwnerID }
+func (g probeDispatchGrant) LeaseEpoch() int64          { return g.identity.LeaseEpoch }
+func (g probeDispatchGrant) ScopeDigest() domain.Digest { return g.identity.ScopeDigest }
+func (g probeDispatchGrant) sealDispatchAuthorization() {}

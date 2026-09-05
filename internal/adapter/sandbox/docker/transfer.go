@@ -370,6 +370,9 @@ func (op *operation) startContainer(ctx context.Context, owned *ownedContainer) 
 	if _, err := op.runner.engine.ContainerStart(ctx, owned.id, moby.ContainerStartOptions{}); err != nil {
 		return err
 	}
+	if err := op.lifecycleAdvanceStarted(ctx, owned.resource, owned.id); err != nil {
+		return err
+	}
 	owned.running = true
 	return nil
 }

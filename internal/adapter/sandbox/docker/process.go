@@ -226,6 +226,9 @@ func (op *operation) executeTarget(ctx context.Context, target *ownedContainer, 
 			evidence.StartFailure = true
 			return processExecution{}, fmt.Errorf("start target: %w", startErr)
 		}
+		if err := op.lifecycleAdvanceStarted(ctx, target.resource, target.id); err != nil {
+			return processExecution{}, err
+		}
 		evidence.Started = true
 		target.running = true
 	case <-hardTimer.C:

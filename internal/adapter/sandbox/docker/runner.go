@@ -62,6 +62,7 @@ type RunnerOptions struct {
 	Artifacts            port.MeteredArtifactSink
 	Watchdog             WatchdogController
 	Limits               ControlLimits
+	Lifecycle            port.SandboxLifecycleRecorder
 }
 
 type Runner struct {
@@ -73,6 +74,7 @@ type Runner struct {
 	artifacts      port.MeteredArtifactSink
 	watchdog       WatchdogController
 	limits         ControlLimits
+	lifecycle      port.SandboxLifecycleRecorder
 }
 
 func NewRunner(options RunnerOptions) (*Runner, error) {
@@ -108,6 +110,7 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	return &Runner{
 		engine: options.Engine, config: options.Config, lock: lockCopy, engineIdentity: options.EngineIdentityDigest,
 		blobs: options.Blobs, artifacts: options.Artifacts, watchdog: options.Watchdog, limits: options.Limits,
+		lifecycle: options.Lifecycle,
 	}, nil
 }
 
@@ -155,6 +158,8 @@ type operation struct {
 	watchdog           WatchdogSession
 	targetPhase        bool
 	targetStopped      bool
+	lifecycleResources map[int]domain.SandboxResource
+	lifecycleVersion   int64
 }
 
 var plannedNoncePattern = regexp.MustCompile(`^cpgen-s0-([0-9a-f]{32})-`)
@@ -168,8 +173,14 @@ func (r *Runner) newOperation(auth port.SandboxDispatchAuthorization) (*operatio
 		return nil, err
 	}
 	probeIdentity := port.ProbeAuthorizationIdentity{
-		LogicalOperationID: auth.LogicalOperationID(), RunID: auth.RunID(), AttemptID: auth.AttemptID(), OwnerID: auth.OwnerID(),
-		LeaseEpoch: auth.LeaseEpoch(), ScopeDigest: auth.ScopeDigest(), PlanDigest: auth.PlanDigest(),
+		LogicalOperationID: auth.LogicalOperationID(), RunID: auth.RunID(), AttemptID: auth.AttemptID(),
+		OwnerID: auth.OwnerID(), LeaseEpoch: auth.LeaseEpoch(), ScopeDigest: auth.ScopeDigest(), PlanDigest: auth.PlanDigest(),
+		EngineIdentityDigest: r.engineIdentity,
+	}
+	if executionID, ok := port.SandboxExecutionIDOf(auth); ok && executionID != "" {
+		probeIdentity.SandboxExecutionID = executionID
+		probeIdentity.OwnerID = ""
+		probeIdentity.LeaseEpoch = 0
 	}
 	if err := probeIdentity.Validate(); err != nil {
 		return nil, err
@@ -185,13 +196,59 @@ func (r *Runner) newOperation(auth port.SandboxDispatchAuthorization) (*operatio
 		RunID: auth.RunID(), AttemptID: auth.AttemptID(), LogicalOperationID: auth.LogicalOperationID(), LeaseEpoch: auth.LeaseEpoch(),
 		OperationNonce: match[1], EngineIdentityDigest: r.engineIdentity,
 	}
+	if executionID, ok := port.SandboxExecutionIDOf(auth); ok && executionID != "" {
+		identity.SandboxExecutionID = executionID
+		identity.LeaseEpoch = 0
+	}
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
 	if plan.TransferBytesMax > r.limits.MaxTransferBytes {
 		return nil, fmt.Errorf("planned transfer bytes %d exceed control limit %d", plan.TransferBytesMax, r.limits.MaxTransferBytes)
 	}
-	return &operation{runner: r, auth: auth, plan: plan, identity: identity}, nil
+	op := &operation{runner: r, auth: auth, plan: plan, identity: identity}
+	if r.lifecycle != nil && identity.SandboxExecutionID != "" {
+		if err := op.prepareLifecycle(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	return op, nil
+}
+
+func (op *operation) prepareLifecycle(ctx context.Context) error {
+	stage := domain.StageName("sandbox")
+	if value, ok := op.auth.(interface{ StageName() domain.StageName }); ok && value.StageName() != "" {
+		stage = value.StageName()
+	}
+	now := time.Now().UTC()
+	resources := make([]domain.SandboxResource, 0, len(op.plan.Resources))
+	op.lifecycleResources = make(map[int]domain.SandboxResource, len(op.plan.Resources))
+	for _, planned := range op.plan.Resources {
+		id, err := domain.NewID("resource")
+		if err != nil {
+			return err
+		}
+		resource := domain.SandboxResource{ID: domain.SandboxResourceID(id), ExecutionID: op.identity.SandboxExecutionID, PlanOrdinal: planned.Ordinal, Kind: string(planned.Kind), Role: string(planned.Role), DeterministicName: planned.DeterministicName, ExpectedLabelsDigest: planned.ExpectedLabelsDigest, EngineIdentityDigest: op.identity.EngineIdentityDigest, Phase: domain.SandboxResourcePlanned, Version: 1, CreatedAt: now, UpdatedAt: now}
+		resources = append(resources, resource)
+		op.lifecycleResources[planned.Ordinal] = resource
+	}
+	controlRef := "sandbox-control-" + string(op.identity.SandboxExecutionID)
+	key, err := domain.NewID("prepare")
+	if err != nil {
+		return err
+	}
+	execution, err := op.runner.lifecycle.PrepareExecution(ctx, domain.PrepareExecutionRequest{ExecutionID: op.identity.SandboxExecutionID, RunID: op.identity.RunID, AttemptID: op.identity.AttemptID, StageName: stage, LogicalOperationID: op.identity.LogicalOperationID, ScopeDigest: op.auth.ScopeDigest(), PlanDigest: op.plan.PlanDigest, EngineIdentityDigest: op.identity.EngineIdentityDigest, Resources: resources, WatchdogControlRef: controlRef, WatchdogTokenDigest: op.runner.watchdog.TokenDigest(), SafetyDeadlineUTC: now.Add(time.Hour), CleanupDeadlineUTC: now.Add(2 * time.Hour), IdempotencyKey: key, At: now})
+	if err != nil {
+		return err
+	}
+	op.lifecycleVersion = execution.LifecycleVersion
+	if len(execution.Resources) == len(op.plan.Resources) {
+		op.lifecycleResources = make(map[int]domain.SandboxResource, len(execution.Resources))
+		for _, resource := range execution.Resources {
+			op.lifecycleResources[resource.PlanOrdinal] = resource
+		}
+	}
+	return nil
 }
 
 func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration) error {
@@ -229,6 +286,96 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 		return fmt.Errorf("watchdog Arm returned no session")
 	}
 	op.watchdog = session
+	if op.runner.lifecycle != nil && op.identity.SandboxExecutionID != "" {
+		key, err := domain.NewID("arm")
+		if err != nil {
+			return err
+		}
+		if err := op.runner.lifecycle.RecordWatchdogArmed(ctx, domain.WatchdogArmed{ExecutionID: op.identity.SandboxExecutionID, ExpectedVersion: op.lifecycleVersion, ControlRecordRef: "sandbox-control-" + string(op.identity.SandboxExecutionID), ControlFileDigest: domain.SumBytes([]byte(record.EngineEndpoint)), TokenDigest: record.TokenDigest, IdempotencyKey: key, At: time.Now().UTC()}); err != nil {
+			return err
+		}
+		op.lifecycleVersion++
+	}
+	return nil
+}
+
+func (op *operation) lifecycleBeginCreate(ctx context.Context, planned port.PlannedResource, labels map[string]string, callID *domain.AttemptCallID) error {
+	if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+		return nil
+	}
+	resource, ok := op.lifecycleResources[planned.Ordinal]
+	if !ok {
+		return fmt.Errorf("sandbox resource %d was not durably prepared", planned.Ordinal)
+	}
+	key, err := domain.NewID("creating")
+	if err != nil {
+		return err
+	}
+	pre, err := op.runner.lifecycle.BeginResourceCreate(ctx, domain.BeginResourceCreate{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, IdempotencyKey: key, At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	resource = pre.Resource
+	op.lifecycleResources[planned.Ordinal] = resource
+	if err := op.watchdog.PreCreate(ctx, planned, maps.Clone(labels)); err != nil {
+		return err
+	}
+	ackKey, err := domain.NewID("precreate")
+	if err != nil {
+		return err
+	}
+	if err := op.runner.lifecycle.RecordPreCreateACK(ctx, domain.PreCreateACK{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ResourceVersion: pre.Version, LabelsDigest: digestLabels(labels), WatchdogRecordRef: "sandbox-control-" + string(resource.ExecutionID), IdempotencyKey: ackKey, At: time.Now().UTC()}); err != nil {
+		return err
+	}
+	dispatchKey, err := domain.NewID("dispatch")
+	if err != nil {
+		return err
+	}
+	resource, err = op.runner.lifecycle.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: pre.Version, Phase: domain.SandboxResourceDispatching, PhysicalCallID: callID, EngineIdentityDigest: resource.EngineIdentityDigest, LabelsDigest: digestLabels(labels), IdempotencyKey: dispatchKey, At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	op.lifecycleResources[planned.Ordinal] = resource
+	return nil
+}
+
+func (op *operation) lifecycleCompleteCreate(ctx context.Context, planned port.PlannedResource, engineID string, labels map[string]string, callID *domain.AttemptCallID) error {
+	if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+		return nil
+	}
+	resource, ok := op.lifecycleResources[planned.Ordinal]
+	if !ok {
+		return fmt.Errorf("sandbox resource %d was not durably prepared", planned.Ordinal)
+	}
+	key, err := domain.NewID("complete")
+	if err != nil {
+		return err
+	}
+	resource, err = op.runner.lifecycle.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCompleted, PhysicalCallID: callID, EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest, LabelsDigest: digestLabels(labels), IdempotencyKey: key, At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	op.lifecycleResources[planned.Ordinal] = resource
+	return nil
+}
+
+func (op *operation) lifecycleAdvanceStarted(ctx context.Context, planned port.PlannedResource, engineID string) error {
+	if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+		return nil
+	}
+	resource, ok := op.lifecycleResources[planned.Ordinal]
+	if !ok {
+		return fmt.Errorf("sandbox resource %d was not durably prepared", planned.Ordinal)
+	}
+	key, err := domain.NewID("started")
+	if err != nil {
+		return err
+	}
+	resource, err = op.runner.lifecycle.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceStarted, EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	op.lifecycleResources[planned.Ordinal] = resource
 	return nil
 }
 
@@ -427,7 +574,12 @@ func (r *Runner) Probe(ctx context.Context, auth port.SandboxDispatchAuthorizati
 	plan := auth.ContainerPlan()
 	identity := port.ProbeAuthorizationIdentity{
 		LogicalOperationID: auth.LogicalOperationID(), RunID: auth.RunID(), AttemptID: auth.AttemptID(), OwnerID: auth.OwnerID(),
-		LeaseEpoch: auth.LeaseEpoch(), ScopeDigest: auth.ScopeDigest(), PlanDigest: auth.PlanDigest(),
+		LeaseEpoch: auth.LeaseEpoch(), ScopeDigest: auth.ScopeDigest(), PlanDigest: auth.PlanDigest(), EngineIdentityDigest: r.engineIdentity,
+	}
+	if executionID, ok := port.SandboxExecutionIDOf(auth); ok && executionID != "" {
+		identity.SandboxExecutionID = executionID
+		identity.OwnerID = ""
+		identity.LeaseEpoch = 0
 	}
 	if err := identity.Validate(); err != nil {
 		return port.DockerProbeResult{}, err
@@ -599,8 +751,13 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 		}
 		owned := &ownedVolume{resource: resource, name: resource.DeterministicName, labels: maps.Clone(labels), driver: "local", options: maps.Clone(driverOptions)}
 		op.volumes = append(op.volumes, owned)
-		if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
+		if err := op.lifecycleBeginCreate(ctx, resource, maps.Clone(labels), nil); err != nil {
 			return err
+		}
+		if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+			if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
+				return err
+			}
 		}
 		created, err := op.runner.engine.VolumeCreate(ctx, moby.VolumeCreateOptions{Name: owned.name, Driver: owned.driver, DriverOpts: driverOptions, Labels: labels})
 		if err != nil {
@@ -614,6 +771,9 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 			return err
 		}
 		if err := verifyVolumeOwnership(inspected.Volume, owned); err != nil {
+			return err
+		}
+		if err := op.lifecycleCompleteCreate(ctx, resource, created.Volume.Name, labels, nil); err != nil {
 			return err
 		}
 		if err := op.watchdog.ResourceCreated(ctx, resource, owned.name); err != nil {
@@ -649,7 +809,7 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 		return nil, "", err
 	}
 	callID := grant.Auth.CallID()
-	if grant.Role != role || grant.Auth.RunID() != op.identity.RunID || grant.Auth.AttemptID() != op.identity.AttemptID || grant.Auth.LeaseEpoch() != op.identity.LeaseEpoch {
+	if grant.Role != role || grant.Auth.RunID() != op.identity.RunID || grant.Auth.AttemptID() != op.identity.AttemptID || (op.identity.SandboxExecutionID == "" && grant.Auth.LeaseEpoch() != op.identity.LeaseEpoch) {
 		return nil, "", fmt.Errorf("container grant identity mismatch")
 	}
 	options, err := factory(resource, callID)
@@ -659,8 +819,13 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 	labels := maps.Clone(options.Config.Labels)
 	owned := &ownedContainer{resource: resource, name: resource.DeterministicName, labels: labels}
 	op.containers = append(op.containers, owned)
-	if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
+	if err := op.lifecycleBeginCreate(ctx, resource, maps.Clone(labels), &callID); err != nil {
 		return nil, "", err
+	}
+	if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+		if err := op.watchdog.PreCreate(ctx, resource, maps.Clone(labels)); err != nil {
+			return nil, "", err
+		}
 	}
 	op.physical = append(op.physical, callID)
 	created, err := op.runner.engine.ContainerCreate(ctx, options)
@@ -679,6 +844,9 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 		return nil, callID, err
 	}
 	if err := verifyContainerOwnership(inspected, owned); err != nil {
+		return nil, callID, err
+	}
+	if err := op.lifecycleCompleteCreate(ctx, resource, created.ID, labels, &callID); err != nil {
 		return nil, callID, err
 	}
 	if role != port.ContainerTarget {
@@ -781,6 +949,16 @@ func (op *operation) finish() error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
 	defer cancel()
 	var failures []error
+	if op.runner.lifecycle != nil && op.identity.SandboxExecutionID != "" && op.lifecycleVersion > 0 {
+		key, err := domain.NewID("cleanup")
+		if err != nil {
+			failures = append(failures, err)
+		} else if execution, markErr := op.runner.lifecycle.MarkCleanupPending(cleanupCtx, domain.MarkCleanupPendingCommand{ExecutionID: op.identity.SandboxExecutionID, ExpectedVersion: op.lifecycleVersion, Reason: "foreground operation settlement", IdempotencyKey: key, At: time.Now().UTC()}); markErr != nil {
+			failures = append(failures, markErr)
+		} else {
+			op.lifecycleVersion = execution.LifecycleVersion
+		}
+	}
 	for _, writer := range op.writers {
 		if !writer.finalized {
 			if err := writer.writer.Abort(cleanupCtx); err != nil {
@@ -794,6 +972,55 @@ func (op *operation) finish() error {
 	cleanupErr := op.cleanup(cleanupCtx)
 	if cleanupErr != nil {
 		failures = append(failures, cleanupErr)
+	}
+	if op.runner.lifecycle != nil && op.identity.SandboxExecutionID != "" && cleanupErr == nil {
+		for ordinal, resource := range op.lifecycleResources {
+			if resource.Phase == domain.SandboxResourcePlanned {
+				key, keyErr := domain.NewID("cleanup")
+				if keyErr != nil {
+					failures = append(failures, keyErr)
+					continue
+				}
+				updated, advanceErr := op.runner.lifecycle.AdvanceResource(cleanupCtx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceInterrupted, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+				if advanceErr != nil {
+					failures = append(failures, advanceErr)
+				} else {
+					op.lifecycleResources[ordinal] = updated
+				}
+				continue
+			}
+			if resource.Phase != domain.SandboxResourceCleanupPending {
+				key, keyErr := domain.NewID("cleanup")
+				if keyErr != nil {
+					failures = append(failures, keyErr)
+					continue
+				}
+				updated, advanceErr := op.runner.lifecycle.AdvanceResource(cleanupCtx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleanupPending, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+				if advanceErr != nil {
+					failures = append(failures, advanceErr)
+					continue
+				}
+				resource = updated
+				op.lifecycleResources[ordinal] = updated
+			}
+			key, err := domain.NewID("cleanup")
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			updated, advanceErr := op.runner.lifecycle.AdvanceResource(cleanupCtx, domain.AdvanceResourceRequest{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleaned, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+			if advanceErr != nil {
+				failures = append(failures, advanceErr)
+			} else {
+				op.lifecycleResources[ordinal] = updated
+			}
+		}
+		key, err := domain.NewID("cleanup")
+		if err != nil {
+			failures = append(failures, err)
+		} else if _, finishErr := op.runner.lifecycle.FinishCleanup(cleanupCtx, domain.FinishCleanupCommand{ExecutionID: op.identity.SandboxExecutionID, ExpectedVersion: op.lifecycleVersion, ReconciliationDigest: domain.SumBytes([]byte(string(op.identity.SandboxExecutionID))), IdempotencyKey: key, At: time.Now().UTC()}); finishErr != nil {
+			failures = append(failures, finishErr)
+		}
 	}
 	if op.watchdog != nil {
 		ackCtx, cancelAck := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
