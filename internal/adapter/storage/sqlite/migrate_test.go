@@ -18,6 +18,13 @@ import (
 
 const historicalMigrationOneHash = "sha256:868896872f3ef7d686e50431eb35e5d6e22c0a058ce3c17ab323775cfe70050c"
 
+const historicalMigrationFourHash = "sha256:4a97274482009bda039717a935b1e7d38909875873c05500d22fa97a8c9fd188"
+
+const (
+	historicalMigrationTwoHash   = "sha256:fe1e3bbf31aa14df8f69e5be161266a2b7f8fc6ae05217f0b15424f78eebd094"
+	historicalMigrationThreeHash = "sha256:e2abddad5db8e12611c2373f4e2d821cd1c255faab77df5984be1500c4e017be"
+)
+
 //go:embed testdata/000001_workflow_core_691b611.sql
 var historicalMigrationOneSQL []byte
 
@@ -89,8 +96,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	if err := check.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration history: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("migration rows = %d, want 2", count)
+	if count != 5 {
+		t.Fatalf("migration rows = %d, want 5", count)
 	}
 }
 
@@ -112,6 +119,86 @@ func TestMigrationOnePreservesHistoricalBytes(t *testing.T) {
 	}
 }
 
+// TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards
+// catches editing the already-applied M4 instead of adding an ordered forward
+// migration for the terminal projection guards.
+func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *testing.T) {
+	t.Parallel()
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	want := []struct {
+		name string
+		hash string
+	}{
+		{"000001_workflow_core.sql", historicalMigrationOneHash},
+		{"000002_workflow_invariants.sql", historicalMigrationTwoHash},
+		{"000003_call_budget.sql", historicalMigrationThreeHash},
+		{"000004_call_budget_hardening.sql", historicalMigrationFourHash},
+	}
+	if len(migrations) < len(want)+1 {
+		t.Fatalf("loaded %d migrations, want at least %d", len(migrations), len(want)+1)
+	}
+	for index, expected := range want {
+		if migrations[index].name != expected.name || migrations[index].hash != expected.hash {
+			t.Fatalf("migration %d = (%q, %q), want immutable (%q, %q)", index+1,
+				migrations[index].name, migrations[index].hash, expected.name, expected.hash)
+		}
+	}
+	if migrations[4].name != "000005_call_budget_terminal_guards.sql" {
+		t.Fatalf("migration 5 name = %q, want terminal guard forward migration", migrations[4].name)
+	}
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open historical M4 database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, migration := range migrations[:4] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply historical migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO schema_migrations(version, name, sha256, applied_at)
+			VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record historical migration %d: %v", migration.version, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close historical M4 database: %v", err)
+	}
+
+	store, err := Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatalf("upgrade historical M4 database: %v", err)
+	}
+	assertMigrationHistory(t, store, 5)
+	for _, name := range []string{"call_records_terminal_matrix_insert", "physical_calls_terminal_parent_update"} {
+		var count int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?", name).Scan(&count); err != nil {
+			t.Fatalf("inspect %s: %v", name, err)
+		}
+		if count != 1 {
+			t.Fatalf("trigger %s count = %d, want 1", name, count)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close upgraded M4 database: %v", err)
+	}
+	reopened, err := Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatalf("reopen upgraded M4 database: %v", err)
+	}
+	defer reopened.Close()
+	assertMigrationHistory(t, reopened, 5)
+}
+
 // TestMigrationFreshOpenAppliesForwardWorkflowMigration catches fresh stores
 // stopping after the historical schema instead of traversing the full chain.
 func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
@@ -122,7 +209,7 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 2)
+	assertMigrationHistory(t, store, 5)
 	assertForwardWorkflowSchema(t, store)
 }
 
@@ -139,7 +226,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("upgrade historical database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 2)
+	assertMigrationHistory(t, store, 5)
 	assertForwardWorkflowSchema(t, store)
 
 	for table, want := range fixture.rowCounts {
@@ -234,7 +321,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("idempotent reopen after upgrade: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 2)
+	assertMigrationHistory(t, reopened, 5)
 }
 
 // TestCreateRunReplaysLegacyCreateAfterHistoricalMigration catches rejecting
@@ -320,14 +407,14 @@ func TestCreateRunRejectsChangedLegacyReplay(t *testing.T) {
 
 	for name, mutate := range map[string]func(*domain.CreateRunRequest){
 		"submitted request": func(request *domain.CreateRunRequest) {
-			request.SubmittedRequestJSON = []byte(`{"brief":"changed","schema_version":"cpgen.request/v1"}`)
+			request.SubmittedRequestJSON = canonicalSQLiteRunRequestJSONFor("changed", "cpgen.request/v1", request.BudgetLimits)
 			request.SubmittedRequestDigest = domain.SumBytes(request.SubmittedRequestJSON)
 		},
 		"workflow revision": func(request *domain.CreateRunRequest) {
 			request.WorkflowRevision = "slice1/changed"
 		},
 		"schema version": func(request *domain.CreateRunRequest) {
-			request.SubmittedRequestJSON = []byte(`{"brief":"legacy","schema_version":"cpgen.request/v2"}`)
+			request.SubmittedRequestJSON = canonicalSQLiteRunRequestJSONFor("legacy", "cpgen.request/v2", request.BudgetLimits)
 			request.SubmittedRequestDigest = domain.SumBytes(request.SubmittedRequestJSON)
 			request.SchemaVersion = "cpgen.request/v2"
 		},
@@ -386,7 +473,7 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertMigrationHistory(t, store, 2)
+	assertMigrationHistory(t, store, 5)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -399,8 +486,8 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("migration count = %d, want 2", count)
+	if count != 5 {
+		t.Fatalf("migration count = %d, want 5", count)
 	}
 }
 
@@ -526,6 +613,15 @@ func assertMigrationHistory(t *testing.T, store *Store, want int) {
 	if want >= 2 && got[1].name != "000002_workflow_invariants.sql" {
 		t.Fatalf("migration 2 name = %q", got[1].name)
 	}
+	if want >= 3 && got[2].name != "000003_call_budget.sql" {
+		t.Fatalf("migration 3 name = %q", got[2].name)
+	}
+	if want >= 4 && got[3].name != "000004_call_budget_hardening.sql" {
+		t.Fatalf("migration 4 name = %q", got[3].name)
+	}
+	if want >= 5 && got[4].name != "000005_call_budget_terminal_guards.sql" {
+		t.Fatalf("migration 5 name = %q", got[4].name)
+	}
 }
 
 func assertForwardWorkflowSchema(t *testing.T, store *Store) {
@@ -618,7 +714,13 @@ func seedHistoricalWorkflowDatabase(t *testing.T, path string) historicalWorkflo
 		evidenceDigest: domain.SumBytes([]byte("legacy-evidence")),
 		policyDigest:   domain.SumBytes([]byte("legacy-policy")),
 	}
-	requestJSON := []byte(`{"brief":"legacy","schema_version":"cpgen.request/v1"}`)
+	legacyLimits := domain.BudgetLimits{
+		MaxLLMCalls: 3, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000, MaxLLMOutputTokens: 1000,
+		MaxLLMCostMicroUSD: 5000, MaxSimilarityCostMicroUSD: 0,
+		MaxSandboxCreates: 4, MaxArtifactBytes: 1048576, MaxPackageBytes: 1048576,
+		MaxMutationsPerStage: 2, MaxActiveTimeMilliseconds: 30000,
+	}
+	requestJSON := canonicalSQLiteRunRequestJSONFor("legacy", "cpgen.request/v1", legacyLimits)
 	fixture.requestDigest = domain.SumBytes(requestJSON)
 	configDigest := domain.SumBytes(fixture.configJSON)
 	fixture.legacyCreateRequest = domain.CreateRunRequest{
@@ -631,14 +733,10 @@ func seedHistoricalWorkflowDatabase(t *testing.T, path string) historicalWorkflo
 		WorkflowRevision:              string(fixture.workflowDigest),
 		SchemaVersion:                 "cpgen.request/v1",
 		WorkflowDigest:                fixture.workflowDigest,
-		BudgetLimits: domain.BudgetLimits{
-			MaxLLMCalls: 3, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000, MaxLLMOutputTokens: 1000,
-			MaxLLMCostMicroUSD: 5000, MaxSandboxCreates: 4, MaxArtifactBytes: 1048576, MaxPackageBytes: 1048576,
-			MaxMutationsPerStage: 2, MaxActiveTimeMilliseconds: 30000,
-		},
-		StageSequence:  []domain.StageName{"prepare", "exercise"},
-		CreatedAt:      testNow,
-		IdempotencyKey: "create_00000000000000000000000000000013",
+		BudgetLimits:                  legacyLimits,
+		StageSequence:                 []domain.StageName{"prepare", "exercise"},
+		CreatedAt:                     testNow,
+		IdempotencyKey:                "create_00000000000000000000000000000013",
 	}
 	fixture.legacyCreateDigest = historicalCreateRunDigestV691b611(t, fixture.legacyCreateRequest)
 	fixture.legacyCreateResult = domain.RunSnapshot{
@@ -799,24 +897,44 @@ func seedHistoricalWorkflowDatabase(t *testing.T, path string) historicalWorkflo
 // digest before workflow_revision and schema_version became explicit fields.
 func historicalCreateRunDigestV691b611(t *testing.T, request domain.CreateRunRequest) domain.Digest {
 	t.Helper()
+	type historicalBudgetLimitsV691b611 struct {
+		MaxLLMCalls               int64 `json:"max_llm_calls"`
+		MaxSimilarityCalls        int64 `json:"max_similarity_calls"`
+		MaxLLMInputTokens         int64 `json:"max_llm_input_tokens"`
+		MaxLLMOutputTokens        int64 `json:"max_llm_output_tokens"`
+		MaxLLMCostMicroUSD        int64 `json:"max_llm_cost_micro_usd"`
+		MaxSandboxCreates         int64 `json:"max_sandbox_creates"`
+		MaxArtifactBytes          int64 `json:"max_artifact_bytes"`
+		MaxPackageBytes           int64 `json:"max_package_bytes"`
+		MaxMutationsPerStage      int64 `json:"max_mutations_per_stage"`
+		MaxActiveTimeMilliseconds int64 `json:"max_active_time_milliseconds"`
+	}
 	type historicalCreateRunRequestV691b611 struct {
-		RunID                         domain.RunID        `json:"run_id"`
-		SubmittedRequestJSON          []byte              `json:"submitted_request_json"`
-		SubmittedRequestDigest        domain.Digest       `json:"submitted_request_digest"`
-		EffectiveSeed                 int64               `json:"effective_seed"`
-		RedactedEffectiveConfigJSON   []byte              `json:"redacted_effective_config_json"`
-		RedactedEffectiveConfigDigest domain.Digest       `json:"redacted_effective_config_digest"`
-		WorkflowDigest                domain.Digest       `json:"workflow_digest"`
-		BudgetLimits                  domain.BudgetLimits `json:"budget_limits"`
-		StageSequence                 []domain.StageName  `json:"stage_sequence"`
-		CreatedAt                     time.Time           `json:"created_at"`
-		IdempotencyKey                string              `json:"idempotency_key"`
+		RunID                         domain.RunID                   `json:"run_id"`
+		SubmittedRequestJSON          []byte                         `json:"submitted_request_json"`
+		SubmittedRequestDigest        domain.Digest                  `json:"submitted_request_digest"`
+		EffectiveSeed                 int64                          `json:"effective_seed"`
+		RedactedEffectiveConfigJSON   []byte                         `json:"redacted_effective_config_json"`
+		RedactedEffectiveConfigDigest domain.Digest                  `json:"redacted_effective_config_digest"`
+		WorkflowDigest                domain.Digest                  `json:"workflow_digest"`
+		BudgetLimits                  historicalBudgetLimitsV691b611 `json:"budget_limits"`
+		StageSequence                 []domain.StageName             `json:"stage_sequence"`
+		CreatedAt                     time.Time                      `json:"created_at"`
+		IdempotencyKey                string                         `json:"idempotency_key"`
+	}
+	legacyLimits := historicalBudgetLimitsV691b611{
+		MaxLLMCalls: request.BudgetLimits.MaxLLMCalls, MaxSimilarityCalls: request.BudgetLimits.MaxSimilarityCalls,
+		MaxLLMInputTokens: request.BudgetLimits.MaxLLMInputTokens, MaxLLMOutputTokens: request.BudgetLimits.MaxLLMOutputTokens,
+		MaxLLMCostMicroUSD: request.BudgetLimits.MaxLLMCostMicroUSD, MaxSandboxCreates: request.BudgetLimits.MaxSandboxCreates,
+		MaxArtifactBytes: request.BudgetLimits.MaxArtifactBytes, MaxPackageBytes: request.BudgetLimits.MaxPackageBytes,
+		MaxMutationsPerStage:      request.BudgetLimits.MaxMutationsPerStage,
+		MaxActiveTimeMilliseconds: request.BudgetLimits.MaxActiveTimeMilliseconds,
 	}
 	encoded, err := json.Marshal(historicalCreateRunRequestV691b611{
 		RunID: request.RunID, SubmittedRequestJSON: request.SubmittedRequestJSON, SubmittedRequestDigest: request.SubmittedRequestDigest,
 		EffectiveSeed: request.EffectiveSeed, RedactedEffectiveConfigJSON: request.RedactedEffectiveConfigJSON,
 		RedactedEffectiveConfigDigest: request.RedactedEffectiveConfigDigest, WorkflowDigest: request.WorkflowDigest,
-		BudgetLimits: request.BudgetLimits, StageSequence: request.StageSequence, CreatedAt: request.CreatedAt,
+		BudgetLimits: legacyLimits, StageSequence: request.StageSequence, CreatedAt: request.CreatedAt,
 		IdempotencyKey: request.IdempotencyKey,
 	})
 	if err != nil {

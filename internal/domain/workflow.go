@@ -196,6 +196,7 @@ type BudgetLimits struct {
 	MaxLLMInputTokens         int64 `json:"max_llm_input_tokens"`
 	MaxLLMOutputTokens        int64 `json:"max_llm_output_tokens"`
 	MaxLLMCostMicroUSD        int64 `json:"max_llm_cost_micro_usd"`
+	MaxSimilarityCostMicroUSD int64 `json:"max_similarity_cost_micro_usd"`
 	MaxSandboxCreates         int64 `json:"max_sandbox_creates"`
 	MaxArtifactBytes          int64 `json:"max_artifact_bytes"`
 	MaxPackageBytes           int64 `json:"max_package_bytes"`
@@ -210,7 +211,8 @@ func (v BudgetLimits) Validate() error {
 	}{
 		{"max llm calls", v.MaxLLMCalls}, {"max similarity calls", v.MaxSimilarityCalls},
 		{"max llm input tokens", v.MaxLLMInputTokens}, {"max llm output tokens", v.MaxLLMOutputTokens},
-		{"max llm cost micro USD", v.MaxLLMCostMicroUSD}, {"max sandbox creates", v.MaxSandboxCreates},
+		{"max llm cost micro USD", v.MaxLLMCostMicroUSD}, {"max similarity cost micro USD", v.MaxSimilarityCostMicroUSD},
+		{"max sandbox creates", v.MaxSandboxCreates},
 		{"max artifact bytes", v.MaxArtifactBytes}, {"max package bytes", v.MaxPackageBytes},
 		{"max mutations per stage", v.MaxMutationsPerStage}, {"max active time milliseconds", v.MaxActiveTimeMilliseconds},
 	} {
@@ -318,14 +320,20 @@ func (v CreateRunRequest) Validate() error {
 	if err := v.SchemaVersion.Validate(); err != nil {
 		return fmt.Errorf("schema version: %w", err)
 	}
-	var submitted struct {
-		SchemaVersion SchemaVersion `json:"schema_version"`
+	decoder := json.NewDecoder(bytes.NewReader(v.SubmittedRequestJSON))
+	decoder.DisallowUnknownFields()
+	var submitted RunRequest
+	if err := decoder.Decode(&submitted); err != nil {
+		return fmt.Errorf("decode submitted run request: %w", err)
 	}
-	if err := json.Unmarshal(v.SubmittedRequestJSON, &submitted); err != nil {
-		return fmt.Errorf("decode submitted request schema version: %w", err)
+	if err := submitted.Validate(); err != nil {
+		return fmt.Errorf("validate submitted run request: %w", err)
 	}
-	if submitted.SchemaVersion != v.SchemaVersion {
+	if SchemaVersion(submitted.SchemaVersion) != v.SchemaVersion {
 		return errors.New("schema version does not match submitted request JSON")
+	}
+	if submitted.BudgetLimits != v.BudgetLimits {
+		return errors.New("budget limits do not match submitted request JSON")
 	}
 	if err := v.WorkflowDigest.Validate(); err != nil {
 		return fmt.Errorf("workflow digest: %w", err)
@@ -1259,7 +1267,7 @@ func validateReviewDecisionPayload(kind ReviewDecisionKind, edits, waiver, condi
 
 func budgetIncreasePositive(value BudgetLimits) bool {
 	return value.MaxLLMCalls > 0 || value.MaxSimilarityCalls > 0 || value.MaxLLMInputTokens > 0 ||
-		value.MaxLLMOutputTokens > 0 || value.MaxLLMCostMicroUSD > 0 || value.MaxSandboxCreates > 0 ||
+		value.MaxLLMOutputTokens > 0 || value.MaxLLMCostMicroUSD > 0 || value.MaxSimilarityCostMicroUSD > 0 || value.MaxSandboxCreates > 0 ||
 		value.MaxArtifactBytes > 0 || value.MaxPackageBytes > 0 || value.MaxMutationsPerStage > 0 ||
 		value.MaxActiveTimeMilliseconds > 0
 }

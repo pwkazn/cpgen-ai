@@ -66,17 +66,19 @@ func TestLifecycleValuesValidatePersistentInvariants(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	digest := domain.SumBytes([]byte("input"))
 	runID := domain.RunID("run_0123456789abcdef0123456789abcdef")
+	limits := domain.BudgetLimits{MaxLLMCalls: 1, MaxActiveTimeMilliseconds: 1}
+	submitted := canonicalRunRequestJSON(t, "cpgen.request/v1", limits)
 	request := domain.CreateRunRequest{
 		RunID:                         runID,
-		SubmittedRequestJSON:          []byte(`{"schema_version":"cpgen.request/v1"}`),
-		SubmittedRequestDigest:        domain.SumBytes([]byte(`{"schema_version":"cpgen.request/v1"}`)),
+		SubmittedRequestJSON:          submitted,
+		SubmittedRequestDigest:        domain.SumBytes(submitted),
 		EffectiveSeed:                 1,
 		RedactedEffectiveConfigJSON:   []byte(`{"schema":"cpgen.config/v1"}`),
 		RedactedEffectiveConfigDigest: domain.SumBytes([]byte(`{"schema":"cpgen.config/v1"}`)),
 		WorkflowRevision:              "slice1/v1",
 		SchemaVersion:                 "cpgen.request/v1",
 		WorkflowDigest:                digest,
-		BudgetLimits:                  domain.BudgetLimits{MaxLLMCalls: 1, MaxActiveTimeMilliseconds: 1},
+		BudgetLimits:                  limits,
 		StageSequence:                 []domain.StageName{"idea"},
 		CreatedAt:                     now,
 		IdempotencyKey:                "create_0123456789abcdef0123456789abcdef",
@@ -407,7 +409,7 @@ func TestApplyReviewRequiresCurrentStageInvalidation(t *testing.T) {
 func TestCreateRunRequiresExplicitRevisionAndMatchingSchema(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-	requestJSON := []byte(`{"schema_version":"cpgen.request/v1"}`)
+	requestJSON := canonicalRunRequestJSON(t, "cpgen.request/v1", domain.BudgetLimits{})
 	configJSON := []byte(`{"schema_version":"cpgen.config/v1"}`)
 	valid := domain.CreateRunRequest{
 		RunID:                "run_00000000000000000000000000000011",
@@ -432,6 +434,79 @@ func TestCreateRunRequiresExplicitRevisionAndMatchingSchema(t *testing.T) {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("invalid explicit binding accepted: %+v", invalid)
 		}
+	}
+}
+
+func canonicalRunRequestJSON(t *testing.T, schema string, limits domain.BudgetLimits) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(domain.RunRequest{
+		SchemaVersion: schema, Mode: "generate", Brief: "test request",
+		Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en",
+		Difficulty: "hard", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512,
+		SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"},
+		BudgetLimits: limits,
+	})
+	if err != nil {
+		t.Fatalf("marshal run request: %v", err)
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode run request: %v", err)
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("canonicalize run request: %v", err)
+	}
+	return canonical
+}
+
+// TestCreateRunBindsCanonicalRequestBudgetLimits catches callers supplying a
+// canonical submitted RunRequest while separately inflating the limits used to
+// initialize the durable budget accounts.
+func TestCreateRunBindsCanonicalRequestBudgetLimits(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	limits := domain.BudgetLimits{
+		MaxLLMCalls: 2, MaxSimilarityCalls: 3, MaxLLMInputTokens: 40,
+		MaxLLMOutputTokens: 50, MaxLLMCostMicroUSD: 60,
+		MaxSimilarityCostMicroUSD: 70, MaxSandboxCreates: 8,
+		MaxArtifactBytes: 90, MaxPackageBytes: 100, MaxMutationsPerStage: 2,
+		MaxActiveTimeMilliseconds: 1000,
+	}
+	submitted, err := json.Marshal(domain.RunRequest{
+		SchemaVersion: "cpgen.request/v1", Mode: "generate", Brief: "budget binding",
+		Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en",
+		Difficulty: "hard", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512,
+		SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"},
+		BudgetLimits: limits,
+	})
+	if err != nil {
+		t.Fatalf("marshal submitted request: %v", err)
+	}
+	var canonicalValue any
+	if err := json.Unmarshal(submitted, &canonicalValue); err != nil {
+		t.Fatalf("decode submitted request for canonical form: %v", err)
+	}
+	submitted, err = json.Marshal(canonicalValue)
+	if err != nil {
+		t.Fatalf("canonicalize submitted request: %v", err)
+	}
+	config := []byte(`{"schema_version":"cpgen.config/v1"}`)
+	request := domain.CreateRunRequest{
+		RunID:                "run_00000000000000000000000000000021",
+		SubmittedRequestJSON: submitted, SubmittedRequestDigest: domain.SumBytes(submitted),
+		EffectiveSeed: 1, RedactedEffectiveConfigJSON: config,
+		RedactedEffectiveConfigDigest: domain.SumBytes(config), WorkflowRevision: "slice1/v1",
+		SchemaVersion: "cpgen.request/v1", WorkflowDigest: domain.SumBytes([]byte("workflow")),
+		BudgetLimits: limits, StageSequence: []domain.StageName{"prepare"}, CreatedAt: now,
+		IdempotencyKey: "create_00000000000000000000000000000021",
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("matching canonical request limits: %v", err)
+	}
+	request.BudgetLimits.MaxSimilarityCostMicroUSD++
+	if err := request.Validate(); err == nil {
+		t.Fatal("CreateRun accepted separately inflated similarity cost limit")
 	}
 }
 

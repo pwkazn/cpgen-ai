@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	callA domain.AttemptCallID = "call_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	callB domain.AttemptCallID = "call_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	callA       domain.AttemptCallID = "call_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	callB       domain.AttemptCallID = "call_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	callRecordA domain.CallRecordID  = "callrec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	callRecordB domain.CallRecordID  = "callrec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
 func TestCallTraceValidation(t *testing.T) {
@@ -26,7 +28,7 @@ func TestCallTraceValidation(t *testing.T) {
 		{
 			name: "cache hit",
 			trace: domain.CallTrace{LogicalOperationID: "op-2", DispatchKind: domain.DispatchCacheHit,
-				CacheSourceAttemptCallID: pointer(callA), CachePinCallID: pointer(callB)},
+				CacheSourceCallRecordID: pointer(callRecordA), CacheHitCallRecordID: pointer(callRecordB)},
 		},
 		{
 			name:  "no dispatch",
@@ -41,7 +43,19 @@ func TestCallTraceValidation(t *testing.T) {
 		{
 			name: "cache hit pretending to dispatch",
 			trace: domain.CallTrace{LogicalOperationID: "op-5", DispatchKind: domain.DispatchCacheHit,
-				PhysicalAttemptCallIDs: []domain.AttemptCallID{callA}, CacheSourceAttemptCallID: pointer(callA), CachePinCallID: pointer(callB)},
+				PhysicalAttemptCallIDs: []domain.AttemptCallID{callA}, CacheSourceCallRecordID: pointer(callRecordA), CacheHitCallRecordID: pointer(callRecordB)},
+			wantErr: true,
+		},
+		{
+			name: "cache hit missing current logical record",
+			trace: domain.CallTrace{LogicalOperationID: "op-5b", DispatchKind: domain.DispatchCacheHit,
+				CacheSourceCallRecordID: pointer(callRecordA)},
+			wantErr: true,
+		},
+		{
+			name: "cache hit self-references source",
+			trace: domain.CallTrace{LogicalOperationID: "op-5c", DispatchKind: domain.DispatchCacheHit,
+				CacheSourceCallRecordID: pointer(callRecordA), CacheHitCallRecordID: pointer(callRecordA)},
 			wantErr: true,
 		},
 		{

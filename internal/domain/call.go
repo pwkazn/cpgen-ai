@@ -22,13 +22,13 @@ func (v *DispatchKind) UnmarshalJSON(data []byte) error {
 }
 
 type CallTrace struct {
-	LogicalOperationID       string          `json:"logical_operation_id"`
-	DispatchKind             DispatchKind    `json:"dispatch_kind"`
-	ResultAttemptCallID      *AttemptCallID  `json:"result_attempt_call_id,omitempty"`
-	PhysicalAttemptCallIDs   []AttemptCallID `json:"physical_attempt_call_ids"`
-	CacheSourceAttemptCallID *AttemptCallID  `json:"cache_source_attempt_call_id,omitempty"`
-	CachePinCallID           *AttemptCallID  `json:"cache_pin_call_id,omitempty"`
-	DecisionSourceCallID     *AttemptCallID  `json:"decision_source_call_id,omitempty"`
+	LogicalOperationID      string          `json:"logical_operation_id"`
+	DispatchKind            DispatchKind    `json:"dispatch_kind"`
+	ResultAttemptCallID     *AttemptCallID  `json:"result_attempt_call_id,omitempty"`
+	PhysicalAttemptCallIDs  []AttemptCallID `json:"physical_attempt_call_ids"`
+	CacheSourceCallRecordID *CallRecordID   `json:"cache_source_call_record_id,omitempty"`
+	CacheHitCallRecordID    *CallRecordID   `json:"cache_hit_call_record_id,omitempty"`
+	DecisionSourceCallID    *AttemptCallID  `json:"decision_source_call_id,omitempty"`
 }
 
 func (t CallTrace) Equal(other CallTrace) bool {
@@ -36,12 +36,19 @@ func (t CallTrace) Equal(other CallTrace) bool {
 		t.DispatchKind == other.DispatchKind &&
 		optionalCallIDEqual(t.ResultAttemptCallID, other.ResultAttemptCallID) &&
 		slices.Equal(t.PhysicalAttemptCallIDs, other.PhysicalAttemptCallIDs) &&
-		optionalCallIDEqual(t.CacheSourceAttemptCallID, other.CacheSourceAttemptCallID) &&
-		optionalCallIDEqual(t.CachePinCallID, other.CachePinCallID) &&
+		optionalCallRecordIDEqual(t.CacheSourceCallRecordID, other.CacheSourceCallRecordID) &&
+		optionalCallRecordIDEqual(t.CacheHitCallRecordID, other.CacheHitCallRecordID) &&
 		optionalCallIDEqual(t.DecisionSourceCallID, other.DecisionSourceCallID)
 }
 
 func optionalCallIDEqual(left, right *AttemptCallID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func optionalCallRecordIDEqual(left, right *CallRecordID) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
@@ -74,11 +81,19 @@ func (t CallTrace) Validate() error {
 		return nil
 	}
 	for name, id := range map[string]*AttemptCallID{
-		"result call": t.ResultAttemptCallID, "cache source call": t.CacheSourceAttemptCallID,
-		"cache pin call": t.CachePinCallID, "decision source call": t.DecisionSourceCallID,
+		"result call": t.ResultAttemptCallID, "decision source call": t.DecisionSourceCallID,
 	} {
 		if err := validateOptionalID(name, id); err != nil {
 			return err
+		}
+	}
+	for name, id := range map[string]*CallRecordID{
+		"cache source call record": t.CacheSourceCallRecordID, "cache hit call record": t.CacheHitCallRecordID,
+	} {
+		if id != nil {
+			if err := id.Validate(); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
 		}
 	}
 
@@ -90,18 +105,21 @@ func (t CallTrace) Validate() error {
 		if _, exists := seen[*t.ResultAttemptCallID]; !exists {
 			return fmt.Errorf("result call is not a physical call")
 		}
-		if t.CacheSourceAttemptCallID != nil || t.CachePinCallID != nil || t.DecisionSourceCallID != nil {
+		if t.CacheSourceCallRecordID != nil || t.CacheHitCallRecordID != nil || t.DecisionSourceCallID != nil {
 			return fmt.Errorf("DISPATCHED trace cannot contain cache or decision source calls")
 		}
 	case DispatchCacheHit:
 		if len(t.PhysicalAttemptCallIDs) != 0 || t.ResultAttemptCallID != nil || t.DecisionSourceCallID != nil {
 			return fmt.Errorf("CACHE_HIT trace cannot contain physical, result, or decision source calls")
 		}
-		if t.CacheSourceAttemptCallID == nil || t.CachePinCallID == nil {
-			return fmt.Errorf("CACHE_HIT trace requires source and pin calls")
+		if t.CacheSourceCallRecordID == nil || t.CacheHitCallRecordID == nil {
+			return fmt.Errorf("CACHE_HIT trace requires source and current logical call records")
+		}
+		if *t.CacheSourceCallRecordID == *t.CacheHitCallRecordID {
+			return fmt.Errorf("CACHE_HIT source and current logical call records must differ")
 		}
 	case DispatchNone:
-		if len(t.PhysicalAttemptCallIDs) != 0 || t.ResultAttemptCallID != nil || t.CacheSourceAttemptCallID != nil || t.CachePinCallID != nil {
+		if len(t.PhysicalAttemptCallIDs) != 0 || t.ResultAttemptCallID != nil || t.CacheSourceCallRecordID != nil || t.CacheHitCallRecordID != nil {
 			return fmt.Errorf("NO_DISPATCH trace cannot contain physical, result, or cache calls")
 		}
 	}

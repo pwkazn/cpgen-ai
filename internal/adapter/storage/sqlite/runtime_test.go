@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -288,6 +289,7 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 		if start.ActiveElapsed != 0 || start.Remaining != 10*time.Second {
 			t.Fatalf("active start = %+v", start)
 		}
+		assertRuntimeActiveAuthority(t, store, start)
 		source.Advance(2 * time.Second)
 		heartbeatCommand := domain.ActiveTimeCommand{
 			RunID: testRunID, ExpectedRunVersion: 3, Action: domain.ActiveTimeHeartbeat,
@@ -297,10 +299,12 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 		if heartbeat.ActiveElapsed != 2*time.Second || heartbeat.Remaining != 8*time.Second {
 			t.Fatalf("heartbeat = %+v", heartbeat)
 		}
+		assertRuntimeActiveAuthority(t, store, heartbeat)
 		replay := mustAccount(t, store, heartbeatCommand)
 		if !reflect.DeepEqual(replay, heartbeat) {
 			t.Fatalf("heartbeat replay = %+v, want %+v", replay, heartbeat)
 		}
+		assertRuntimeActiveAuthority(t, store, replay)
 		source.Advance(time.Second)
 		stopped := mustAccount(t, store, domain.ActiveTimeCommand{
 			RunID: testRunID, ExpectedRunVersion: 4, Action: domain.ActiveTimeStop,
@@ -309,6 +313,7 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 		if stopped.ActiveElapsed != 3*time.Second || stopped.Active {
 			t.Fatalf("stopped active time = %+v", stopped)
 		}
+		assertRuntimeActiveAuthority(t, store, stopped)
 		blocked, err := store.FinishStage(ctx, domain.FinishStageCommand{
 			RunID: testRunID, ExpectedRunVersion: 5, StageName: "prepare", AttemptID: testAttemptID,
 			AttemptState: domain.StageAttemptBlocked, RunState: domain.RunBlocked,
@@ -347,6 +352,7 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 		if recovered.ActiveElapsed != 7*time.Second || recovered.Active {
 			t.Fatalf("recovered elapsed = %+v, want 7s and closed", recovered)
 		}
+		assertRuntimeActiveAuthority(t, store, recovered)
 		_ = ctx
 	})
 
@@ -364,6 +370,7 @@ func TestActiveTimeHeartbeatPauseRecoveryAndCap(t *testing.T) {
 		if capped.ActiveElapsed != 5*time.Second || capped.Remaining != 0 || !capped.Exhausted {
 			t.Fatalf("capped result = %+v", capped)
 		}
+		assertRuntimeActiveAuthority(t, store, capped)
 	})
 }
 
@@ -573,24 +580,70 @@ func openRuntimeStore(t *testing.T, path string, source clock.Clock) *Store {
 }
 
 func testCreateRunRequest(runID domain.RunID, now time.Time, activeLimit time.Duration) domain.CreateRunRequest {
-	requestJSON := []byte(`{"brief":"test","schema_version":"cpgen.request/v1"}`)
 	configJSON := []byte(`{"schema":"cpgen.config/v1"}`)
-	return domain.CreateRunRequest{
-		RunID:                runID,
-		SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: domain.SumBytes(requestJSON),
+	request := domain.CreateRunRequest{
+		RunID:                       runID,
 		EffectiveSeed:               7,
 		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: domain.SumBytes(configJSON),
 		WorkflowRevision: "slice1/v1", SchemaVersion: "cpgen.request/v1",
 		WorkflowDigest: domain.SumBytes([]byte("slice1-workflow-v1")),
 		BudgetLimits: domain.BudgetLimits{
 			MaxLLMCalls: 3, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000, MaxLLMOutputTokens: 1000,
-			MaxLLMCostMicroUSD: 5000, MaxSandboxCreates: 4, MaxArtifactBytes: 1 << 20,
+			MaxLLMCostMicroUSD: 5000, MaxSimilarityCostMicroUSD: 7000,
+			MaxSandboxCreates: 4, MaxArtifactBytes: 1 << 20,
 			MaxPackageBytes: 1 << 20, MaxMutationsPerStage: 2,
 			MaxActiveTimeMilliseconds: activeLimit.Milliseconds(),
 		},
 		StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"},
 		CreatedAt:     now, IdempotencyKey: "create_00000000000000000000000000000001",
 	}
+	request.SubmittedRequestJSON = canonicalSQLiteRunRequestJSON(request.BudgetLimits)
+	request.SubmittedRequestDigest = domain.SumBytes(request.SubmittedRequestJSON)
+	return request
+}
+
+// TestCreateRunRejectsBudgetLimitsDetachedFromCanonicalRequest catches the
+// storage entry point initializing accounts from a separately inflated copy.
+func TestCreateRunRejectsBudgetLimitsDetachedFromCanonicalRequest(t *testing.T) {
+	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "budget-binding.db"), clock.NewFake(testNow))
+	request := testCreateRunRequest(testRunID, testNow, time.Second)
+	request.BudgetLimits.MaxSimilarityCostMicroUSD++
+	if _, err := store.CreateRun(context.Background(), request); err == nil {
+		t.Fatal("CreateRun accepted budget limits detached from canonical request")
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT count(*) FROM runs WHERE run_id = ?`, testRunID).Scan(&count); err != nil {
+		t.Fatalf("count rejected run: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected CreateRun persisted %d runs", count)
+	}
+}
+
+func canonicalSQLiteRunRequestJSON(limits domain.BudgetLimits) []byte {
+	return canonicalSQLiteRunRequestJSONFor("test request", "cpgen.request/v1", limits)
+}
+
+func canonicalSQLiteRunRequestJSONFor(brief, schemaVersion string, limits domain.BudgetLimits) []byte {
+	encoded, err := json.Marshal(domain.RunRequest{
+		SchemaVersion: schemaVersion, Mode: "generate", Brief: brief,
+		Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en",
+		Difficulty: "hard", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512,
+		SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"},
+		BudgetLimits: limits,
+	})
+	if err != nil {
+		panic(err)
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		panic(err)
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		panic(err)
+	}
+	return canonical
 }
 
 func mustCreateRun(t *testing.T, store *Store, request domain.CreateRunRequest) domain.RunSnapshot {
@@ -621,6 +674,21 @@ func mustAccount(t *testing.T, store *Store, command domain.ActiveTimeCommand) d
 		t.Fatalf("AccountActiveTime(%s): %v", command.Action, err)
 	}
 	return result
+}
+
+func assertRuntimeActiveAuthority(t *testing.T, store *Store, result domain.ActiveTimeResult) {
+	t.Helper()
+	var consumed, projected int64
+	if err := store.db.QueryRow(`
+		SELECT account.consumed_value, run.active_elapsed_ns
+		FROM budget_accounts account JOIN runs run ON run.run_id = account.run_id
+		WHERE account.run_id = ? AND account.dimension = ?`, result.RunID, domain.BudgetActiveTimeNS,
+	).Scan(&consumed, &projected); err != nil {
+		t.Fatalf("read active-time authority: %v", err)
+	}
+	if consumed != projected || projected != int64(result.ActiveElapsed) {
+		t.Fatalf("active-time authority = account:%d projection:%d result:%d", consumed, projected, result.ActiveElapsed)
+	}
 }
 
 func ptrCause(value domain.ExecutionCause) *domain.ExecutionCause { return &value }

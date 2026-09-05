@@ -83,22 +83,25 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 				redacted_effective_config_json, redacted_effective_config_digest, workflow_digest,
 				workflow_revision, schema_version,
 				max_llm_calls, max_similarity_calls, max_llm_input_tokens, max_llm_output_tokens,
-				max_llm_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
+				max_llm_cost_micro_usd, max_similarity_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
 				max_mutations_per_stage, max_active_time_ns,
 				state, current_stage, current_stage_ordinal, version,
 				create_idempotency_key, create_command_digest, create_result_json, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 			string(request.RunID), request.SubmittedRequestJSON, string(request.SubmittedRequestDigest), request.EffectiveSeed,
 			request.RedactedEffectiveConfigJSON, string(request.RedactedEffectiveConfigDigest), string(request.WorkflowDigest),
 			request.WorkflowRevision, string(request.SchemaVersion),
 			limits.MaxLLMCalls, limits.MaxSimilarityCalls, limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens,
-			limits.MaxLLMCostMicroUSD, limits.MaxSandboxCreates, limits.MaxArtifactBytes, limits.MaxPackageBytes,
+			limits.MaxLLMCostMicroUSD, limits.MaxSimilarityCostMicroUSD, limits.MaxSandboxCreates, limits.MaxArtifactBytes, limits.MaxPackageBytes,
 			limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds*int64(time.Millisecond),
 			string(domain.RunCreated), string(request.StageSequence[0]), 1,
 			request.IdempotencyKey, string(commandDigest), resultJSON, formatTime(request.CreatedAt), formatTime(request.CreatedAt),
 		)
 		if err != nil {
 			return fmt.Errorf("insert run: %w", err)
+		}
+		if err := insertInitialBudgetAccounts(ctx, tx, request.RunID, request.SubmittedRequestDigest, limits); err != nil {
+			return err
 		}
 		for index, stage := range request.StageSequence {
 			_, err := tx.ExecContext(ctx, `
@@ -760,11 +763,19 @@ func (s *Store) AccountActiveTime(ctx context.Context, command domain.ActiveTime
 		if run.State != domain.RunRunning {
 			return wrap(ErrInvalidTransition, "active time can advance only while RUNNING", nil)
 		}
-		var maxNS int64
-		if err := tx.QueryRowContext(ctx, "SELECT max_active_time_ns FROM runs WHERE run_id = ?", string(command.RunID)).Scan(&maxNS); err != nil {
+		var maxNS, accountLimit, accountReserved, accountConsumed int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT run.max_active_time_ns, account.limit_value, account.reserved_value, account.consumed_value
+			FROM runs run JOIN budget_accounts account ON account.run_id = run.run_id
+			WHERE run.run_id = ? AND account.dimension = ?`,
+			string(command.RunID), domain.BudgetActiveTimeNS,
+		).Scan(&maxNS, &accountLimit, &accountReserved, &accountConsumed); err != nil {
 			return err
 		}
-		elapsed := run.ActiveElapsed
+		if accountLimit != maxNS || accountReserved != 0 || int64(run.ActiveElapsed) != accountConsumed {
+			return wrap(ErrConsistency, "active-time account and run projection disagree", nil)
+		}
+		elapsed := time.Duration(accountConsumed)
 		active := run.ActiveStartedAt != nil
 		started, heartbeat := run.ActiveStartedAt, run.LastAccountingHeartbeatAt
 		switch command.Action {
@@ -822,6 +833,24 @@ func (s *Store) AccountActiveTime(ctx context.Context, command domain.ActiveTime
 		if started != nil {
 			startedValue = formatTime(*started)
 			heartbeatValue = formatTime(*heartbeat)
+		}
+		if int64(elapsed) != accountConsumed {
+			accountResult, err := tx.ExecContext(ctx, `
+				UPDATE budget_accounts SET consumed_value = ?, account_version = account_version + 1
+				WHERE run_id = ? AND dimension = ? AND consumed_value = ? AND reserved_value = 0
+				  AND ? <= limit_value`,
+				int64(elapsed), string(command.RunID), domain.BudgetActiveTimeNS, accountConsumed, int64(elapsed),
+			)
+			if err != nil {
+				return err
+			}
+			updated, err := accountResult.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if updated != 1 {
+				return wrap(ErrConsistency, "active-time account debit lost its conditional update", nil)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE runs SET active_elapsed_ns = ?, active_started_at = ?, last_accounting_heartbeat_at = ?,
@@ -942,24 +971,43 @@ func digestJSON(value any) (domain.Digest, []byte, error) {
 // before workflow revision and schema version became explicit request fields.
 // It exists only to recognize an exact, persisted 691b611 idempotent replay.
 func legacyCreateRunDigestV691b611(request domain.CreateRunRequest) (domain.Digest, error) {
+	type budgetLimitsV691b611 struct {
+		MaxLLMCalls               int64 `json:"max_llm_calls"`
+		MaxSimilarityCalls        int64 `json:"max_similarity_calls"`
+		MaxLLMInputTokens         int64 `json:"max_llm_input_tokens"`
+		MaxLLMOutputTokens        int64 `json:"max_llm_output_tokens"`
+		MaxLLMCostMicroUSD        int64 `json:"max_llm_cost_micro_usd"`
+		MaxSandboxCreates         int64 `json:"max_sandbox_creates"`
+		MaxArtifactBytes          int64 `json:"max_artifact_bytes"`
+		MaxPackageBytes           int64 `json:"max_package_bytes"`
+		MaxMutationsPerStage      int64 `json:"max_mutations_per_stage"`
+		MaxActiveTimeMilliseconds int64 `json:"max_active_time_milliseconds"`
+	}
 	type createRunRequestV691b611 struct {
-		RunID                         domain.RunID        `json:"run_id"`
-		SubmittedRequestJSON          []byte              `json:"submitted_request_json"`
-		SubmittedRequestDigest        domain.Digest       `json:"submitted_request_digest"`
-		EffectiveSeed                 int64               `json:"effective_seed"`
-		RedactedEffectiveConfigJSON   []byte              `json:"redacted_effective_config_json"`
-		RedactedEffectiveConfigDigest domain.Digest       `json:"redacted_effective_config_digest"`
-		WorkflowDigest                domain.Digest       `json:"workflow_digest"`
-		BudgetLimits                  domain.BudgetLimits `json:"budget_limits"`
-		StageSequence                 []domain.StageName  `json:"stage_sequence"`
-		CreatedAt                     time.Time           `json:"created_at"`
-		IdempotencyKey                string              `json:"idempotency_key"`
+		RunID                         domain.RunID         `json:"run_id"`
+		SubmittedRequestJSON          []byte               `json:"submitted_request_json"`
+		SubmittedRequestDigest        domain.Digest        `json:"submitted_request_digest"`
+		EffectiveSeed                 int64                `json:"effective_seed"`
+		RedactedEffectiveConfigJSON   []byte               `json:"redacted_effective_config_json"`
+		RedactedEffectiveConfigDigest domain.Digest        `json:"redacted_effective_config_digest"`
+		WorkflowDigest                domain.Digest        `json:"workflow_digest"`
+		BudgetLimits                  budgetLimitsV691b611 `json:"budget_limits"`
+		StageSequence                 []domain.StageName   `json:"stage_sequence"`
+		CreatedAt                     time.Time            `json:"created_at"`
+		IdempotencyKey                string               `json:"idempotency_key"`
 	}
 	encoded, err := json.Marshal(createRunRequestV691b611{
 		RunID: request.RunID, SubmittedRequestJSON: request.SubmittedRequestJSON, SubmittedRequestDigest: request.SubmittedRequestDigest,
 		EffectiveSeed: request.EffectiveSeed, RedactedEffectiveConfigJSON: request.RedactedEffectiveConfigJSON,
 		RedactedEffectiveConfigDigest: request.RedactedEffectiveConfigDigest, WorkflowDigest: request.WorkflowDigest,
-		BudgetLimits: request.BudgetLimits, StageSequence: request.StageSequence, CreatedAt: request.CreatedAt,
+		BudgetLimits: budgetLimitsV691b611{
+			MaxLLMCalls: request.BudgetLimits.MaxLLMCalls, MaxSimilarityCalls: request.BudgetLimits.MaxSimilarityCalls,
+			MaxLLMInputTokens: request.BudgetLimits.MaxLLMInputTokens, MaxLLMOutputTokens: request.BudgetLimits.MaxLLMOutputTokens,
+			MaxLLMCostMicroUSD: request.BudgetLimits.MaxLLMCostMicroUSD, MaxSandboxCreates: request.BudgetLimits.MaxSandboxCreates,
+			MaxArtifactBytes: request.BudgetLimits.MaxArtifactBytes, MaxPackageBytes: request.BudgetLimits.MaxPackageBytes,
+			MaxMutationsPerStage:      request.BudgetLimits.MaxMutationsPerStage,
+			MaxActiveTimeMilliseconds: request.BudgetLimits.MaxActiveTimeMilliseconds,
+		}, StageSequence: request.StageSequence, CreatedAt: request.CreatedAt,
 		IdempotencyKey: request.IdempotencyKey,
 	})
 	if err != nil {
@@ -985,7 +1033,7 @@ func validateLegacyCreateRunReplay(ctx context.Context, tx *immediateTx, request
 			redacted_effective_config_json, redacted_effective_config_digest, workflow_digest,
 			workflow_revision, schema_version,
 			max_llm_calls, max_similarity_calls, max_llm_input_tokens, max_llm_output_tokens,
-			max_llm_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
+			max_llm_cost_micro_usd, max_similarity_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
 			max_mutations_per_stage, max_active_time_ns, create_idempotency_key, created_at
 		FROM runs WHERE create_idempotency_key = ?`, request.IdempotencyKey,
 	).Scan(
@@ -993,7 +1041,7 @@ func validateLegacyCreateRunReplay(ctx context.Context, tx *immediateTx, request
 		&storedConfigJSON, &storedConfigDigest, &storedWorkflowDigest,
 		&storedWorkflowRevision, &storedSchemaVersion,
 		&storedLimits.MaxLLMCalls, &storedLimits.MaxSimilarityCalls, &storedLimits.MaxLLMInputTokens, &storedLimits.MaxLLMOutputTokens,
-		&storedLimits.MaxLLMCostMicroUSD, &storedLimits.MaxSandboxCreates, &storedLimits.MaxArtifactBytes, &storedLimits.MaxPackageBytes,
+		&storedLimits.MaxLLMCostMicroUSD, &storedLimits.MaxSimilarityCostMicroUSD, &storedLimits.MaxSandboxCreates, &storedLimits.MaxArtifactBytes, &storedLimits.MaxPackageBytes,
 		&storedLimits.MaxMutationsPerStage, &storedLimits.MaxActiveTimeMilliseconds, &storedIdempotencyKey, &storedCreatedAt,
 	)
 	if err != nil {
