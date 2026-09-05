@@ -28,6 +28,7 @@ type Store struct {
 	blobs      string
 	temporary  string
 	quarantine string
+	trash      string
 	corruption CorruptionLedger
 }
 
@@ -53,7 +54,7 @@ func NewStore(root string) (*Store, error) {
 	if err := ensurePrivateDirectory(root); err != nil {
 		return nil, err
 	}
-	for _, path := range []string{filepath.Join(root, "blobs"), filepath.Join(root, "tmp"), filepath.Join(root, "quarantine")} {
+	for _, path := range []string{filepath.Join(root, "blobs"), filepath.Join(root, "tmp"), filepath.Join(root, "quarantine"), filepath.Join(root, "trash")} {
 		if err := ensurePrivateDirectoryTree(root, path); err != nil {
 			return nil, fmt.Errorf("create private blob directory: %w", err)
 		}
@@ -62,7 +63,7 @@ func NewStore(root string) (*Store, error) {
 		}
 		_ = os.Chmod(path, 0700)
 	}
-	return &Store{root: root, blobs: filepath.Join(root, "blobs"), temporary: filepath.Join(root, "tmp"), quarantine: filepath.Join(root, "quarantine")}, nil
+	return &Store{root: root, blobs: filepath.Join(root, "blobs"), temporary: filepath.Join(root, "tmp"), quarantine: filepath.Join(root, "quarantine"), trash: filepath.Join(root, "trash")}, nil
 }
 
 // Open is an alias useful to callers that treat the private store as a
