@@ -404,6 +404,13 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		if err := persistedAttempt.Validate(); err != nil {
 			return wrap(ErrConsistency, "finished attempt would violate persisted domain invariants", err)
 		}
+		if command.AttemptState == domain.StageAttemptSucceeded {
+			if err := attachPendingOccurrences(ctx, tx, command); err != nil {
+				return err
+			}
+		} else if err := releasePendingArtifactTokens(ctx, tx, command.RunID, command.StageName, command.AttemptID, command.At); err != nil {
+			return err
+		}
 		var output, cause, reviewEvidence, reviewPolicy any
 		if command.OutputDigest != nil {
 			output = string(*command.OutputDigest)

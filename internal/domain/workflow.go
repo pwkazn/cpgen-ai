@@ -845,21 +845,22 @@ func (v BeginStageCommand) Validate() error {
 }
 
 type FinishStageCommand struct {
-	RunID                RunID             `json:"run_id"`
-	ExpectedRunVersion   int64             `json:"expected_run_version"`
-	StageName            StageName         `json:"stage_name"`
-	AttemptID            AttemptID         `json:"attempt_id"`
-	AttemptState         StageAttemptState `json:"attempt_state"`
-	RunState             RunState          `json:"run_state"`
-	OutputDigest         *Digest           `json:"output_digest,omitempty"`
-	NextStage            StageName         `json:"next_stage,omitempty"`
-	NextInputDigest      *Digest           `json:"next_input_digest,omitempty"`
-	ReviewEvidenceDigest *Digest           `json:"review_evidence_digest,omitempty"`
-	ReviewPolicyDigest   *Digest           `json:"review_policy_digest,omitempty"`
-	ReviewGateWaivable   bool              `json:"review_gate_waivable,omitempty"`
-	Cause                *ExecutionCause   `json:"cause,omitempty"`
-	IdempotencyKey       string            `json:"idempotency_key"`
-	At                   time.Time         `json:"at"`
+	RunID                RunID               `json:"run_id"`
+	ExpectedRunVersion   int64               `json:"expected_run_version"`
+	StageName            StageName           `json:"stage_name"`
+	AttemptID            AttemptID           `json:"attempt_id"`
+	AttemptState         StageAttemptState   `json:"attempt_state"`
+	RunState             RunState            `json:"run_state"`
+	OutputDigest         *Digest             `json:"output_digest,omitempty"`
+	NextStage            StageName           `json:"next_stage,omitempty"`
+	NextInputDigest      *Digest             `json:"next_input_digest,omitempty"`
+	ReviewEvidenceDigest *Digest             `json:"review_evidence_digest,omitempty"`
+	ReviewPolicyDigest   *Digest             `json:"review_policy_digest,omitempty"`
+	ReviewGateWaivable   bool                `json:"review_gate_waivable,omitempty"`
+	Cause                *ExecutionCause     `json:"cause,omitempty"`
+	Occurrences          []PendingOccurrence `json:"occurrences,omitempty"`
+	IdempotencyKey       string              `json:"idempotency_key"`
+	At                   time.Time           `json:"at"`
 }
 
 func (v FinishStageCommand) Validate() error {
@@ -895,6 +896,11 @@ func (v FinishStageCommand) Validate() error {
 			}
 		}
 	}
+	for index, occurrence := range v.Occurrences {
+		if err := occurrence.Validate(); err != nil {
+			return fmt.Errorf("occurrence %d: %w", index, err)
+		}
+	}
 	switch v.AttemptState {
 	case StageAttemptSucceeded:
 		if v.RunState != RunRunning || v.OutputDigest == nil || v.NextStage == "" || v.NextInputDigest == nil ||
@@ -905,19 +911,19 @@ func (v FinishStageCommand) Validate() error {
 			return err
 		}
 	case StageAttemptBlocked:
-		if v.RunState != RunBlocked || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil {
+		if v.RunState != RunBlocked || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil || len(v.Occurrences) != 0 {
 			return errors.New("blocked finish fields are invalid")
 		}
 	case StageAttemptNeedsReview:
-		if v.RunState != RunNeedsReview || hasSuccessOnlyFinishFields(v) || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.Cause != nil {
+		if v.RunState != RunNeedsReview || hasSuccessOnlyFinishFields(v) || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.Cause != nil || len(v.Occurrences) != 0 {
 			return errors.New("review finish fields are invalid")
 		}
 	case StageAttemptFailed:
-		if v.RunState != RunFailed || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil {
+		if v.RunState != RunFailed || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil || len(v.Occurrences) != 0 {
 			return errors.New("failed finish fields are invalid")
 		}
 	case StageAttemptCancelled:
-		if v.RunState != RunCancelled || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause == nil || *v.Cause != CauseUserCancel {
+		if v.RunState != RunCancelled || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause == nil || *v.Cause != CauseUserCancel || len(v.Occurrences) != 0 {
 			return errors.New("cancelled finish fields are invalid")
 		}
 	}

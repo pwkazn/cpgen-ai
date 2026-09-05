@@ -79,3 +79,28 @@ func TestWorkflowIDsRejectMalformedJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestPendingOccurrenceTaggedUnion(t *testing.T) {
+	t.Parallel()
+	digest := domain.SumBytes([]byte("artifact"))
+	base := domain.PendingArtifact{Blob: domain.BlobRef{Digest: digest, Size: 8}, MediaType: "text/plain", Role: domain.ArtifactOutput, LogicalPath: "out.txt",
+		CallID: "call_00000000000000000000000000000001", ReservationID: "res_00000000000000000000000000000001", WriterTokenID: "writer_00000000000000000000000000000001", PinID: "pin_00000000000000000000000000000001", PhysicalNewBytes: 8,
+		Provenance: domain.ProvenanceCandidate{SchemaVersion: "cpgen.artifact/v1", Producer: "test"}}
+	validNew := domain.PendingOccurrence{Kind: domain.PendingOccurrenceNewWrite, NewWrite: &base}
+	if err := validNew.Validate(); err != nil {
+		t.Fatalf("valid NEW_WRITE rejected: %v", err)
+	}
+	for name, value := range map[string]domain.PendingOccurrence{
+		"empty":   {Kind: domain.PendingOccurrenceNewWrite},
+		"both":    {Kind: domain.PendingOccurrenceNewWrite, NewWrite: &base, CacheReuse: &domain.PendingCacheReuse{}},
+		"unknown": {Kind: "OTHER", NewWrite: &base},
+	} {
+		if err := value.Validate(); err == nil {
+			t.Errorf("%s occurrence accepted", name)
+		}
+	}
+	reuse := domain.PendingCacheReuse{CacheReuseRecordID: "reuse_00000000000000000000000000000001", SourceOccurrenceID: domain.ArtifactOccurrenceID("occurrence_" + strings.Repeat("0", 32)), SourceCallRecordID: "call_00000000000000000000000000000002", CurrentCallRecordID: "call_00000000000000000000000000000003", Blob: base.Blob, MediaType: base.MediaType, Role: base.Role, LogicalPath: base.LogicalPath, Provenance: base.Provenance}
+	if err := (domain.PendingOccurrence{Kind: domain.PendingOccurrenceCacheReuse, CacheReuse: &reuse}).Validate(); err != nil {
+		t.Fatalf("valid CACHE_REUSE rejected: %v", err)
+	}
+}

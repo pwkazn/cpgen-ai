@@ -51,3 +51,14 @@ type VerifiedReadCloser interface {
 type VerifiedBlobReader interface {
 	OpenVerified(ctx context.Context, blob domain.BlobRef) (VerifiedReadCloser, error)
 }
+
+// ArtifactLedger is the durable capability used by a prepared artifact
+// session. Implementations perform each transition in a short transaction;
+// the filesystem writer itself never receives a database handle.
+type ArtifactLedger interface {
+	PrepareArtifact(context.Context, domain.ArtifactDeclarationID) (domain.ArtifactDeclarationRecord, domain.ArtifactWriterToken, error)
+	OpenArtifactWriter(context.Context, domain.ArtifactWriterTokenID) error
+	SealArtifact(context.Context, domain.ArtifactWriterTokenID, domain.BlobRef) error
+	FinalizeArtifact(context.Context, domain.ArtifactWriterTokenID, domain.BlobRef) error
+	ReleaseArtifact(context.Context, domain.ArtifactWriterTokenID) error
+}

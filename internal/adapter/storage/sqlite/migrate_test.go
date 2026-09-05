@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 )
 
@@ -96,8 +97,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	if err := check.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration history: %v", err)
 	}
-	if count != 5 {
-		t.Fatalf("migration rows = %d, want 5", count)
+	if count != 10 {
+		t.Fatalf("migration rows = %d, want 10", count)
 	}
 }
 
@@ -177,7 +178,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 	if err != nil {
 		t.Fatalf("upgrade historical M4 database: %v", err)
 	}
-	assertMigrationHistory(t, store, 5)
+	assertMigrationHistory(t, store, 10)
 	for _, name := range []string{"call_records_terminal_matrix_insert", "physical_calls_terminal_parent_update"} {
 		var count int
 		if err := store.db.QueryRowContext(ctx,
@@ -196,7 +197,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 		t.Fatalf("reopen upgraded M4 database: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 5)
+	assertMigrationHistory(t, reopened, 10)
 }
 
 // TestMigrationFreshOpenAppliesForwardWorkflowMigration catches fresh stores
@@ -209,8 +210,166 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 5)
+	assertMigrationHistory(t, store, 10)
 	assertForwardWorkflowSchema(t, store)
+}
+
+func TestMigrationNineBackfillsPhysicalBytesByHistoricalPinIdentity(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	migrations, err := loadMigrations()
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:8] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record migration %d: %v", migration.version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	ref := domain.BlobRef{Digest: domain.SumBytes([]byte("historical-owner")), Size: int64(len("historical-owner"))}
+	if _, err := db.ExecContext(ctx, `INSERT INTO blobs(digest, size, state, canonical_relative_path) VALUES (?, ?, 'STAGING', ?)`, ref.Digest, ref.Size, "blobs/sha256/historical-owner"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	// Insert the later pin first but give both rows the same historical clock
+	// value. The persisted row identity, not a random pin id or timestamp,
+	// must determine the one physical owner.
+	for _, pin := range []string{"pin_zzzz", "pin_aaaa"} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO blob_pins(pin_id, writer_token_id, digest, size, state, created_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?)`, pin, "writer_"+pin, ref.Digest, ref.Size, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	store := &Store{db: db, config: Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1}, clock: clock.Real{}}
+	if err := store.migrate(ctx); err != nil {
+		_ = db.Close()
+		t.Fatalf("upgrade historical M8 database: %v", err)
+	}
+	var owner string
+	if err := db.QueryRowContext(ctx, `SELECT pin_id FROM artifact_blob_publication_owners WHERE digest = ? AND size = ?`, ref.Digest, ref.Size).Scan(&owner); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if owner != "pin_zzzz" {
+		t.Fatalf("historical publication owner = %q, want first inserted pin pin_zzzz", owner)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT pin_id, physical_new_bytes FROM blob_pins WHERE digest = ? AND size = ? ORDER BY rowid`, ref.Digest, ref.Size)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []struct {
+		pin   string
+		bytes int64
+	}
+	for rows.Next() {
+		var item struct {
+			pin   string
+			bytes int64
+		}
+		if err := rows.Scan(&item.pin, &item.bytes); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		got = append(got, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].pin != "pin_zzzz" || got[0].bytes != ref.Size || got[1].bytes != 0 {
+		t.Fatalf("historical physical byte owners = %+v", got)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationTenBindsAndProtectsPublicationOwner(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	migrations, err := loadMigrations()
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:8] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record migration %d: %v", migration.version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	baseDigest := "sha256:" + strings.Repeat("a", 64)
+	otherDigest := "sha256:" + strings.Repeat("b", 64)
+	if _, err := db.ExecContext(ctx, `INSERT INTO blobs(digest, size, state, canonical_relative_path) VALUES (?, ?, 'STAGING', ?)`, baseDigest, 1, "blobs/sha256/aa"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for _, pin := range []string{"pin_zzzz", "pin_aaaa"} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO blob_pins(pin_id, writer_token_id, digest, size, state, created_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?)`, pin, "writer_"+pin, baseDigest, 1, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed pin %s: %v", pin, err)
+		}
+	}
+	for _, migration := range migrations[8:] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record migration %d: %v", migration.version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO blobs(digest, size, state, canonical_relative_path) VALUES (?, ?, 'STAGING', ?)`, otherDigest, 1, "blobs/sha256/bb"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO artifact_blob_publication_owners(digest, size, pin_id) VALUES (?, ?, ?)`, otherDigest, 1, "pin_aaaa"); err == nil {
+		t.Fatal("cross-wired publication owner insert succeeded")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE artifact_blob_publication_owners SET pin_id = ? WHERE digest = ? AND size = ?`, "pin_aaaa", baseDigest, 1); err == nil {
+		t.Fatal("publication owner update succeeded")
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM artifact_blob_publication_owners WHERE digest = ? AND size = ?`, baseDigest, 1); err == nil {
+		t.Fatal("publication owner delete succeeded")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestMigrationUpgradesHistoricalWorkflowDatabase catches drift rejection or
@@ -226,7 +385,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("upgrade historical database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 5)
+	assertMigrationHistory(t, store, 10)
 	assertForwardWorkflowSchema(t, store)
 
 	for table, want := range fixture.rowCounts {
@@ -321,7 +480,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("idempotent reopen after upgrade: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 5)
+	assertMigrationHistory(t, reopened, 10)
 }
 
 // TestCreateRunReplaysLegacyCreateAfterHistoricalMigration catches rejecting
@@ -473,7 +632,7 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertMigrationHistory(t, store, 5)
+	assertMigrationHistory(t, store, 10)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -486,8 +645,8 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 5 {
-		t.Fatalf("migration count = %d, want 5", count)
+	if count != 10 {
+		t.Fatalf("migration count = %d, want 10", count)
 	}
 }
 
@@ -621,6 +780,21 @@ func assertMigrationHistory(t *testing.T, store *Store, want int) {
 	}
 	if want >= 5 && got[4].name != "000005_call_budget_terminal_guards.sql" {
 		t.Fatalf("migration 5 name = %q", got[4].name)
+	}
+	if want >= 6 && got[5].name != "000006_artifacts.sql" {
+		t.Fatalf("migration 6 name = %q", got[5].name)
+	}
+	if want >= 7 && got[6].name != "000007_artifact_scope_guards.sql" {
+		t.Fatalf("migration 7 name = %q", got[6].name)
+	}
+	if want >= 8 && got[7].name != "000008_artifact_recovery.sql" {
+		t.Fatalf("migration 8 name = %q", got[7].name)
+	}
+	if want >= 9 && got[8].name != "000009_artifact_publication_owners.sql" {
+		t.Fatalf("migration 9 name = %q", got[8].name)
+	}
+	if want >= 10 && got[9].name != "000010_artifact_publication_owner_guards.sql" {
+		t.Fatalf("migration 10 name = %q", got[9].name)
 	}
 }
 
