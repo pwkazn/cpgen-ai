@@ -190,6 +190,17 @@ func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domai
 			return domain.RunSnapshot{}, err
 		}
 	}
+	// A cancellation request is durable and may have been written by a second
+	// handle just before the owner died. Reconcile it before starting a fresh
+	// stage attempt; otherwise a resumed custom/slow step could run forever
+	// while a terminal control request is already waiting.
+	if snapshot.State == domain.RunCreated || snapshot.State == domain.RunRunning {
+		if pending, pendingErr := s.runtime.PendingCancel(ctx, runID); pendingErr != nil {
+			return domain.RunSnapshot{}, pendingErr
+		} else if pending != nil {
+			return s.finishCancellation(ctx, runID)
+		}
+	}
 	if snapshot.State == domain.RunCancelled || snapshot.State == domain.RunNeedsReview || snapshot.State == domain.RunFailed {
 		return snapshot, nil
 	}
@@ -800,5 +811,10 @@ func canonicalJSON(value any) ([]byte, error) {
 }
 func stableServiceID(prefix string, runID domain.RunID, version int64) string {
 	digest := domain.SumBytes([]byte(fmt.Sprintf("cpgen.service/v1:%s:%s:%d", prefix, runID, version)))
+	// Mutation idempotency keys share the domain ID grammar. Keep the semantic
+	// prefix in the digest, but normalize its presentation so a hyphenated
+	// operation name (for example, cancel-finalize) cannot produce an invalid
+	// ControlRequestID at the terminal projection boundary.
+	prefix = strings.ReplaceAll(prefix, "-", "_")
 	return prefix + "_" + string(digest[len("sha256:"):len("sha256:")+32])
 }

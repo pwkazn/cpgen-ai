@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,75 @@ func TestSlice1ProcessReadOnlyViewsAndCancelDuringExecution(t *testing.T) {
 	pending, err := cancelApp.Runtime.PendingCancel(context.Background(), snapshot.RunID)
 	if err != nil || pending == nil || pending.ID != request.ID {
 		t.Fatalf("pending cancel = %+v, %v", pending, err)
+	}
+}
+
+func TestSlice1ProcessLiveCancelSurvivesOwnerDeath(t *testing.T) {
+	env := newIntegrationEnvironment(t, "review")
+	owner := startIntegrationHelper(t, env, "live-executor", "run_00000000000000000000000000000001")
+	defer owner.kill(t)
+	observer := openIntegrationApp(t, env)
+	runs, err := observer.Runtime.ListRuns(context.Background(), domain.RunFilter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].State != domain.RunRunning || runs[0].CurrentStage != "prepare" {
+		t.Fatalf("live owner projection = %+v", runs)
+	}
+	current, err := observer.Runtime.GetRun(context.Background(), runs[0].RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelID := domain.ControlRequestID("control_00000000000000000000000000000003")
+	var control domain.ControlRequest
+	for attempt := 0; attempt < 20; attempt++ {
+		current, err = observer.Runtime.GetRun(context.Background(), current.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := domain.CancelRequest{ID: cancelID, RunID: current.RunID, ExpectedRunVersion: current.Version, Reason: "live owner death", IdempotencyKey: string(cancelID), At: time.Now().UTC()}
+		control, err = observer.Runtime.RequestCancel(context.Background(), request)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "version") {
+			t.Fatalf("live cancellation request = %+v, %v", control, err)
+		}
+	}
+	if err != nil || !control.Active {
+		t.Fatalf("live cancellation request = %+v, %v", control, err)
+	}
+	owner.kill(t)
+	resumedApp := openIntegrationApp(t, env)
+	resumed, err := resumedApp.Runs.Resume(context.Background(), current.RunID)
+	if err != nil {
+		t.Fatalf("resume after live owner death: %v", err)
+	}
+	if resumed.State != domain.RunCancelled {
+		t.Fatalf("resumed live cancellation = %+v, want CANCELLED", resumed)
+	}
+	pending, err := resumedApp.Runtime.PendingCancel(context.Background(), current.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != nil {
+		t.Fatalf("pending cancel survived terminal cleanup: %+v", pending)
+	}
+	events, err := resumedApp.Runtime.Events(context.Background(), current.RunID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requested, finalized int
+	for _, event := range events {
+		switch event.Type {
+		case domain.EventCancelRequested:
+			requested++
+		case domain.EventCancelFinalized:
+			finalized++
+		}
+	}
+	if requested != 1 || finalized != 1 {
+		t.Fatalf("live cancellation events requested=%d finalized=%d: %+v", requested, finalized, events)
 	}
 }
 

@@ -517,7 +517,18 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 	return session, nil
 }
 
-func RunWatchdogService(ctx context.Context, controlPath string) error {
+func RunWatchdogService(ctx context.Context, controlPath string) (returnErr error) {
+	// The detached child owns the control envelope after the owner process may
+	// disappear. Always remove it when the service exits (including owner EOF),
+	// so a crashed owner cannot leave a reusable nonce/control path behind.
+	defer func() {
+		if filepath.IsAbs(controlPath) {
+			cleanupErr := cleanupWatchdogControl(filepath.Dir(controlPath), controlPath)
+			if cleanupErr != nil {
+				returnErr = errors.Join(returnErr, cleanupErr)
+			}
+		}
+	}()
 	data, err := secureReadWatchdogControl(controlPath, 1<<20)
 	if err != nil {
 		return err

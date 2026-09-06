@@ -27,16 +27,32 @@ func TestSlice1CrashDurableBoundariesConvergeAfterForceKill(t *testing.T) {
 			helper := startIntegrationHelper(t, env, "crash-"+boundary, runID)
 			helper.kill(t)
 
+			app := openIntegrationApp(t, env)
+			if boundary == "blob_sealed" || boundary == "blob_published" || boundary == "blob_ready" {
+				if err := recoverArtifactAfterCrash(context.Background(), app, env.cfg, runID, boundary); err != nil {
+					t.Fatalf("recover artifact after %s: %v", boundary, err)
+				}
+			}
+			if boundary == "sandbox_resource" {
+				if err := recoverSandboxAfterCrash(context.Background(), app, runID); err != nil {
+					t.Fatalf("recover sandbox after %s: %v", boundary, err)
+				}
+			}
 			// Resume through the real application service. It must repair an
 			// interrupted attempt, not continue a stale occurrence or mint a
 			// second physical identity.
-			app := openIntegrationApp(t, env)
 			snapshot, err := app.Runs.Resume(context.Background(), runID)
 			if err != nil {
 				t.Fatalf("resume after %s: %v", boundary, err)
 			}
 			if snapshot.State != domain.RunNeedsReview {
 				t.Fatalf("resume after %s = %+v, want NEEDS_REVIEW", boundary, snapshot)
+			}
+			if isArtifactCrashBoundary(boundary) {
+				assertArtifactRecovered(t, app, env.cfg, runID)
+			}
+			if boundary == "sandbox_resource" {
+				assertSandboxRecovered(t, app, runID)
 			}
 			events, err := app.Runtime.Events(context.Background(), runID, 0)
 			if err != nil {

@@ -3,6 +3,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -76,6 +77,31 @@ func TestSlice1LockBoundaryCancellationIsDurableAndIdempotent(t *testing.T) {
 	}
 	if int64(len(events)) != snapshot.Version+1 {
 		t.Fatalf("repeated cancel appended an event: got %d events", len(events))
+	}
+}
+
+func TestSlice1LockBoundaryExternalAdaptersDoNotHoldSQLiteWriter(t *testing.T) {
+	// These are the five external operations called out by the workflow
+	// contract. The helper has already committed the call/dispatching and
+	// reservation rows when it blocks, so killing it is a real owner-death
+	// boundary rather than a sleep-based simulation. A fresh process then
+	// opens another connection and proves a different run can progress.
+	for index, adapter := range []string{"network", "docker", "blob", "watchdog", "reconciler"} {
+		t.Run(adapter, func(t *testing.T) {
+			env := newIntegrationEnvironment(t, "review")
+			runID := domain.RunID(fmt.Sprintf("run_%032x", index+301))
+			helper := startIntegrationHelper(t, env, "block-"+adapter, runID)
+			defer helper.kill(t)
+
+			started := time.Now()
+			code, output, stderr := runCLIDirect(env.configPath, "generate", "--request", env.requestPath)
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("different run blocked while %s adapter was stopped: %s", adapter, elapsed)
+			}
+			if code != 6 || len(stderr) != 0 {
+				t.Fatalf("different run during %s boundary: code=%d out=%q err=%q", adapter, code, output, stderr)
+			}
+		})
 	}
 }
 

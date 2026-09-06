@@ -241,7 +241,8 @@ func (s *Store) PrepareArtifact(ctx context.Context, id domain.ArtifactDeclarati
 		if err != nil {
 			return err
 		}
-		var state, created, opened, sealed, finalized, released string
+		var state, created string
+		var opened, sealed, finalized, released sql.NullString
 		var finalDigest sql.NullString
 		var finalSize sql.NullInt64
 		err = tx.QueryRowContext(ctx, `SELECT writer_token_id, state, final_digest, final_size, pin_id, created_at,

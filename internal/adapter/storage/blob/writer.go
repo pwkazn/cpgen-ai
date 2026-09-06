@@ -282,6 +282,36 @@ type stagedWriter interface {
 	publish(context.Context) (int64, error)
 }
 
+// Stage seals the private staging file and returns its immutable blob
+// identity without publishing it. Callers that persist a matching database
+// SEALED row may then call Publish to cross the filesystem publication
+// boundary. Keeping these two external operations named makes crash tests and
+// recovery code able to place a process boundary at the exact durable edge.
+func Stage(ctx context.Context, writer port.ArtifactWriter) (domain.PendingArtifact, error) {
+	if writer == nil {
+		return domain.PendingArtifact{}, errors.New("artifact writer is required")
+	}
+	staged, ok := writer.(stagedWriter)
+	if !ok {
+		return domain.PendingArtifact{}, errors.New("artifact writer does not expose staged lifecycle")
+	}
+	return staged.stage(ctx)
+}
+
+// Publish links a previously staged artifact into the canonical content
+// addressed store. It must only be called after the corresponding ledger
+// SEALED transaction has committed.
+func Publish(ctx context.Context, writer port.ArtifactWriter) (int64, error) {
+	if writer == nil {
+		return 0, errors.New("artifact writer is required")
+	}
+	staged, ok := writer.(stagedWriter)
+	if !ok {
+		return 0, errors.New("artifact writer does not expose staged lifecycle")
+	}
+	return staged.publish(ctx)
+}
+
 // MarkRetryable allows the application recovery coordinator to retain a
 // staged writer after a post-seal failure for an in-process retry.
 func (w *writer) MarkRetryable() {

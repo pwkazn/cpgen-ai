@@ -15,7 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"cpgen/internal/adapter/fake"
+	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/application"
+	"cpgen/internal/clock"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -74,6 +77,13 @@ func integrationRequest() domain.RunRequest {
 	}
 }
 
+const (
+	integrationArtifactCallRecordID  = domain.CallRecordID("callrec_00000000000000000000000000000002")
+	integrationArtifactAttemptCallID = domain.AttemptCallID("call_00000000000000000000000000000002")
+	integrationArtifactReservationID = domain.ReservationID("res_00000000000000000000000000000002")
+	integrationArtifactDeclarationID = domain.ArtifactDeclarationID("decl_00000000000000000000000000000001")
+)
+
 type helperProcess struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
@@ -110,12 +120,30 @@ func TestSlice1IntegrationHelper(t *testing.T) {
 		fmt.Fprintf(os.Stdout, "READY %s\n", action)
 		select {}
 	}
-
+	if action == "live-executor" {
+		if err := runLiveExecutorHelper(env); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	app, err := application.Bootstrap(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer app.Close()
+
+	if strings.HasPrefix(action, "block-") {
+		// Each named adapter boundary is represented by the same durable
+		// dispatching point: the SQL transaction has committed the call and
+		// budget reservation before the external adapter is allowed to block.
+		// The parent force-kills this process, then proves another SQLite
+		// connection can make progress on a different run.
+		if err := runBoundaryUntil(context.Background(), app, env, runID, "dispatching"); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(os.Stdout, "READY %s\n", action)
+		select {}
+	}
 
 	if strings.HasPrefix(action, "crash-") {
 		if err := runBoundaryUntil(context.Background(), app, env, runID, strings.TrimPrefix(action, "crash-")); err != nil {
@@ -125,6 +153,75 @@ func TestSlice1IntegrationHelper(t *testing.T) {
 		select {}
 	}
 	t.Fatalf("unknown integration helper action %q", action)
+}
+
+type blockingPrepareStep struct {
+	started chan<- struct{}
+}
+
+func (s *blockingPrepareStep) Name() domain.StageName { return "prepare" }
+
+func (s *blockingPrepareStep) Run(ctx context.Context, _ domain.RunView, _ domain.Slice1Input) (domain.AgentResult[domain.Slice1Prepared], error) {
+	close(s.started)
+	<-ctx.Done()
+	return domain.Cancelled[domain.Slice1Prepared](domain.CancellationEvidence{Cause: domain.CauseUserCancel, Evidence: domain.SumBytes([]byte("integration live cancel"))}), nil
+}
+
+func runLiveExecutorHelper(cfg config.Config) error {
+	app, err := application.Bootstrap(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+	started := make(chan struct{})
+	pipeline, err := workflow.NewSlice1Pipeline(
+		&blockingPrepareStep{started: started},
+		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
+		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+	)
+	if err != nil {
+		return err
+	}
+	service, err := application.NewRunService(application.RunServiceConfig{
+		Runtime: app.Runtime, Locks: app.Locks, Clock: clock.Real{}, Pipeline: pipeline,
+		ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat,
+	})
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := service.Generate(context.Background(), integrationRequest())
+		done <- runErr
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		return fmt.Errorf("live executor exited before readiness: %w", err)
+	case <-time.After(5 * time.Second):
+		return errors.New("live executor did not enter its blocking stage")
+	}
+	var runID domain.RunID
+	deadline := time.Now().Add(5 * time.Second)
+	for runID == "" && time.Now().Before(deadline) {
+		runs, listErr := app.Runtime.ListRuns(context.Background(), domain.RunFilter{Limit: 2})
+		if listErr != nil {
+			return listErr
+		}
+		if len(runs) == 1 && runs[0].State == domain.RunRunning && runs[0].CurrentStage == "prepare" {
+			runID = runs[0].RunID
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if runID == "" {
+		return errors.New("live executor did not persist a RUNNING prepare stage")
+	}
+	fmt.Fprintf(os.Stdout, "READY live %s\n", runID)
+	if err := <-done; err != nil {
+		return fmt.Errorf("live executor: %w", err)
+	}
+	return nil
 }
 
 func runBoundaryUntil(ctx context.Context, app *application.Application, cfg config.Config, runID domain.RunID, boundary string) error {
@@ -213,16 +310,411 @@ func runBoundaryUntil(ctx context.Context, app *application.Application, cfg con
 	if err := trace.Validate(); err != nil {
 		return err
 	}
-	// Blob and sandbox publication/cleanup boundaries are exercised by their
-	// adapter suites. In the local Fake bootstrap they have no external call;
-	// use the committed physical finish as the restart checkpoint while
-	// retaining explicit names in the matrix in slice1_crash_test.go.
-	if boundary != "stage_finish" && boundary != "blob_sealed" && boundary != "blob_published" && boundary != "blob_ready" && boundary != "occurrence_commit" && boundary != "sandbox_resource" {
+	if boundary == "sandbox_resource" {
+		return runSandboxBoundary(ctx, cfg, app.Runtime, runID, attempt.AttemptID, created.Version+1, physicalID, now)
+	}
+	if isArtifactCrashBoundary(boundary) {
+		_, err := runArtifactBoundary(ctx, cfg, ledger, runID, attempt.AttemptID, created.Version+1, now, boundary)
+		return err
+	}
+	if boundary != "stage_finish" && boundary != "sandbox_resource" {
 		return fmt.Errorf("unknown durable boundary %q", boundary)
 	}
 	output := domain.SumBytes([]byte("integration prepare output"))
 	_, err = app.Runtime.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: created.Version + 1, StageName: "prepare", AttemptID: attempt.AttemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, IdempotencyKey: "finish_00000000000000000000000000000001", At: now.Add(8 * time.Microsecond)})
 	return err
+}
+
+const (
+	integrationSandboxExecutionID = domain.SandboxExecutionID("sandbox_00000000000000000000000000000001")
+	integrationSandboxResourceID  = domain.SandboxResourceID("resource_00000000000000000000000000000001")
+)
+
+type sandboxLifecycleStore interface {
+	port.SandboxLifecycleRecorder
+	port.SandboxCleanupRecorder
+	port.SandboxLifecycleReader
+	port.SandboxWatchdogReader
+	UnfinishedSandboxExecutions(context.Context, domain.RunID) ([]domain.SandboxExecution, error)
+}
+
+func runSandboxBoundary(ctx context.Context, cfg config.Config, runtimeStore port.RuntimeStore, runID domain.RunID, attemptID domain.AttemptID, expectedRunVersion int64, physicalID domain.AttemptCallID, now time.Time) error {
+	store, ok := runtimeStore.(sandboxLifecycleStore)
+	if !ok {
+		return errors.New("bootstrap runtime does not expose sandbox lifecycle store")
+	}
+	engineDigest := domain.SumBytes([]byte("integration sandbox engine"))
+	scopeDigest := domain.SumBytes([]byte("integration sandbox scope"))
+	planDigest := domain.SumBytes([]byte("integration sandbox plan"))
+	labelsDigest := domain.SumBytes([]byte("integration sandbox labels"))
+	tokenDigest := domain.SumBytes([]byte("integration sandbox watchdog token"))
+	created, err := store.PrepareExecution(ctx, domain.PrepareExecutionRequest{
+		ExecutionID: integrationSandboxExecutionID, RunID: runID, AttemptID: attemptID, StageName: "prepare",
+		LogicalOperationID: "integration-sandbox-resource", ScopeDigest: scopeDigest, PlanDigest: planDigest,
+		EngineIdentityDigest: engineDigest, WatchdogControlRef: filepath.Join(cfg.Paths.Runtime, "integration-sandbox-watchdog"), WatchdogTokenDigest: tokenDigest,
+		Resources:         []domain.SandboxResource{{ID: integrationSandboxResourceID, ExecutionID: integrationSandboxExecutionID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET", PhysicalCallID: &physicalID, DeterministicName: "cpgen-integration-target", ExpectedLabelsDigest: labelsDigest, EngineIdentityDigest: engineDigest, CreationNonce: "integration-sandbox-nonce", Phase: domain.SandboxResourcePlanned, Version: 1, CreatedAt: now, UpdatedAt: now}},
+		SafetyDeadlineUTC: now.Add(time.Minute), CleanupDeadlineUTC: now.Add(2 * time.Minute), IdempotencyKey: "sandbox_prepare_00000000000000000000000000000001", At: now.Add(17 * time.Microsecond),
+	})
+	if err != nil {
+		return err
+	}
+	if err := store.RecordWatchdogArmed(ctx, domain.WatchdogArmed{ExecutionID: created.ID, ExpectedVersion: created.LifecycleVersion, ControlRecordRef: created.WatchdogControlRef, ControlFileDigest: domain.SumBytes([]byte("integration sandbox watchdog record")), TokenDigest: tokenDigest, IdempotencyKey: "sandbox_arm_00000000000000000000000000000001", At: now.Add(18 * time.Microsecond)}); err != nil {
+		return err
+	}
+	preCreate, err := store.BeginResourceCreate(ctx, domain.BeginResourceCreate{ExecutionID: created.ID, ResourceID: integrationSandboxResourceID, ExpectedVersion: 1, PhysicalCallID: &physicalID, IdempotencyKey: "sandbox_create_00000000000000000000000000000001", At: now.Add(19 * time.Microsecond)})
+	if err != nil {
+		return err
+	}
+	if err := store.RecordPreCreateACK(ctx, domain.PreCreateACK{ExecutionID: created.ID, ResourceID: integrationSandboxResourceID, ResourceVersion: preCreate.Version, LabelsDigest: labelsDigest, WatchdogRecordRef: created.WatchdogControlRef, IdempotencyKey: "sandbox_ack_00000000000000000000000000000001", At: now.Add(20 * time.Microsecond)}); err != nil {
+		return err
+	}
+	_, err = store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: created.ID, ResourceID: integrationSandboxResourceID, ExpectedVersion: preCreate.Version, Phase: domain.SandboxResourceDispatching, PhysicalCallID: &physicalID, EngineIdentityDigest: engineDigest, LabelsDigest: labelsDigest, IdempotencyKey: "sandbox_dispatch_00000000000000000000000000000001", At: now.Add(21 * time.Microsecond)})
+	return err
+}
+
+func recoverSandboxAfterCrash(ctx context.Context, app *application.Application, runID domain.RunID) error {
+	store, ok := app.Runtime.(sandboxLifecycleStore)
+	if !ok {
+		return errors.New("bootstrap runtime does not expose sandbox lifecycle store")
+	}
+	execution, err := store.GetSandboxExecution(ctx, integrationSandboxExecutionID)
+	if err != nil {
+		return err
+	}
+	if len(execution.Resources) != 1 {
+		return fmt.Errorf("sandbox recovery loaded %d resources, want 1", len(execution.Resources))
+	}
+	resource := execution.Resources[0]
+	engineDigest := execution.EngineIdentityDigest
+	labelsDigest := resource.ExpectedLabelsDigest
+	if _, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceUnknown, PhysicalCallID: resource.PhysicalCallID, EngineIdentityDigest: engineDigest, LabelsDigest: labelsDigest, IdempotencyKey: "sandbox_unknown_00000000000000000000000000000001", At: time.Now().UTC()}); err != nil {
+		return err
+	}
+	execution, err = store.GetSandboxExecution(ctx, execution.ID)
+	if err != nil {
+		return err
+	}
+	execution, err = store.MarkCleanupPending(ctx, domain.MarkCleanupPendingCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, Reason: "integration crash recovery", IdempotencyKey: "sandbox_cleanup_00000000000000000000000000000001", At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	execution, err = store.GetSandboxExecution(ctx, execution.ID)
+	if err != nil {
+		return err
+	}
+	resource = execution.Resources[0]
+	resource, err = store.RecordResourceStopProof(ctx, domain.RecordResourceStopProofCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, EngineResourceID: "integration-engine-resource", EngineIdentityDigest: engineDigest, LabelsDigest: labelsDigest, ProofDigest: domain.SumBytes([]byte("integration stop proof")), ProofKind: "integration-test-stop", At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	resource, err = store.RecordResourceCleaned(ctx, domain.RecordResourceCleanedCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: engineDigest, EvidenceDigest: domain.SumBytes([]byte("integration cleanup evidence")), At: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	_, err = store.FinishCleanup(ctx, domain.FinishCleanupCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, ReconciliationDigest: domain.SumBytes([]byte("integration reconciliation")), IdempotencyKey: "sandbox_finish_00000000000000000000000000000001", At: time.Now().UTC()})
+	return err
+}
+
+func assertSandboxRecovered(t *testing.T, app *application.Application, runID domain.RunID) {
+	t.Helper()
+	store, ok := app.Runtime.(sandboxLifecycleStore)
+	if !ok {
+		t.Fatal("bootstrap runtime does not expose sandbox lifecycle store")
+	}
+	execution, err := store.GetSandboxExecution(context.Background(), integrationSandboxExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.RunID != runID || execution.State != domain.SandboxExecutionCleaned || len(execution.Resources) != 1 || execution.Resources[0].Phase != domain.SandboxResourceCleaned {
+		t.Fatalf("sandbox recovery projection = %+v", execution)
+	}
+	unfinished, err := store.UnfinishedSandboxExecutions(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfinished) != 0 {
+		t.Fatalf("unfinished sandbox executions after recovery = %+v", unfinished)
+	}
+}
+
+func isArtifactCrashBoundary(boundary string) bool {
+	switch boundary {
+	case "blob_sealed", "blob_published", "blob_ready", "occurrence_commit":
+		return true
+	default:
+		return false
+	}
+}
+
+type artifactDeclarationWriter interface {
+	CreateArtifactDeclaration(context.Context, domain.ArtifactDeclarationRecord) error
+}
+
+// runArtifactBoundary drives the real SQLite artifact ledger and private CAS
+// writer through named, durable edges. The process helper is killed by the
+// parent immediately after this function returns at the requested edge.
+func runArtifactBoundary(ctx context.Context, cfg config.Config, ledger port.CallLedger, runID domain.RunID, attemptID domain.AttemptID, expectedVersion int64, now time.Time, boundary string) (domain.PendingArtifact, error) {
+	artifactLedger, ok := ledger.(port.ArtifactLedger)
+	if !ok {
+		return domain.PendingArtifact{}, errors.New("bootstrap runtime does not expose artifact ledger")
+	}
+	declarations, ok := ledger.(artifactDeclarationWriter)
+	if !ok {
+		return domain.PendingArtifact{}, errors.New("bootstrap runtime does not expose artifact declarations")
+	}
+	digest := domain.SumBytes([]byte("integration artifact request\x00" + boundary))
+	policyDigest := domain.SumBytes([]byte("integration artifact policy"))
+	call, err := ledger.OpenCall(ctx, domain.OpenCallRequest{
+		ID: integrationArtifactCallRecordID, RunID: runID, ExpectedRunVersion: expectedVersion,
+		StageName: "prepare", AttemptID: attemptID, LogicalOperationID: "integration-artifact-" + boundary,
+		Kind: domain.CallSandboxRun, Provider: "local-test", RequestDigest: digest, PolicyDigest: policyDigest,
+		RetryPolicy:    domain.RetryPolicy{MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond, JitterSeedDigest: policyDigest},
+		IdempotencyKey: "artifact_open_00000000000000000000000000000001", At: now.Add(9 * time.Microsecond),
+	})
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	_, err = ledger.PrepareCalls(ctx, domain.PrepareCallsRequest{
+		RunID: runID, ExpectedRunVersion: expectedVersion, StageName: "prepare", AttemptID: attemptID,
+		CallRecordID: call.ID, PlanDigest: digest, Calls: []domain.PhysicalCallPlan{{
+			ID: integrationArtifactAttemptCallID, Ordinal: 1, RetryGroup: "integration-artifact", RetryOrdinal: 1,
+			Kind: domain.PhysicalLocalArtifactWrite, Provider: "local-test", RequestDigest: digest,
+			IdempotencyKey: "artifact_physical_00000000000000000000000000000001",
+			Reservations:   []domain.ReservationPlan{{ID: integrationArtifactReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: "artifact", UpperBound: 256}},
+		}}, IdempotencyKey: "artifact_prepare_00000000000000000000000000000001", At: now.Add(10 * time.Microsecond),
+	})
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	declaration := domain.ArtifactDeclarationRecord{
+		ID: integrationArtifactDeclarationID, RunID: runID, StageName: "prepare", AttemptID: attemptID,
+		CallRecordID: call.ID, AttemptCallID: integrationArtifactAttemptCallID, ReservationID: integrationArtifactReservationID,
+		ReservationSubkey: "artifact", MediaType: "text/plain", Role: domain.ArtifactEvidence,
+		LogicalPath: domain.SafeRelPath("evidence/" + boundary + ".txt"), MaxBytes: 256,
+		Provenance: domain.ProvenanceCandidate{SchemaVersion: domain.DomainSchemaVersion, Producer: "slice1-integration"}, CreatedAt: now.Add(13 * time.Microsecond),
+	}
+	if err := declarations.CreateArtifactDeclaration(ctx, declaration); err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	store, err := blob.NewStore(cfg.Paths.Artifacts)
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if corruption, ok := ledger.(blob.CorruptionLedger); ok {
+		if err := store.AttachCorruptionLedger(corruption); err != nil {
+			return domain.PendingArtifact{}, err
+		}
+	}
+	_, token, err := artifactLedger.PrepareArtifact(ctx, declaration.ID)
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if err := artifactLedger.OpenArtifactWriter(ctx, token.ID); err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	writer, err := store.Prepare(ctx, port.ArtifactDeclaration{MediaType: declaration.MediaType, Role: declaration.Role, LogicalPath: declaration.LogicalPath, MaxBytes: declaration.MaxBytes, Provenance: declaration.Provenance}, blob.WriterIdentity{CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID})
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	content := integrationArtifactContent(boundary)
+	if _, err := writer.Write(content); err != nil {
+		_ = writer.Abort(context.Background())
+		return domain.PendingArtifact{}, err
+	}
+	pending, err := blob.Stage(ctx, writer)
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if err := artifactLedger.SealArtifact(ctx, token.ID, pending.Blob); err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if boundary == "blob_sealed" {
+		return pending, nil
+	}
+	physicalNew, err := blob.Publish(ctx, writer)
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	pending.PhysicalNewBytes = physicalNew
+	if boundary == "blob_published" {
+		return pending, nil
+	}
+	if err := artifactLedger.FinalizeArtifact(ctx, token.ID, pending.Blob); err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if boundary == "blob_ready" {
+		return pending, nil
+	}
+	output := domain.SumBytes([]byte("integration prepare output"))
+	if boundary != "occurrence_commit" {
+		return pending, nil
+	}
+	_, err = ledger.(port.RuntimeStore).FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: expectedVersion, StageName: "prepare", AttemptID: attemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, Occurrences: []domain.PendingOccurrence{{Kind: domain.PendingOccurrenceNewWrite, NewWrite: &pending}}, IdempotencyKey: "artifact_occurrence_00000000000000000000000000000001", At: now.Add(16 * time.Microsecond)})
+	return pending, err
+}
+
+func integrationArtifactContent(boundary string) []byte {
+	return []byte("integration durable artifact evidence:" + boundary + "\n")
+}
+
+// recoverArtifactAfterCrash completes the exact public adapter transitions
+// left by a kill at SEALED, PUBLISHED, or READY. It is invoked before the
+// normal application resume so the test can assert both filesystem and ledger
+// ownership are converged without using SQL internals.
+func recoverArtifactAfterCrash(ctx context.Context, app *application.Application, cfg config.Config, runID domain.RunID, boundary string) error {
+	ledger, ok := app.Runtime.(port.CallLedger)
+	if !ok {
+		return errors.New("bootstrap runtime does not expose call ledger")
+	}
+	artifactLedger, ok := app.Runtime.(port.ArtifactLedger)
+	if !ok {
+		return errors.New("bootstrap runtime does not expose artifact ledger")
+	}
+	store, err := blob.NewStore(cfg.Paths.Artifacts)
+	if err != nil {
+		return err
+	}
+	if corruption, ok := ledger.(blob.CorruptionLedger); ok {
+		if err := store.AttachCorruptionLedger(corruption); err != nil {
+			return err
+		}
+	}
+	prepared, err := ledger.LoadCall(ctx, integrationArtifactCallRecordID)
+	if err != nil {
+		return err
+	}
+	declaration, token, err := artifactLedger.PrepareArtifact(ctx, integrationArtifactDeclarationID)
+	if err != nil {
+		return err
+	}
+	var ref domain.BlobRef
+	switch token.State {
+	case domain.ArtifactWriterPrepared:
+		if err := artifactLedger.OpenArtifactWriter(ctx, token.ID); err != nil {
+			return err
+		}
+		writer, err := store.Prepare(ctx, port.ArtifactDeclaration{MediaType: declaration.MediaType, Role: declaration.Role, LogicalPath: declaration.LogicalPath, MaxBytes: declaration.MaxBytes, Provenance: declaration.Provenance}, blob.WriterIdentity{CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID})
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Write(integrationArtifactContent(boundary)); err != nil {
+			return err
+		}
+		pending, err := blob.Stage(ctx, writer)
+		if err != nil {
+			return err
+		}
+		if err := artifactLedger.SealArtifact(ctx, token.ID, pending.Blob); err != nil {
+			return err
+		}
+		if _, err := blob.Publish(ctx, writer); err != nil {
+			return err
+		}
+		if err := artifactLedger.FinalizeArtifact(ctx, token.ID, pending.Blob); err != nil {
+			return err
+		}
+		ref = pending.Blob
+	case domain.ArtifactWriterSealed:
+		if token.Blob == nil {
+			return errors.New("SEALED artifact token has no blob")
+		}
+		writer, err := store.ResumeStaged(ctx, port.ArtifactDeclaration{MediaType: declaration.MediaType, Role: declaration.Role, LogicalPath: declaration.LogicalPath, MaxBytes: declaration.MaxBytes, Provenance: declaration.Provenance}, blob.WriterIdentity{CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID}, *token.Blob)
+		if err != nil {
+			return err
+		}
+		if _, err := blob.Publish(ctx, writer); err != nil {
+			return err
+		}
+		if err := artifactLedger.FinalizeArtifact(ctx, token.ID, *token.Blob); err != nil {
+			return err
+		}
+		ref = *token.Blob
+	case domain.ArtifactWriterFinalized:
+		if token.Blob == nil {
+			return errors.New("FINALIZED artifact token has no blob")
+		}
+		ref = *token.Blob
+	default:
+		return fmt.Errorf("unexpected artifact token state %q after %s crash", token.State, boundary)
+	}
+	runtimeStore, ok := app.Runtime.(port.RuntimeStore)
+	if !ok {
+		return errors.New("bootstrap runtime does not expose runtime store")
+	}
+	pending := domain.PendingArtifact{Blob: ref, MediaType: declaration.MediaType, Role: declaration.Role, LogicalPath: declaration.LogicalPath, CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID, PhysicalNewBytes: ref.Size, Provenance: declaration.Provenance}
+	output := domain.SumBytes([]byte("integration prepare output"))
+	_, err = runtimeStore.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: prepared.Call.AttemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, Occurrences: []domain.PendingOccurrence{{Kind: domain.PendingOccurrenceNewWrite, NewWrite: &pending}}, IdempotencyKey: "artifact_occurrence_00000000000000000000000000000001", At: time.Now().UTC()})
+	return err
+}
+
+func assertArtifactRecovered(t *testing.T, app *application.Application, cfg config.Config, runID domain.RunID) {
+	t.Helper()
+	callLedger, ok := app.Runtime.(port.CallLedger)
+	if !ok {
+		t.Fatal("bootstrap runtime does not expose call ledger")
+	}
+	prepared, err := callLedger.LoadCall(context.Background(), integrationArtifactCallRecordID)
+	if err != nil {
+		t.Fatalf("read recovered artifact call: %v", err)
+	}
+	if len(prepared.PhysicalCalls) != 1 || prepared.PhysicalCalls[0].ID != integrationArtifactAttemptCallID {
+		t.Fatalf("recovered artifact physical calls = %+v, want one immutable call", prepared.PhysicalCalls)
+	}
+	if len(prepared.Reservations) != 1 || prepared.Reservations[0].State != domain.ReservationSettled || prepared.Reservations[0].SettledValue == nil {
+		t.Fatalf("recovered artifact reservations = %+v, want one settled reservation", prepared.Reservations)
+	}
+	artifactLedger, ok := app.Runtime.(port.ArtifactLedger)
+	if !ok {
+		t.Fatal("bootstrap runtime does not expose artifact ledger")
+	}
+	declaration, token, err := artifactLedger.PrepareArtifact(context.Background(), integrationArtifactDeclarationID)
+	if err != nil {
+		t.Fatalf("read recovered artifact token: %v", err)
+	}
+	if token.State != domain.ArtifactWriterFinalized || token.Blob == nil {
+		t.Fatalf("recovered artifact token = %+v, want FINALIZED with blob", token)
+	}
+	store, err := blob.NewStore(cfg.Paths.Artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.OpenVerified(context.Background(), *token.Blob)
+	if err != nil {
+		t.Fatalf("open recovered canonical blob: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	projection, ok := app.Runtime.(interface {
+		CommittedArtifactReferences(context.Context, domain.RunID) ([]domain.CommittedArtifactRef, error)
+	})
+	if !ok {
+		t.Fatal("bootstrap runtime does not expose committed artifact references")
+	}
+	occurrences, err := projection.CommittedArtifactReferences(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occurrences) != 1 {
+		t.Fatalf("recovered artifact occurrences = %d, want 1", len(occurrences))
+	}
+	if occurrences[0].Blob != *token.Blob || occurrences[0].LogicalPath != declaration.LogicalPath {
+		t.Fatalf("recovered artifact occurrence = %+v, token = %+v declaration = %+v", occurrences[0], *token.Blob, declaration)
+	}
+	budgetReader, ok := app.Runtime.(interface {
+		BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
+	})
+	if !ok {
+		t.Fatal("bootstrap runtime does not expose budget projection")
+	}
+	budget, err := budgetReader.BudgetSnapshot(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRemaining := integrationRequest().BudgetLimits.MaxArtifactBytes - token.Blob.Size
+	if got := budget.Remaining[domain.BudgetArtifactPhysicalNewBytes]; got != wantRemaining {
+		t.Fatalf("artifact budget remaining = %d, want %d after one settlement", got, wantRemaining)
+	}
 }
 
 func canonicalIntegrationJSON(value any) ([]byte, error) {
