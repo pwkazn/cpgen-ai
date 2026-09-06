@@ -555,8 +555,11 @@ type StageAttempt struct {
 	InputDigest  Digest            `json:"input_digest"`
 	OutputDigest *Digest           `json:"output_digest,omitempty"`
 	Cause        *ExecutionCause   `json:"cause,omitempty"`
-	StartedAt    time.Time         `json:"started_at"`
-	FinishedAt   *time.Time        `json:"finished_at,omitempty"`
+	// BlockedBinding is retained for blocked attempts so resume can revalidate
+	// the exact dependency and policy that produced the checkpoint.
+	BlockedBinding *BlockedCheckpoint `json:"blocked_binding,omitempty"`
+	StartedAt      time.Time          `json:"started_at"`
+	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
 }
 
 func (v StageAttempt) Validate() error {
@@ -585,6 +588,14 @@ func (v StageAttempt) Validate() error {
 	}
 	if v.Cause != nil && !v.Cause.Valid() {
 		return fmt.Errorf("invalid execution cause %q", *v.Cause)
+	}
+	if v.BlockedBinding != nil {
+		if v.State != StageAttemptBlocked || v.BlockedBinding.RunID != v.RunID || v.BlockedBinding.StageName != v.StageName || v.BlockedBinding.StageInputDigest != v.InputDigest {
+			return errors.New("blocked binding does not match attempt")
+		}
+		if err := v.BlockedBinding.Validate(); err != nil {
+			return fmt.Errorf("blocked binding: %w", err)
+		}
 	}
 	if err := validateUTCTime("started at", v.StartedAt); err != nil {
 		return err
@@ -845,22 +856,26 @@ func (v BeginStageCommand) Validate() error {
 }
 
 type FinishStageCommand struct {
-	RunID                RunID               `json:"run_id"`
-	ExpectedRunVersion   int64               `json:"expected_run_version"`
-	StageName            StageName           `json:"stage_name"`
-	AttemptID            AttemptID           `json:"attempt_id"`
-	AttemptState         StageAttemptState   `json:"attempt_state"`
-	RunState             RunState            `json:"run_state"`
-	OutputDigest         *Digest             `json:"output_digest,omitempty"`
-	NextStage            StageName           `json:"next_stage,omitempty"`
-	NextInputDigest      *Digest             `json:"next_input_digest,omitempty"`
-	ReviewEvidenceDigest *Digest             `json:"review_evidence_digest,omitempty"`
-	ReviewPolicyDigest   *Digest             `json:"review_policy_digest,omitempty"`
-	ReviewGateWaivable   bool                `json:"review_gate_waivable,omitempty"`
-	Cause                *ExecutionCause     `json:"cause,omitempty"`
-	Occurrences          []PendingOccurrence `json:"occurrences,omitempty"`
-	IdempotencyKey       string              `json:"idempotency_key"`
-	At                   time.Time           `json:"at"`
+	RunID                RunID             `json:"run_id"`
+	ExpectedRunVersion   int64             `json:"expected_run_version"`
+	StageName            StageName         `json:"stage_name"`
+	AttemptID            AttemptID         `json:"attempt_id"`
+	AttemptState         StageAttemptState `json:"attempt_state"`
+	RunState             RunState          `json:"run_state"`
+	OutputDigest         *Digest           `json:"output_digest,omitempty"`
+	NextStage            StageName         `json:"next_stage,omitempty"`
+	NextInputDigest      *Digest           `json:"next_input_digest,omitempty"`
+	ReviewEvidenceDigest *Digest           `json:"review_evidence_digest,omitempty"`
+	ReviewPolicyDigest   *Digest           `json:"review_policy_digest,omitempty"`
+	ReviewGateWaivable   bool              `json:"review_gate_waivable,omitempty"`
+	// BlockedBinding preserves the exact dependency and policy checkpoint that
+	// caused a stage to block. It is optional only for legacy callers; new
+	// blocked outcomes must carry it so resume can revalidate the same input.
+	BlockedBinding *BlockedCheckpoint  `json:"blocked_binding,omitempty"`
+	Cause          *ExecutionCause     `json:"cause,omitempty"`
+	Occurrences    []PendingOccurrence `json:"occurrences,omitempty"`
+	IdempotencyKey string              `json:"idempotency_key"`
+	At             time.Time           `json:"at"`
 }
 
 func (v FinishStageCommand) Validate() error {
@@ -904,7 +919,7 @@ func (v FinishStageCommand) Validate() error {
 	switch v.AttemptState {
 	case StageAttemptSucceeded:
 		if v.RunState != RunRunning || v.OutputDigest == nil || v.NextStage == "" || v.NextInputDigest == nil ||
-			v.ReviewEvidenceDigest != nil || v.ReviewPolicyDigest != nil || v.ReviewGateWaivable || v.Cause != nil {
+			v.ReviewEvidenceDigest != nil || v.ReviewPolicyDigest != nil || v.ReviewGateWaivable || v.BlockedBinding != nil || v.Cause != nil {
 			return errors.New("successful finish requires RUNNING next-stage binding")
 		}
 		if err := v.NextStage.Validate(); err != nil {
@@ -914,16 +929,24 @@ func (v FinishStageCommand) Validate() error {
 		if v.RunState != RunBlocked || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil || len(v.Occurrences) != 0 {
 			return errors.New("blocked finish fields are invalid")
 		}
+		if v.BlockedBinding != nil {
+			if v.BlockedBinding.RunID != v.RunID || v.BlockedBinding.StageName != v.StageName {
+				return errors.New("blocked finish binding does not match run or stage")
+			}
+			if err := v.BlockedBinding.Validate(); err != nil {
+				return fmt.Errorf("blocked finish binding: %w", err)
+			}
+		}
 	case StageAttemptNeedsReview:
-		if v.RunState != RunNeedsReview || hasSuccessOnlyFinishFields(v) || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.Cause != nil || len(v.Occurrences) != 0 {
+		if v.RunState != RunNeedsReview || hasSuccessOnlyFinishFields(v) || v.ReviewEvidenceDigest == nil || v.ReviewPolicyDigest == nil || v.Cause != nil || len(v.Occurrences) != 0 || v.BlockedBinding != nil {
 			return errors.New("review finish fields are invalid")
 		}
 	case StageAttemptFailed:
-		if v.RunState != RunFailed || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil || len(v.Occurrences) != 0 {
+		if v.RunState != RunFailed || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause != nil || len(v.Occurrences) != 0 || v.BlockedBinding != nil {
 			return errors.New("failed finish fields are invalid")
 		}
 	case StageAttemptCancelled:
-		if v.RunState != RunCancelled || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause == nil || *v.Cause != CauseUserCancel || len(v.Occurrences) != 0 {
+		if v.RunState != RunCancelled || hasSuccessOnlyFinishFields(v) || hasReviewFinishFields(v) || v.Cause == nil || *v.Cause != CauseUserCancel || len(v.Occurrences) != 0 || v.BlockedBinding != nil {
 			return errors.New("cancelled finish fields are invalid")
 		}
 	}

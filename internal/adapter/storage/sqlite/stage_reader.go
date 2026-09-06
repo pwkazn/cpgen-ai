@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
 	"cpgen/internal/domain"
 )
@@ -24,11 +25,11 @@ func (s *Store) CurrentStageAttempt(ctx context.Context, runID domain.RunID, sta
 	defer connection.Close()
 	var attempt domain.StageAttempt
 	var state, input, started string
-	var output, cause, finished sql.NullString
+	var output, cause, blockedBinding, finished sql.NullString
 	err = connection.QueryRowContext(ctx, `
-		SELECT attempt_id, run_id, stage_name, ordinal, state, input_digest, output_digest, cause, started_at, finished_at
+		SELECT attempt_id, run_id, stage_name, ordinal, state, input_digest, output_digest, cause, blocked_binding_json, started_at, finished_at
 		FROM stage_attempts WHERE run_id = ? AND stage_name = ? ORDER BY ordinal DESC LIMIT 1`, string(runID), string(stage)).Scan(
-		&attempt.AttemptID, &attempt.RunID, &attempt.StageName, &attempt.Ordinal, &state, &input, &output, &cause, &started, &finished)
+		&attempt.AttemptID, &attempt.RunID, &attempt.StageName, &attempt.Ordinal, &state, &input, &output, &cause, &blockedBinding, &started, &finished)
 	if err != nil {
 		return domain.StageAttempt{}, err
 	}
@@ -40,6 +41,13 @@ func (s *Store) CurrentStageAttempt(ctx context.Context, runID domain.RunID, sta
 	if cause.Valid {
 		value := domain.ExecutionCause(cause.String)
 		attempt.Cause = &value
+	}
+	if blockedBinding.Valid {
+		var binding domain.BlockedCheckpoint
+		if err := json.Unmarshal([]byte(blockedBinding.String), &binding); err != nil {
+			return domain.StageAttempt{}, err
+		}
+		attempt.BlockedBinding = &binding
 	}
 	if attempt.StartedAt, err = parseTime(started); err != nil {
 		return domain.StageAttempt{}, err

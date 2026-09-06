@@ -394,7 +394,8 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		persistedAttempt := domain.StageAttempt{
 			AttemptID: command.AttemptID, RunID: command.RunID, StageName: command.StageName,
 			Ordinal: stageOrdinal, State: command.AttemptState, InputDigest: domain.Digest(attemptInput),
-			OutputDigest: command.OutputDigest, Cause: command.Cause, StartedAt: attemptStarted, FinishedAt: &finishedAt,
+			OutputDigest: command.OutputDigest, Cause: command.Cause, BlockedBinding: command.BlockedBinding,
+			StartedAt: attemptStarted, FinishedAt: &finishedAt,
 		}
 		var attemptOrdinal int
 		if err := tx.QueryRowContext(ctx, `SELECT ordinal FROM stage_attempts WHERE attempt_id = ?`, string(command.AttemptID)).Scan(&attemptOrdinal); err != nil {
@@ -411,7 +412,7 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		} else if err := releasePendingArtifactTokens(ctx, tx, command.RunID, command.StageName, command.AttemptID, command.At); err != nil {
 			return err
 		}
-		var output, cause, reviewEvidence, reviewPolicy any
+		var output, cause, reviewEvidence, reviewPolicy, blockedBinding any
 		if command.OutputDigest != nil {
 			output = string(*command.OutputDigest)
 		}
@@ -424,6 +425,13 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		if command.ReviewPolicyDigest != nil {
 			reviewPolicy = string(*command.ReviewPolicyDigest)
 		}
+		if command.BlockedBinding != nil {
+			encoded, marshalErr := json.Marshal(command.BlockedBinding)
+			if marshalErr != nil {
+				return fmt.Errorf("encode blocked checkpoint: %w", marshalErr)
+			}
+			blockedBinding = encoded
+		}
 		var reviewWaivable any
 		if command.AttemptState == domain.StageAttemptNeedsReview {
 			reviewWaivable = 0
@@ -432,9 +440,9 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE stage_attempts SET state = ?, output_digest = ?, cause = ?, finished_at = ?
+			UPDATE stage_attempts SET state = ?, output_digest = ?, cause = ?, blocked_binding_json = ?, finished_at = ?
 			WHERE attempt_id = ? AND state = 'RUNNING'`,
-			string(command.AttemptState), output, cause, formatTime(command.At), string(command.AttemptID),
+			string(command.AttemptState), output, cause, blockedBinding, formatTime(command.At), string(command.AttemptID),
 		); err != nil {
 			return err
 		}

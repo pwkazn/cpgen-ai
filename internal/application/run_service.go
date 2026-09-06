@@ -30,6 +30,16 @@ type CurrentStageAttemptReader interface {
 	CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
 }
 
+// RunViewProjectionReader is an optional narrow read seam implemented by the
+// durable runtime store. It keeps workflow steps from depending on storage
+// while ensuring the view contains the authoritative budget and artifact
+// projections rather than coordinator-local guesses.
+type RunViewProjectionReader interface {
+	BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
+	CommittedArtifactReferences(context.Context, domain.RunID) ([]domain.CommittedArtifactRef, error)
+	RunViewDocuments(context.Context, domain.RunID) ([]byte, []byte, error)
+}
+
 type RunServiceConfig struct {
 	Runtime            port.RuntimeStore
 	Reviews            port.ReviewStore
@@ -163,6 +173,11 @@ func (s *LocalRunService) Cancel(ctx context.Context, request domain.CancelReque
 		return domain.RunSnapshot{}, err
 	}
 	defer guard.Close()
+	artifactGuard, err := s.locks.AcquireArtifacts(ctx, runlock.Shared)
+	if err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	defer artifactGuard.Close()
 	return s.finishCancellation(ctx, request.RunID)
 }
 
@@ -214,6 +229,22 @@ func (s *LocalRunService) executeExisting(ctx context.Context, snapshot domain.R
 
 func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunSnapshot, input any) (domain.RunSnapshot, error) {
 	wasBlocked := snapshot.State == domain.RunBlocked
+	var blockedBinding *domain.BlockedCheckpoint
+	if wasBlocked {
+		reader, ok := s.runtime.(CurrentStageAttemptReader)
+		if !ok {
+			return snapshot, errors.New("blocked resume requires persisted attempt reader")
+		}
+		persisted, readErr := reader.CurrentStageAttempt(ctx, snapshot.RunID, snapshot.CurrentStage)
+		if readErr != nil {
+			return snapshot, fmt.Errorf("read blocked checkpoint: %w", readErr)
+		}
+		if persisted.State != domain.StageAttemptBlocked || persisted.BlockedBinding == nil {
+			return snapshot, errors.New("blocked resume lacks exact persisted checkpoint binding")
+		}
+		binding := *persisted.BlockedBinding
+		blockedBinding = &binding
+	}
 	attemptRaw, err := domain.NewID("attempt")
 	if err != nil {
 		return snapshot, err
@@ -222,6 +253,12 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 	inputDigest, err := stageInputDigest(input)
 	if err != nil {
 		return snapshot, err
+	}
+	if blockedBinding != nil {
+		if inputDigest != blockedBinding.StageInputDigest {
+			return snapshot, errors.New("blocked resume input differs from persisted checkpoint")
+		}
+		inputDigest = blockedBinding.StageInputDigest
 	}
 	at := s.clock.Now().UTC()
 	attempt, err := s.runtime.BeginStage(ctx, domain.BeginStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attemptID, InputDigest: inputDigest, IdempotencyKey: stableServiceID("begin", snapshot.RunID, snapshot.Version), At: at})
@@ -236,13 +273,13 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		return snapshot, err
 	}
 	if wasBlocked {
-		view, viewErr := s.view(snapshot)
+		view, viewErr := s.view(ctx, snapshot, attempt.AttemptID)
 		if viewErr != nil {
 			return snapshot, viewErr
 		}
-		ok, revalidateErr := s.pipeline.Revalidate(ctx, view, snapshot.CurrentStage, inputDigest)
+		ok, revalidateErr := s.pipeline.Revalidate(ctx, view, snapshot.CurrentStage, *blockedBinding)
 		if revalidateErr != nil || !ok {
-			result := domain.Blocked[any](domain.BlockedCheckpoint{RunID: snapshot.RunID, StageName: snapshot.CurrentStage, StageInputDigest: inputDigest, DependencyID: "slice1-provider", DependencyDigest: domain.SumBytes([]byte("slice1 dependency")), PolicyDigest: snapshot.ConfigDigest, ErrorDigest: domain.SumBytes([]byte("dependency unavailable")), RetryAfter: s.clock.Now().UTC(), CreatedAt: s.clock.Now().UTC()})
+			result := domain.Blocked[any](*blockedBinding)
 			if revalidateErr != nil {
 				return s.finishOutcome(ctx, snapshot, attempt, inputDigest, result)
 			}
@@ -266,25 +303,22 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		if err != nil {
 			return snapshot, err
 		}
+		if reconcileErr := s.reconcileForTerminal(ctx, snapshot.RunID); reconcileErr != nil {
+			return snapshot, reconcileErr
+		}
 		return s.finishOutcome(ctx, snapshot, attempt, inputDigest, result)
 	}
-	stageCtx, cancel := context.WithCancel(ctx)
+	stageCtx, cancelCause := context.WithCancelCause(ctx)
 	pollDone := make(chan struct{})
 	accountDone := make(chan struct{})
 	accountExhausted := make(chan bool, 1)
-	go s.cancelPoller(stageCtx, snapshot.RunID, cancel, pollDone)
-	go s.accountingPoller(stageCtx, snapshot.RunID, cancel, accountDone, accountExhausted)
+	accountErrors := make(chan error, 1)
+	go s.cancelPoller(stageCtx, snapshot.RunID, func() { cancelCause(domain.ExecutionInterrupted{Cause: domain.CauseUserCancel}) }, pollDone)
+	go s.accountingPoller(stageCtx, snapshot.RunID, func() { cancelCause(domain.ExecutionInterrupted{Cause: domain.CauseRunBudgetDeadline}) }, accountDone, accountExhausted, accountErrors)
 	result, runErr := s.runTyped(stageCtx, snapshot, input)
-	cancel()
+	cancelCause(nil)
 	<-pollDone
 	<-accountDone
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		current, getErr := s.runtime.GetRun(ctx, snapshot.RunID)
-		if getErr == nil && current.ActiveStartedAt != nil {
-			_, _ = s.active.Stop(ctx, current.RunID, current.Version)
-		}
-		return snapshot, runErr
-	}
 	current, getErr := s.runtime.GetRun(ctx, snapshot.RunID)
 	if getErr != nil {
 		return snapshot, getErr
@@ -305,16 +339,36 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 	if err != nil {
 		return snapshot, err
 	}
-	if result.Cancellation != nil || errors.Is(runErr, context.Canceled) || s.hasCancel(ctx, current.RunID) {
+	var accountingErr error
+	select {
+	case accountingErr = <-accountErrors:
+	default:
+	}
+	if accountingErr != nil {
+		return current, accountingErr
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return current, runErr
+	}
+	interruptedCause := domain.ExecutionCause("")
+	if interrupted, ok := context.Cause(stageCtx).(domain.ExecutionInterrupted); ok {
+		interruptedCause = interrupted.Cause
+	}
+	userCancelled := (result.Cancellation != nil && result.Cancellation.Cause == domain.CauseUserCancel) || interruptedCause == domain.CauseUserCancel
+	if userCancelled || s.hasCancel(ctx, current.RunID) {
 		return s.finishCancellation(ctx, current.RunID)
 	}
-	if exhausted {
+	budgetExhausted := exhausted || (result.Cancellation != nil && result.Cancellation.Cause == domain.CauseRunBudgetDeadline) || interruptedCause == domain.CauseRunBudgetDeadline
+	if budgetExhausted {
 		result = domain.Review[any](domain.ReviewRequest{EvidenceDigest: domain.SumBytes([]byte("active-time exhausted")), PolicyDigest: current.ConfigDigest, Reason: "active_time_exhausted"})
+		if reconcileErr := s.reconcileForTerminal(ctx, current.RunID); reconcileErr != nil {
+			return current, reconcileErr
+		}
 	}
 	return s.finishOutcome(ctx, current, attempt, inputDigest, result)
 }
 
-func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.RunID, cancel context.CancelFunc, done chan<- struct{}, exhausted chan<- bool) {
+func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.RunID, cancel func(), done chan<- struct{}, exhausted chan<- bool, errorsOut chan<- error) {
 	defer close(done)
 	for {
 		select {
@@ -323,11 +377,24 @@ func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.Run
 		case <-s.clock.After(s.active.interval):
 			snapshot, err := s.runtime.GetRun(context.Background(), runID)
 			if err != nil || snapshot.ActiveStartedAt == nil {
+				if err != nil {
+					select {
+					case errorsOut <- err:
+					default:
+					}
+					cancel()
+					return
+				}
 				continue
 			}
 			result, err := s.active.Heartbeat(context.Background(), runID, snapshot.Version)
 			if err != nil {
-				continue
+				select {
+				case errorsOut <- err:
+				default:
+				}
+				cancel()
+				return
 			}
 			if result.Exhausted {
 				select {
@@ -342,7 +409,7 @@ func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.Run
 }
 
 func (s *LocalRunService) runTyped(ctx context.Context, viewSnapshot domain.RunSnapshot, input any) (domain.AgentResult[any], error) {
-	view, err := s.view(viewSnapshot)
+	view, err := s.view(ctx, viewSnapshot, s.currentAttempt(viewSnapshot.RunID))
 	if err != nil {
 		return domain.AgentResult[any]{}, err
 	}
@@ -361,8 +428,25 @@ func (s *LocalRunService) runTyped(ctx context.Context, viewSnapshot domain.RunS
 	}
 }
 
-func (s *LocalRunService) view(snapshot domain.RunSnapshot) (domain.RunView, error) {
-	return domain.NewRunView(domain.RunViewData{RunID: snapshot.RunID, WorkflowRevision: snapshot.WorkflowRevision, SchemaVersion: snapshot.SchemaVersion, RequestDigest: snapshot.RequestDigest, ConfigDigest: snapshot.ConfigDigest, WorkflowDigest: snapshot.WorkflowDigest, State: snapshot.State, CurrentStage: snapshot.CurrentStage, Version: snapshot.Version, Budget: domain.BudgetSnapshot{Limits: domain.BudgetLimits{}}})
+func (s *LocalRunService) view(ctx context.Context, snapshot domain.RunSnapshot, attemptID domain.AttemptID) (domain.RunView, error) {
+	data := domain.RunViewData{RunID: snapshot.RunID, AttemptID: attemptID, WorkflowRevision: snapshot.WorkflowRevision, SchemaVersion: snapshot.SchemaVersion, RequestDigest: snapshot.RequestDigest, ConfigDigest: snapshot.ConfigDigest, WorkflowDigest: snapshot.WorkflowDigest, State: snapshot.State, CurrentStage: snapshot.CurrentStage, Version: snapshot.Version, Budget: domain.BudgetSnapshot{Limits: domain.BudgetLimits{}}}
+	if reader, ok := s.runtime.(RunViewProjectionReader); ok {
+		budget, err := reader.BudgetSnapshot(ctx, snapshot.RunID)
+		if err != nil {
+			return domain.RunView{}, err
+		}
+		artifacts, err := reader.CommittedArtifactReferences(ctx, snapshot.RunID)
+		if err != nil {
+			return domain.RunView{}, err
+		}
+		requestJSON, configJSON, err := reader.RunViewDocuments(ctx, snapshot.RunID)
+		if err != nil {
+			return domain.RunView{}, err
+		}
+		data.Budget, data.CommittedArtifacts = budget, artifacts
+		data.RequestJSON, data.ConfigJSON = requestJSON, configJSON
+	}
+	return domain.NewRunView(data)
 }
 
 func convertResult[O any](result domain.AgentResult[O]) domain.AgentResult[any] {
@@ -408,6 +492,16 @@ func (s *LocalRunService) finishOutcome(ctx context.Context, snapshot domain.Run
 		command.NextStage, command.NextInputDigest = next, &output
 	case result.Blocked != nil, result.Retryable != nil:
 		command.AttemptState, command.RunState = domain.StageAttemptBlocked, domain.RunBlocked
+		if result.Blocked != nil {
+			command.BlockedBinding = result.Blocked
+		} else {
+			// Retryable failures share the durable BLOCKED stage state. Give
+			// them an explicit input/policy checkpoint as well, so restart does
+			// not silently retry against an unbound dependency.
+			now := s.clock.Now().UTC()
+			binding := domain.BlockedCheckpoint{RunID: snapshot.RunID, StageName: snapshot.CurrentStage, StageInputDigest: inputDigest, DependencyID: "slice1-retry", DependencyDigest: inputDigest, PolicyDigest: snapshot.ConfigDigest, ErrorDigest: result.Retryable.Evidence, RetryAfter: now, CreatedAt: now}
+			command.BlockedBinding = &binding
+		}
 	case result.Review != nil:
 		command.AttemptState, command.RunState = domain.StageAttemptNeedsReview, domain.RunNeedsReview
 		command.ReviewEvidenceDigest, command.ReviewPolicyDigest = &result.Review.EvidenceDigest, &result.Review.PolicyDigest
@@ -434,6 +528,9 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 	if pending == nil {
 		return snapshot, errors.New("cancellation has no pending control request")
 	}
+	if reconcileErr := s.reconcileForTerminal(ctx, runID); reconcileErr != nil {
+		return snapshot, reconcileErr
+	}
 	if snapshot.ActiveStartedAt != nil {
 		if _, err := s.active.Stop(ctx, runID, snapshot.Version); err != nil {
 			return snapshot, err
@@ -446,6 +543,13 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 	if snapshot.State == domain.RunRunning {
 		attemptID := s.currentAttempt(runID)
 		if attemptID == "" {
+			if reader, ok := s.runtime.(CurrentStageAttemptReader); ok {
+				if persisted, readErr := reader.CurrentStageAttempt(ctx, runID, snapshot.CurrentStage); readErr == nil && persisted.State == domain.StageAttemptRunning {
+					attemptID = persisted.AttemptID
+				}
+			}
+		}
+		if attemptID == "" {
 			return snapshot, errors.New("running cancellation lacks current attempt")
 		}
 		if _, err := s.runtime.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attemptID, AttemptState: domain.StageAttemptCancelled, RunState: domain.RunCancelled, Cause: causePointer(domain.CauseUserCancel), IdempotencyKey: stableServiceID("cancel-finish", runID, snapshot.Version), At: s.clock.Now().UTC()}); err == nil {
@@ -455,6 +559,23 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 		}
 	}
 	return s.runtime.FinalizeCancel(ctx, domain.FinalizeCancelCommand{RunID: runID, ExpectedRunVersion: snapshot.Version, ControlRequestID: pending.ID, ReconciliationDigest: domain.SumBytes([]byte("slice1 cancellation reconciliation")), IdempotencyKey: stableServiceID("cancel-finalize", runID, snapshot.Version), At: s.clock.Now().UTC()})
+}
+
+// reconcileForTerminal is the sole boundary before a cancellation or budget
+// exhaustion projection is committed. A non-complete report means exact
+// external ownership is still unresolved, so the run remains non-terminal.
+func (s *LocalRunService) reconcileForTerminal(ctx context.Context, runID domain.RunID) error {
+	if s.reconciler == nil {
+		return nil
+	}
+	report, err := s.reconciler.ReconcileRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("reconcile sandbox resources: %w", err)
+	}
+	if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
+		return errors.New("sandbox cleanup is not settled")
+	}
+	return nil
 }
 
 func causePointer(cause domain.ExecutionCause) *domain.ExecutionCause { return &cause }
@@ -484,8 +605,12 @@ func (s *LocalRunService) cancelPoller(ctx context.Context, runID domain.RunID, 
 
 func (s *LocalRunService) recoverRunning(ctx context.Context, snapshot domain.RunSnapshot) (domain.RunSnapshot, error) {
 	if s.reconciler != nil {
-		if _, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID); err != nil {
+		report, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID)
+		if err != nil {
 			return snapshot, err
+		}
+		if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
+			return snapshot, errors.New("sandbox recovery cleanup is not settled")
 		}
 	}
 	if snapshot.ActiveStartedAt != nil {

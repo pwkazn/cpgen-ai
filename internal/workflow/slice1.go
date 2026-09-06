@@ -17,7 +17,7 @@ type Slice1Pipeline struct {
 }
 
 type DependencyRevalidator interface {
-	Revalidate(context.Context, domain.RunView, domain.Digest) (bool, error)
+	Revalidate(context.Context, domain.RunView, domain.BlockedCheckpoint) (bool, error)
 }
 
 func NewSlice1Pipeline(
@@ -66,7 +66,7 @@ func (p Slice1Pipeline) RunCheckpoint(ctx context.Context, view domain.RunView, 
 	return p.checkpoint.Run(ctx, view, input)
 }
 
-func (p Slice1Pipeline) Revalidate(ctx context.Context, view domain.RunView, stage domain.StageName, input domain.Digest) (bool, error) {
+func (p Slice1Pipeline) Revalidate(ctx context.Context, view domain.RunView, stage domain.StageName, binding domain.BlockedCheckpoint) (bool, error) {
 	var candidate any
 	switch stage {
 	case "prepare":
@@ -82,5 +82,5 @@ func (p Slice1Pipeline) Revalidate(ctx context.Context, view domain.RunView, sta
 	if !ok {
 		return true, nil
 	}
-	return revalidator.Revalidate(ctx, view, input)
+	return revalidator.Revalidate(ctx, view, binding)
 }
