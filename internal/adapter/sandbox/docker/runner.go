@@ -395,7 +395,7 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 		EngineIdentityDigest: op.identity.EngineIdentityDigest, LogicalOperationID: op.identity.LogicalOperationID,
 		RunID: op.identity.RunID, AttemptID: op.identity.AttemptID, SandboxExecutionID: op.identity.SandboxExecutionID,
 		ScopeDigest: op.auth.ScopeDigest(),
-		Plan:        op.plan.Clone(), SafetyDeadlineUTC: deadline.UTC(),
+		Plan:        op.plan.Clone(), SafetyDeadlineUTC: deadline.UTC(), CleanupDeadlineUTC: cleanupDeadline,
 	}
 	if err := record.Validate(); err != nil {
 		return err
@@ -504,6 +504,38 @@ func (op *operation) lifecycleCompleteCreate(ctx context.Context, planned port.P
 		return err
 	}
 	op.lifecycleResources[planned.Ordinal] = resource
+	return nil
+}
+
+// lifecycleMarkSent mirrors the physical call ledger's MarkSent boundary in
+// the sandbox resource ledger.  Keeping this transition explicit preserves
+// the monotone CREATING -> DISPATCHING -> SENT -> COMPLETED sequence while
+// still allowing the exact Engine ID to be persisted before terminal call
+// settlement.
+func (op *operation) lifecycleMarkSent(ctx context.Context, planned port.PlannedResource, labels map[string]string, callID *domain.AttemptCallID) error {
+	if op.runner.lifecycle == nil || op.identity.SandboxExecutionID == "" {
+		return nil
+	}
+	resource, ok := op.lifecycleResources[planned.Ordinal]
+	if !ok {
+		return fmt.Errorf("sandbox resource %d was not durably prepared", planned.Ordinal)
+	}
+	if resource.Phase == domain.SandboxResourceSent {
+		return nil
+	}
+	if resource.Phase != domain.SandboxResourceDispatching {
+		return fmt.Errorf("sandbox resource %d cannot mark SENT from %s", planned.Ordinal, resource.Phase)
+	}
+	updated, err := op.runner.lifecycle.AdvanceResource(ctx, domain.AdvanceResourceRequest{
+		ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+		Phase: domain.SandboxResourceSent, PhysicalCallID: callID, EngineIdentityDigest: resource.EngineIdentityDigest,
+		LabelsDigest: digestLabels(labels), IdempotencyKey: stableSandboxKey("sent", string(resource.ID)),
+		At: stableLifecycleTime(resource.CreatedAt, "sent"),
+	})
+	if err != nil {
+		return err
+	}
+	op.lifecycleResources[planned.Ordinal] = updated
 	return nil
 }
 
@@ -1081,6 +1113,14 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 		if err := op.runner.callLedger.MarkSent(ctx, dispatch, stableLifecycleTime(lifecycleResource.CreatedAt, "sent")); err != nil {
 			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 		}
+		if err := op.lifecycleMarkSent(ctx, resource, labels, &callID); err != nil {
+			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
+		}
+		// Record the deterministic volume identity before terminal physical
+		// settlement, matching the container path's crash-safe ordering.
+		if err := op.lifecycleCompleteCreate(ctx, resource, created.Volume.Name, labels, &callID); err != nil {
+			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
+		}
 		responseDigest := domain.SumBytes([]byte("cpgen.docker.volume-create/v1\n" + string(callID) + "\n" + created.Volume.Name))
 		if err := op.runner.callLedger.CompletePhysical(ctx, domain.CompletePhysicalRequest{
 			RunID: dispatch.RunID, ExpectedRunVersion: dispatch.ExpectedRunVersion, StageName: dispatch.StageName,
@@ -1096,9 +1136,6 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 		}
 		if err := verifyVolumeOwnership(inspected.Volume, owned); err != nil {
-			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
-		}
-		if err := op.lifecycleCompleteCreate(ctx, resource, created.Volume.Name, labels, &callID); err != nil {
 			return errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 		}
 		if err := op.watchdog.ResourceCreated(ctx, resource, owned.name); err != nil {
@@ -1221,6 +1258,17 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 	if err := op.runner.callLedger.MarkSent(ctx, dispatch, stableLifecycleTime(lifecycleResource.CreatedAt, "sent")); err != nil {
 		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 	}
+	if err := op.lifecycleMarkSent(ctx, resource, labels, &callID); err != nil {
+		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
+	}
+	// Persist the exact Engine identity before settling the physical call and
+	// before notifying the detached watchdog.  If the process dies after this
+	// point, the durable resource row is already COMPLETED with the immutable
+	// returned ID, so a later reconciler can clean that exact object without
+	// relying on an in-memory pointer or a name-only retry.
+	if err := op.lifecycleCompleteCreate(ctx, resource, created.ID, labels, &callID); err != nil {
+		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
+	}
 	responseDigest := domain.SumBytes([]byte("cpgen.docker.container-create/v1\n" + string(callID) + "\n" + created.ID))
 	if err := op.runner.callLedger.CompletePhysical(ctx, domain.CompletePhysicalRequest{
 		RunID: dispatch.RunID, ExpectedRunVersion: dispatch.ExpectedRunVersion, StageName: dispatch.StageName,
@@ -1239,9 +1287,6 @@ func (op *operation) createContainer(ctx context.Context, role port.ContainerRol
 		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 	}
 	if err := verifyContainerOwnership(inspected, owned); err != nil {
-		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
-	}
-	if err := op.lifecycleCompleteCreate(ctx, resource, created.ID, labels, &callID); err != nil {
 		return nil, callID, errors.Join(err, op.settlePhysicalUnknown(ctx, dispatch, resource, stableLifecycleTime(lifecycleResource.CreatedAt, "complete")))
 	}
 	if role != port.ContainerTarget {

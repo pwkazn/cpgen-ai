@@ -295,7 +295,9 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 		return nil, err
 	}
 	owner, service := net.Pipe()
-	go func() { _ = c.service.Serve(context.Background(), service, envelope, reconciler) }()
+	watchdogService := c.service
+	watchdogService.CleanupTimeout = record.CleanupDeadlineUTC.Sub(record.SafetyDeadlineUTC)
+	go func() { _ = watchdogService.Serve(context.Background(), service, envelope, reconciler) }()
 	client, err := watchdogprotocol.NewClient(owner, c.token, envelope.RecordDigest)
 	if err != nil {
 		_ = owner.Close()
@@ -552,7 +554,8 @@ func RunWatchdogService(ctx context.Context, controlPath string) error {
 	if err != nil {
 		return err
 	}
-	service := watchdogprotocol.Service{PollInterval: 100 * time.Millisecond, LateCreateWindow: 2 * time.Second, CleanupTimeout: 30 * time.Second}
+	cleanupWindow := envelope.Record.CleanupDeadlineUTC.Sub(envelope.Record.SafetyDeadlineUTC)
+	service := watchdogprotocol.Service{PollInterval: 100 * time.Millisecond, LateCreateWindow: 2 * time.Second, CleanupTimeout: cleanupWindow}
 	return service.Serve(ctx, conn, envelope, reconciler)
 }
 

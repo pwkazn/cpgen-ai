@@ -30,6 +30,10 @@ type ControlRecord struct {
 	LogicalOperationID   string                    `json:"logical_operation_id"`
 	Plan                 port.ContainerPlan        `json:"plan"`
 	SafetyDeadlineUTC    time.Time                 `json:"safety_deadline_utc"`
+	// CleanupDeadlineUTC is sealed with the execution so a detached watchdog
+	// cannot silently use a different cleanup window than the persisted
+	// sandbox lifecycle row.
+	CleanupDeadlineUTC time.Time `json:"cleanup_deadline_utc"`
 }
 
 func (r ControlRecord) Clone() ControlRecord {
@@ -69,6 +73,9 @@ func (r ControlRecord) Validate() error {
 	}
 	if r.SafetyDeadlineUTC.IsZero() || r.SafetyDeadlineUTC.Location() != time.UTC {
 		return fmt.Errorf("safety deadline must be a nonzero UTC instant")
+	}
+	if r.CleanupDeadlineUTC.IsZero() || r.CleanupDeadlineUTC.Location() != time.UTC || r.CleanupDeadlineUTC.Before(r.SafetyDeadlineUTC) {
+		return fmt.Errorf("cleanup deadline must be a nonzero UTC instant not before safety deadline")
 	}
 	return nil
 }

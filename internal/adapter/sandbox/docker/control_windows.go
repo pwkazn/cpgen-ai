@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -41,9 +42,17 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 		return nil, "", "", err
 	}
 	directory := filepath.Join(base, "watchdog-"+nonce)
+	address := `\\.\pipe\cpgen-watchdog-` + nonce
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		if !os.IsExist(err) {
 			return nil, "", "", err
+		}
+		active, probeErr := probeWatchdogPipe(address)
+		if probeErr != nil {
+			return nil, "", "", fmt.Errorf("refusing to retire watchdog control with an uncertain named-pipe state: %w", probeErr)
+		}
+		if active {
+			return nil, "", "", fmt.Errorf("watchdog control for this identity is already active")
 		}
 		if err := removeStaleWatchdogControl(directory); err != nil {
 			return nil, "", "", err
@@ -63,7 +72,6 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 		_ = os.Remove(directory)
 		return nil, "", "", err
 	}
-	address := `\\.\pipe\cpgen-watchdog-` + nonce
 	sddl, err := ownerOnlySDDL()
 	if err != nil {
 		_ = os.Remove(directory)
@@ -78,6 +86,35 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 	}
 	return listener, address, directory, nil
 }
+
+// probeWatchdogPipe distinguishes a definitely absent named pipe from a
+// live (or otherwise uncertain) watchdog.  Replaying a nonce must never
+// delete the control directory while the old detached child can still use it.
+func probeWatchdogPipe(address string) (bool, error) {
+	// WaitNamedPipe only probes availability; unlike DialPipeContext it does
+	// not consume the single server instance and therefore cannot make a live
+	// watchdog observe an EOF on its owner connection.
+	name, err := windows.UTF16PtrFromString(address)
+	if err != nil {
+		return false, err
+	}
+	result, _, callErr := waitNamedPipeW.Call(uintptr(unsafe.Pointer(name)), 100)
+	if result != 0 {
+		return true, nil
+	}
+	if errors.Is(callErr, windows.ERROR_FILE_NOT_FOUND) || errors.Is(callErr, windows.ERROR_PATH_NOT_FOUND) {
+		return false, nil
+	}
+	if errors.Is(callErr, windows.ERROR_SEM_TIMEOUT) {
+		return true, nil
+	}
+	if callErr == nil {
+		return false, errors.New("WaitNamedPipeW failed without an error")
+	}
+	return false, callErr
+}
+
+var waitNamedPipeW = windows.NewLazySystemDLL("kernel32.dll").NewProc("WaitNamedPipeW")
 
 func prepareWatchdogControlDirectory(path string) error {
 	if !filepath.IsAbs(path) {

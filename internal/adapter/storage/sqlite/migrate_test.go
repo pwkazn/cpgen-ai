@@ -214,6 +214,122 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 	assertForwardWorkflowSchema(t, store)
 }
 
+// TestMigrationUpgradesM14VolumeWithoutPhysicalCallID verifies the forward
+// compatibility path for the historical M14 volume shape.  M14 permitted a
+// post-dispatch VOLUME row without a physical call ID; upgrading that exact
+// database must not be rejected by the M16 version guard and must preserve the
+// row through M17.
+func TestMigrationUpgradesM14VolumeWithoutPhysicalCallID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open M14 database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	migrations, err := loadMigrations()
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("load migrations: %v", err)
+	}
+	for _, migration := range migrations[:14] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply M14 migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record M14 migration %d: %v", migration.version, err)
+		}
+	}
+	runID := "run_00000000000000000000000000000071"
+	stage := "sandbox"
+	attemptID := "attempt_00000000000000000000000000000071"
+	executionID := "sandbox_00000000000000000000000000000071"
+	resourceID := "resource_00000000000000000000000000000071"
+	scopeDigest := domain.SumBytes([]byte("m14-volume-scope"))
+	planDigest := domain.SumBytes([]byte("m14-volume-plan"))
+	engineDigest := domain.SumBytes([]byte("m14-volume-engine"))
+	tokenDigest := domain.SumBytes([]byte("m14-volume-token"))
+	labelsDigest := domain.SumBytes([]byte("m14-volume-labels"))
+	commandDigest := domain.SumBytes([]byte("m14-volume-command"))
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO runs(
+			run_id, submitted_request_json, submitted_request_digest, effective_seed,
+			redacted_effective_config_json, redacted_effective_config_digest,
+			workflow_digest, workflow_revision, schema_version,
+			max_llm_calls, max_similarity_calls, max_llm_input_tokens, max_llm_output_tokens,
+			max_llm_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
+			max_mutations_per_stage, max_active_time_ns, state, current_stage,
+			current_stage_ordinal, version, create_idempotency_key, create_command_digest,
+			create_result_json, created_at, updated_at
+		) VALUES (?, CAST('{}' AS BLOB), ?, 1, CAST('{}' AS BLOB), ?, ?, 'm14', 'cpgen.request/v1',
+			1, 1, 1, 1, 1, 1, 1, 1, 1, 1000000000, 'RUNNING', ?, 1, 2,
+			'create_m14_volume_00000000000000000000000000000071', ?, CAST('{}' AS BLOB), ?, ?)`,
+		runID, string(commandDigest), string(commandDigest), string(commandDigest), stage, string(commandDigest),
+		formatTime(testNow), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert M14 run: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO stage_records(run_id, stage_name, ordinal, workflow_revision, schema_version, state, version, input_digest,
+			attempt_count, current_attempt_id, logical_idempotency_key, created_at, updated_at)
+		VALUES (?, ?, 1, 'm14', 'cpgen.request/v1', 'RUNNING', 1, ?, 1, ?, 'm14-volume-stage', ?, ?)`,
+		runID, stage, string(commandDigest), attemptID, formatTime(testNow), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert M14 stage: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO stage_attempts(attempt_id, run_id, stage_name, ordinal, state, input_digest, started_at)
+		VALUES (?, ?, ?, 1, 'RUNNING', ?, ?)`, attemptID, runID, stage, string(commandDigest), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert M14 attempt: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO sandbox_executions(
+			sandbox_execution_id, run_id, stage_name, attempt_id, logical_operation_id,
+			scope_digest, plan_digest, engine_identity_digest, watchdog_control_ref,
+			watchdog_token_digest, state, lifecycle_version, cleanup_version,
+			safety_deadline_utc, cleanup_deadline_utc, idempotency_key, command_digest,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'm14-volume-op', ?, ?, ?, '/tmp/m14-volume-control',
+			?, 'ARMED', 2, 0, ?, ?, 'prepare_m14_volume', ?, ?, ?)`,
+		executionID, runID, stage, attemptID, string(scopeDigest), string(planDigest), string(engineDigest),
+		string(tokenDigest), formatTime(testNow.Add(time.Hour)), formatTime(testNow.Add(2*time.Hour)), string(commandDigest), formatTime(testNow), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert M14 execution: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO sandbox_resources(
+			resource_id, sandbox_execution_id, plan_ordinal, resource_kind, resource_role,
+			deterministic_name, expected_labels_digest, engine_identity_digest, phase,
+			version, created_at, updated_at)
+		VALUES (?, ?, 0, 'VOLUME', 'INPUT', 'cpgen-m14-volume', ?, ?, 'DISPATCHING', 3, ?, ?)`,
+		resourceID, executionID, string(labelsDigest), string(engineDigest), formatTime(testNow), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert M14 volume: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close M14 database: %v", err)
+	}
+
+	store, err := Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatalf("upgrade M14 database: %v", err)
+	}
+	defer store.Close()
+	assertMigrationHistory(t, store, 17)
+	var phase string
+	var gotDigest sql.NullString
+	if err := store.db.QueryRowContext(ctx, `SELECT phase, physical_call_id FROM sandbox_resources WHERE resource_id=?`, resourceID).Scan(&phase, &gotDigest); err != nil {
+		t.Fatalf("read upgraded M14 volume: %v", err)
+	}
+	if phase != "DISPATCHING" || gotDigest.Valid {
+		t.Fatalf("upgraded M14 volume = phase %q physical_call_id %v, want DISPATCHING/NULL", phase, gotDigest)
+	}
+}
+
 func TestMigrationNineBackfillsPhysicalBytesByHistoricalPinIdentity(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "workflow.db")

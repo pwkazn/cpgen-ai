@@ -275,7 +275,7 @@ func TestWatchdogDockerOwnerEOFCanary(t *testing.T) {
 	record := watchdogprotocol.ControlRecord{
 		SchemaVersion: watchdogprotocol.ControlRecordSchemaVersion, TokenDigest: controller.TokenDigest(),
 		EngineEndpoint: endpoint, EngineIdentityDigest: report.EngineIdentityDigest,
-		LogicalOperationID: "watchdog-docker-canary", Plan: plan, SafetyDeadlineUTC: time.Now().Add(20 * time.Second).UTC(),
+		LogicalOperationID: "watchdog-docker-canary", Plan: plan, SafetyDeadlineUTC: time.Now().Add(20 * time.Second).UTC(), CleanupDeadlineUTC: time.Now().Add(50 * time.Second).UTC(),
 	}
 	for key, value := range map[string]string{
 		"org.cpgen.plan-digest": string(plan.PlanDigest),
@@ -369,7 +369,7 @@ func watchdogRecord(t *testing.T, token domain.Digest, deadline time.Time) watch
 	return watchdogprotocol.ControlRecord{
 		SchemaVersion: watchdogprotocol.ControlRecordSchemaVersion, TokenDigest: token,
 		EngineEndpoint: "npipe:////./pipe/docker_engine", EngineIdentityDigest: engine,
-		LogicalOperationID: "watchdog-test", Plan: plan, SafetyDeadlineUTC: deadline.UTC(),
+		LogicalOperationID: "watchdog-test", Plan: plan, SafetyDeadlineUTC: deadline.UTC(), CleanupDeadlineUTC: deadline.UTC().Add(30 * time.Second),
 	}
 }
 

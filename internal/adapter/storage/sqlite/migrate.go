@@ -144,6 +144,11 @@ func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {
 	}
 	for _, trigger := range []string{
 		"sandbox_resource_phase_monotone",
+		// M14/M15/M16 all install this guard.  The compatibility parking
+		// update deliberately changes a legacy phase before M16 rebuilds the
+		// table, so the version guard must be removed together with the phase
+		// guards or the update is rejected before the rebuild starts.
+		"sandbox_resource_version_guard",
 		"sandbox_resource_stopped_requires_proof",
 		"sandbox_resource_cleaned_requires_evidence",
 	} {

@@ -208,7 +208,7 @@ func controlRecord(t *testing.T, deadline time.Time) (watchdog.ControlRecord, st
 	return watchdog.ControlRecord{
 		SchemaVersion: watchdog.ControlRecordSchemaVersion, TokenDigest: domain.SumBytes([]byte(token)),
 		EngineEndpoint: "npipe:////./pipe/docker_engine", EngineIdentityDigest: engine,
-		LogicalOperationID: "compile-solution", Plan: plan, SafetyDeadlineUTC: deadline.UTC(),
+		LogicalOperationID: "compile-solution", Plan: plan, SafetyDeadlineUTC: deadline.UTC(), CleanupDeadlineUTC: deadline.UTC().Add(time.Second),
 	}, token
 }
 

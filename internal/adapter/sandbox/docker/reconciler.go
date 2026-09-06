@@ -168,11 +168,20 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		// interrupted without consulting the engine; cleanup must never turn
 		// an uncreated plan row into a create or discovery opportunity.
 		if resource.Phase == domain.SandboxResourcePlanned {
-			proofs, ok := r.store.(port.SandboxCleanupRecorder)
-			if !ok {
-				return nil, errors.New("sandbox reconciler store lacks named cleanup proof methods")
+			resource, err = recordResourceNoCreate(ctx, r.store, execution, resource)
+			if err != nil {
+				return nil, err
 			}
-			resource, err = proofs.RecordResourceInterrupted(ctx, domain.RecordResourceInterruptedCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, ReasonDigest: domain.SumBytes([]byte("cpgen.reconcile-no-create/v1\n" + string(resource.ID))), At: stableLifecycleTime(resource.CreatedAt, "interrupt")})
+			resources[index] = resource
+			continue
+		}
+		// CREATING is durably before the dispatch boundary: the runner enters
+		// this phase before recording the pre-create ACK and before authorizing
+		// the Docker request.  A crash here therefore has a safe, deterministic
+		// no-create outcome.  Never apply this shortcut to DISPATCHING/SENT,
+		// where the external create may already have crossed the boundary.
+		if resource.Phase == domain.SandboxResourceCreating && strings.TrimSpace(resource.EngineResourceID) == "" {
+			resource, err = recordResourceNoCreate(ctx, r.store, execution, resource)
 			if err != nil {
 				return nil, err
 			}
@@ -182,6 +191,28 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		if resource.EngineIdentityDigest != r.engineIdentityDigest {
 			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, ResourceID: resource.ID, Reason: "resource Engine identity mismatch", Manual: true})
 			continue
+		}
+		if strings.TrimSpace(resource.EngineResourceID) == "" &&
+			(resource.Phase == domain.SandboxResourceDispatching || resource.Phase == domain.SandboxResourceSent) {
+			// The exact returned Engine ID was not durably recorded before the
+			// process stopped.  Probe only the immutable deterministic name and
+			// complete ownership labels; this is recovery, never a create or a
+			// name-only delete.  If no exact object is present, retain a manual
+			// cleanup blocker because the create boundary is ambiguous.
+			recovered, recoverErr := r.recoverCreatedResource(ctx, execution, resource)
+			if recoverErr != nil {
+				if errors.Is(recoverErr, errManualCleanup) {
+					report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{
+						ExecutionID: execution.ID, ResourceID: resource.ID,
+						Reason: recoverErr.Error() + "; cleanup pending",
+						Manual: true,
+					})
+					continue
+				}
+				return nil, recoverErr
+			}
+			resource = recovered
+			resources[index] = resource
 		}
 		if resource.Phase != domain.SandboxResourceCleanupPending {
 			key := stableSandboxKey("reconcile_resource_cleanup", string(resource.ID))
@@ -221,6 +252,18 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 	return resources, nil
 }
 
+func recordResourceNoCreate(ctx context.Context, store any, execution domain.SandboxExecution, resource domain.SandboxResource) (domain.SandboxResource, error) {
+	proofs, ok := store.(port.SandboxCleanupRecorder)
+	if !ok {
+		return domain.SandboxResource{}, errors.New("sandbox reconciler store lacks named cleanup proof methods")
+	}
+	return proofs.RecordResourceInterrupted(ctx, domain.RecordResourceInterruptedCommand{
+		ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+		ReasonDigest: domain.SumBytes([]byte("cpgen.reconcile-no-create/v1\n" + string(resource.ID))),
+		At:           stableLifecycleTime(resource.CreatedAt, "interrupt"),
+	})
+}
+
 // verifyPersistedWatchdogControl validates both the immutable database row
 // and the owner-only control file. Reconciliation must never trust a path or
 // digest merely because it was persisted by a prior process: the file is an
@@ -251,13 +294,81 @@ func verifyPersistedWatchdogControl(execution domain.SandboxExecution, control d
 	if record.RunID != execution.RunID || record.AttemptID != execution.AttemptID || record.SandboxExecutionID != execution.ID ||
 		record.LogicalOperationID != execution.LogicalOperationID || record.ScopeDigest != execution.ScopeDigest || record.Plan.PlanDigest != execution.PlanDigest ||
 		record.EngineIdentityDigest != execution.EngineIdentityDigest || record.TokenDigest != execution.WatchdogTokenDigest ||
-		!record.SafetyDeadlineUTC.Equal(execution.SafetyDeadlineUTC) {
+		!record.SafetyDeadlineUTC.Equal(execution.SafetyDeadlineUTC) ||
+		!record.CleanupDeadlineUTC.Equal(execution.CleanupDeadlineUTC) {
 		return fmt.Errorf("persisted watchdog envelope identity or deadline differs from sandbox execution")
 	}
 	if envelope.RecordDigest != domainDigestRecord(record) {
 		return fmt.Errorf("persisted watchdog envelope record digest is invalid")
 	}
 	return nil
+}
+
+// recoverCreatedResource closes the crash window between an Engine Create
+// response and the lifecycle row recording its exact ID.  It deliberately
+// probes the immutable deterministic name and verifies the complete ownership
+// label set before writing COMPLETED.  An absent or mismatched object is not
+// treated as a no-create result because DISPATCHING/SENT means the external
+// boundary may already have been crossed.
+func (r *sandboxReconciler) recoverCreatedResource(ctx context.Context, execution domain.SandboxExecution, resource domain.SandboxResource) (domain.SandboxResource, error) {
+	expectedLabels, err := exactResourceLabels(execution, resource)
+	if err != nil {
+		return resource, fmt.Errorf("%w: cannot recover resource identity: %v", errManualCleanup, err)
+	}
+	if resource.LabelsDigest != "" && resource.LabelsDigest != digestLabels(expectedLabels) {
+		return resource, fmt.Errorf("%w: persisted ownership labels differ from immutable plan", errManualCleanup)
+	}
+	engineID := ""
+	switch resource.Kind {
+	case "CONTAINER":
+		inspected, inspectErr := r.engine.ContainerInspect(ctx, resource.DeterministicName, moby.ContainerInspectOptions{})
+		if errdefs.IsNotFound(inspectErr) {
+			return resource, fmt.Errorf("%w: %s %s was not found after dispatch; external create outcome is unknown", errManualCleanup, resource.Kind, resource.DeterministicName)
+		}
+		if inspectErr != nil {
+			return resource, inspectErr
+		}
+		if inspected.Container.Config == nil || inspected.Container.ID == "" || trimContainerName(inspected.Container.Name) != resource.DeterministicName || !maps.Equal(inspected.Container.Config.Labels, expectedLabels) {
+			return resource, fmt.Errorf("%w: recovered container identity or labels do not match the immutable plan", errManualCleanup)
+		}
+		engineID = inspected.Container.ID
+	case "VOLUME":
+		inspected, inspectErr := r.engine.VolumeInspect(ctx, resource.DeterministicName, moby.VolumeInspectOptions{})
+		if errdefs.IsNotFound(inspectErr) {
+			return resource, fmt.Errorf("%w: %s %s was not found after dispatch; external create outcome is unknown", errManualCleanup, resource.Kind, resource.DeterministicName)
+		}
+		if inspectErr != nil {
+			return resource, inspectErr
+		}
+		if inspected.Volume.Name != resource.DeterministicName || !maps.Equal(inspected.Volume.Labels, expectedLabels) {
+			return resource, fmt.Errorf("%w: recovered volume identity or labels do not match the immutable plan", errManualCleanup)
+		}
+		engineID = inspected.Volume.Name
+	default:
+		return resource, fmt.Errorf("%w: resource kind %q cannot be recovered", errManualCleanup, resource.Kind)
+	}
+
+	labelsDigest := digestLabels(expectedLabels)
+	if resource.Phase == domain.SandboxResourceDispatching {
+		// The schema's monotone transition requires SENT before COMPLETED.
+		resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{
+			ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+			Phase: domain.SandboxResourceSent, PhysicalCallID: resource.PhysicalCallID,
+			EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest,
+			LabelsDigest: labelsDigest, IdempotencyKey: stableSandboxKey("reconcile_recovered_sent", string(resource.ID)),
+			At: stableLifecycleTime(resource.CreatedAt, "recovered_sent"),
+		})
+		if err != nil {
+			return resource, err
+		}
+	}
+	return r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{
+		ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+		Phase: domain.SandboxResourceCompleted, PhysicalCallID: resource.PhysicalCallID,
+		EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest,
+		LabelsDigest: labelsDigest, IdempotencyKey: stableSandboxKey("reconcile_recovered_complete", string(resource.ID)),
+		At: stableLifecycleTime(resource.CreatedAt, "recovered_complete"),
+	})
 }
 
 // domainDigestRecord mirrors watchdog's private canonical record digest. The
@@ -337,7 +448,10 @@ func validatePersistedResourceIdentity(execution domain.SandboxExecution, resour
 	if resource.Kind == "VOLUME" && strings.TrimSpace(resource.EngineResourceID) != "" && resource.EngineResourceID != resource.DeterministicName {
 		return fmt.Errorf("persisted volume resource %s Engine identity does not match sealed deterministic name", resource.ID)
 	}
-	if resource.Phase == domain.SandboxResourcePlanned || resource.Phase == domain.SandboxResourceInterrupted {
+	// CREATING is persisted before the external create boundary. It may not
+	// have a complete ownership-label record yet, but it is safe to settle as
+	// no-create when no engine ID was persisted.
+	if resource.Phase == domain.SandboxResourcePlanned || resource.Phase == domain.SandboxResourceCreating || resource.Phase == domain.SandboxResourceInterrupted {
 		return nil
 	}
 	if resource.LabelsDigest == "" {

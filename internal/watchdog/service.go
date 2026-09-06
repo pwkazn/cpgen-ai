@@ -364,13 +364,22 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 }
 
 func (s Service) reconcile(record ControlRecord, labels map[int]map[string]string, created map[int]string, reconciler Reconciler, holdUnknown bool) error {
-	cleanupDeadline := s.now().Add(s.CleanupTimeout)
+	// The absolute deadline is sealed in the control record and mirrored in
+	// sandbox_executions.  Do not derive a second window from the watchdog
+	// process start time: a detached child may start long after preparation.
+	cleanupDeadline := record.CleanupDeadlineUTC
+	if cleanupDeadline.IsZero() {
+		// Serve validates the record before reaching this method.  Keep this
+		// defensive fallback for direct package tests and malformed callers.
+		cleanupDeadline = record.SafetyDeadlineUTC.Add(s.CleanupTimeout)
+	}
 	unknownHoldUntil := time.Time{}
 	if holdUnknown {
-		unknownHoldUntil = record.SafetyDeadlineUTC.Add(s.CleanupTimeout)
-		heldDeadline := unknownHoldUntil.Add(2*s.LateCreateWindow + s.PollInterval)
-		if heldDeadline.After(cleanupDeadline) {
-			cleanupDeadline = heldDeadline
+		// Hold the late-create probe through the configured quiet window, but
+		// never extend beyond the one persisted cleanup deadline.
+		unknownHoldUntil = record.SafetyDeadlineUTC.Add(s.LateCreateWindow)
+		if unknownHoldUntil.After(cleanupDeadline) {
+			unknownHoldUntil = cleanupDeadline
 		}
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), cleanupDeadline)
