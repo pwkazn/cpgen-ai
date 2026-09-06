@@ -434,6 +434,26 @@ type ContainerDispatchGrant struct {
 	ExpectedRunVersion int64
 }
 
+// VolumeDispatchAuthorization is implemented by authorizations that carry
+// prepared physical-call claims for volume creation. It is deliberately
+// separate from SandboxDispatchAuthorization so legacy Slice 0 callers can
+// continue to compile while a caller migrates its volume call ledger.
+type VolumeDispatchAuthorization interface {
+	ClaimNextVolume(context.Context, ResourceRole) (VolumeDispatchGrant, error)
+}
+
+type VolumeDispatchGrant struct {
+	Role               ResourceRole
+	Auth               DispatchAuthorization
+	CallRecordID       domain.CallRecordID
+	ExpectedRunVersion int64
+	// Durable is true when the call ID came from the durable Task 4 claim
+	// store. Legacy in-memory probe fixtures may still derive a compatibility
+	// ID; those calls are ledger-checked but are not part of the old trace
+	// surface.
+	Durable bool
+}
+
 type SandboxDispatchAuthorization interface {
 	LogicalOperationID() string
 	RunID() domain.RunID

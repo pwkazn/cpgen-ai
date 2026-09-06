@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cpgen/internal/domain"
@@ -27,6 +30,14 @@ type SandboxReconcileStore interface {
 	FinishCleanup(context.Context, domain.FinishCleanupCommand) (domain.SandboxExecution, error)
 }
 
+// SandboxExecutionLock serializes reconciliation for one run. It is narrow
+// by design: the reconciler never acquires a workflow-wide or ownership
+// takeover lease. Implementations may be backed by a process-local mutex or a
+// database advisory lock.
+type SandboxExecutionLock interface {
+	Acquire(context.Context, domain.RunID) (release func(), err error)
+}
+
 // SandboxReconcilerOptions binds a reconciler to one exact engine identity and
 // the private lifecycle ledger. Engine calls are made outside SQLite writes.
 type SandboxReconcilerOptions struct {
@@ -34,6 +45,7 @@ type SandboxReconcilerOptions struct {
 	Store                SandboxReconcileStore
 	EngineIdentityDigest domain.Digest
 	CleanupTimeout       time.Duration
+	ExecutionLock        SandboxExecutionLock
 }
 
 type sandboxReconciler struct {
@@ -41,6 +53,7 @@ type sandboxReconciler struct {
 	store                SandboxReconcileStore
 	engineIdentityDigest domain.Digest
 	cleanupTimeout       time.Duration
+	lock                 SandboxExecutionLock
 }
 
 func NewSandboxReconciler(options SandboxReconcilerOptions) (SandboxReconciler, error) {
@@ -53,7 +66,11 @@ func NewSandboxReconciler(options SandboxReconcilerOptions) (SandboxReconciler, 
 	if options.CleanupTimeout <= 0 {
 		return nil, errors.New("sandbox reconciler cleanup timeout must be positive")
 	}
-	return &sandboxReconciler{engine: options.Engine, store: options.Store, engineIdentityDigest: options.EngineIdentityDigest, cleanupTimeout: options.CleanupTimeout}, nil
+	lock := options.ExecutionLock
+	if lock == nil {
+		lock = newRunExecutionLocks()
+	}
+	return &sandboxReconciler{engine: options.Engine, store: options.Store, engineIdentityDigest: options.EngineIdentityDigest, cleanupTimeout: options.CleanupTimeout, lock: lock}, nil
 }
 
 func (r *sandboxReconciler) ReconcileRun(ctx context.Context, runID domain.RunID) (domain.SandboxReconcileReport, error) {
@@ -63,6 +80,11 @@ func (r *sandboxReconciler) ReconcileRun(ctx context.Context, runID domain.RunID
 	if err := runID.Validate(); err != nil {
 		return domain.SandboxReconcileReport{}, err
 	}
+	release, err := r.lock.Acquire(ctx, runID)
+	if err != nil {
+		return domain.SandboxReconcileReport{}, err
+	}
+	defer release()
 	executions, err := r.store.UnfinishedSandboxExecutions(ctx, runID)
 	if err != nil {
 		return domain.SandboxReconcileReport{}, err
@@ -81,6 +103,13 @@ func (r *sandboxReconciler) ReconcileRun(ctx context.Context, runID domain.RunID
 }
 
 func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution domain.SandboxExecution, report *domain.SandboxReconcileReport) ([]domain.SandboxResource, error) {
+	manualBefore := len(report.ManualCleanup)
+	if execution.RunID == "" || execution.RunID != report.RunID || execution.ID == "" || execution.StageName == "" || execution.AttemptID == "" || execution.LogicalOperationID == "" {
+		return nil, fmt.Errorf("persisted sandbox execution identity is incomplete or belongs to another run")
+	}
+	if err := execution.Validate(); err != nil {
+		return nil, fmt.Errorf("persisted sandbox execution is invalid: %w", err)
+	}
 	resources, err := r.store.SandboxResources(ctx, execution.ID)
 	if err != nil {
 		return nil, err
@@ -90,6 +119,14 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, ResourceID: resource.ID, Reason: "persisted Engine identity does not match reconciler Engine", Manual: true})
 		}
 		return nil, nil
+	}
+	for _, resource := range resources {
+		if err := validatePersistedResourceIdentity(execution, resource); err != nil {
+			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, ResourceID: resource.ID, Reason: err.Error(), Manual: true})
+		}
+	}
+	if len(report.ManualCleanup) != manualBefore {
+		return resources, nil
 	}
 	if execution.State != domain.SandboxExecutionCleanupPending && execution.State != domain.SandboxExecutionCleaned {
 		key := stableSandboxKey("reconcile_cleanup", string(execution.ID))
@@ -147,7 +184,7 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		}
 		resources[index] = updated
 	}
-	if len(report.ManualCleanup) == 0 {
+	if len(report.ManualCleanup) == manualBefore {
 		resourceSnapshot := make(map[int]domain.SandboxResource, len(resources))
 		for _, resource := range resources {
 			resourceSnapshot[resource.PlanOrdinal] = resource
@@ -161,6 +198,109 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 }
 
 var errManualCleanup = errors.New("manual cleanup required")
+
+type runExecutionLocks struct {
+	mu    sync.Mutex
+	locks map[domain.RunID]*runExecutionLock
+}
+
+type runExecutionLock struct {
+	sem  chan struct{}
+	refs int
+}
+
+func newRunExecutionLocks() *runExecutionLocks {
+	return &runExecutionLocks{locks: make(map[domain.RunID]*runExecutionLock)}
+}
+
+func (l *runExecutionLocks) Acquire(ctx context.Context, runID domain.RunID) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	entry := l.locks[runID]
+	if entry == nil {
+		entry = &runExecutionLock{sem: make(chan struct{}, 1)}
+		l.locks[runID] = entry
+	}
+	entry.refs++
+	sem := entry.sem
+	l.mu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		released := false
+		return func() {
+			if released {
+				return
+			}
+			released = true
+			<-sem
+			l.mu.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(l.locks, runID)
+			}
+			l.mu.Unlock()
+		}, nil
+	case <-ctx.Done():
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.locks, runID)
+		}
+		l.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func validatePersistedResourceIdentity(execution domain.SandboxExecution, resource domain.SandboxResource) error {
+	if resource.ExecutionID != execution.ID || resource.PlanOrdinal < 0 || strings.TrimSpace(resource.DeterministicName) == "" {
+		return fmt.Errorf("persisted sandbox resource %s has incomplete execution identity", resource.ID)
+	}
+	if resource.EngineIdentityDigest != execution.EngineIdentityDigest {
+		return fmt.Errorf("persisted resource %s Engine identity does not match execution", resource.ID)
+	}
+	if resource.Phase == domain.SandboxResourcePlanned || resource.Phase == domain.SandboxResourceInterrupted {
+		return nil
+	}
+	if resource.LabelsDigest == "" {
+		return fmt.Errorf("persisted resource %s has no exact ownership labels digest", resource.ID)
+	}
+	expected, err := exactResourceLabels(execution, resource)
+	if err != nil {
+		return err
+	}
+	if digestLabels(expected) != resource.LabelsDigest {
+		return fmt.Errorf("persisted resource %s ownership labels digest does not match sealed identity", resource.ID)
+	}
+	return nil
+}
+
+func exactResourceLabels(execution domain.SandboxExecution, resource domain.SandboxResource) (map[string]string, error) {
+	labels := map[string]string{
+		"org.cpgen.attempt":            string(execution.AttemptID),
+		"org.cpgen.engine-digest":      string(execution.EngineIdentityDigest),
+		"org.cpgen.execution-protocol": ExecutionProtocolDockerDirectV2,
+		"org.cpgen.kind":               resource.Kind,
+		"org.cpgen.logical-operation":  execution.LogicalOperationID,
+		"org.cpgen.name":               resource.DeterministicName,
+		"org.cpgen.ordinal":            strconv.Itoa(resource.PlanOrdinal),
+		"org.cpgen.role":               resource.Role,
+		"org.cpgen.run":                string(execution.RunID),
+		"org.cpgen.slice":              "0",
+		"org.cpgen.sandbox-execution":  string(execution.ID),
+		"org.cpgen.plan-digest":        string(execution.PlanDigest),
+	}
+	if resource.Kind == "CONTAINER" {
+		if resource.PhysicalCallID == nil || strings.TrimSpace(string(*resource.PhysicalCallID)) == "" {
+			return nil, fmt.Errorf("persisted container resource %s has no physical call identity", resource.ID)
+		}
+		labels["org.cpgen.call"] = string(*resource.PhysicalCallID)
+	} else {
+		labels["org.cpgen.call"] = "none"
+	}
+	return labels, nil
+}
 
 func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domain.SandboxExecution, resource domain.SandboxResource) (domain.SandboxResource, bool, error) {
 	proofs, ok := r.store.(port.SandboxCleanupRecorder)
@@ -184,17 +324,21 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		if err != nil {
 			return resource, false, err
 		}
+		expectedLabels, labelErr := exactResourceLabels(execution, resource)
+		if labelErr != nil {
+			return resource, false, fmt.Errorf("%w: %v", errManualCleanup, labelErr)
+		}
 		if inspected.Container.Config == nil || inspected.Container.ID != resource.EngineResourceID || trimContainerName(inspected.Container.Name) != resource.DeterministicName {
 			return resource, false, fmt.Errorf("%w: container identity or name mismatch", errManualCleanup)
 		}
-		if resource.LabelsDigest != "" && digestLabels(inspected.Container.Config.Labels) != resource.LabelsDigest {
+		if !maps.Equal(inspected.Container.Config.Labels, expectedLabels) || digestLabels(inspected.Container.Config.Labels) != resource.LabelsDigest {
 			return resource, false, fmt.Errorf("%w: container labels mismatch", errManualCleanup)
 		}
 		proof, err := portableStop(ctx, r.engine, resource.EngineResourceID, func(result moby.ContainerInspectResult) error {
 			if result.Container.ID != resource.EngineResourceID || trimContainerName(result.Container.Name) != resource.DeterministicName {
 				return fmt.Errorf("container identity changed")
 			}
-			if result.Container.Config == nil || (resource.LabelsDigest != "" && digestLabels(result.Container.Config.Labels) != resource.LabelsDigest) {
+			if result.Container.Config == nil || !maps.Equal(result.Container.Config.Labels, expectedLabels) || digestLabels(result.Container.Config.Labels) != resource.LabelsDigest {
 				return fmt.Errorf("container labels changed")
 			}
 			return nil
@@ -214,7 +358,11 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		if err != nil {
 			return resource, false, err
 		}
-		if inspected.Volume.Name != resource.EngineResourceID || (resource.LabelsDigest != "" && digestLabels(inspected.Volume.Labels) != resource.LabelsDigest) {
+		expectedLabels, labelErr := exactResourceLabels(execution, resource)
+		if labelErr != nil {
+			return resource, false, fmt.Errorf("%w: %v", errManualCleanup, labelErr)
+		}
+		if inspected.Volume.Name != resource.EngineResourceID || !maps.Equal(inspected.Volume.Labels, expectedLabels) || digestLabels(inspected.Volume.Labels) != resource.LabelsDigest {
 			return resource, false, fmt.Errorf("%w: volume identity or labels mismatch", errManualCleanup)
 		}
 		if _, err := r.engine.VolumeRemove(ctx, resource.EngineResourceID, moby.VolumeRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {

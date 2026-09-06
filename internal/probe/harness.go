@@ -98,7 +98,8 @@ func (h *Harness) Probe(ctx context.Context, profile port.SandboxProfile) (port.
 	if err != nil {
 		return ping, capabilityFailure(err)
 	}
-	compiled, err := h.compile(ctx, logical, compileRequest)
+	compileLogical := h.nextLogical("capability-compile")
+	compiled, err := h.compile(ctx, compileLogical, compileRequest)
 	if traceErr := appendTrace(&aggregate, compiled.CallTrace); traceErr != nil && err == nil {
 		err = traceErr
 	}
@@ -123,7 +124,8 @@ func (h *Harness) Probe(ctx context.Context, profile port.SandboxProfile) (port.
 			{mode: "O", want: domain.ProcessOLE},
 		} {
 			runRequest := h.capabilityRunRequest(compiled.Program.Blob, canary.mode)
-			runResult, runErr := h.run(ctx, logical, runRequest)
+			canaryLogical := h.nextLogical("capability-canary")
+			runResult, runErr := h.run(ctx, canaryLogical, runRequest)
 			if traceErr := appendTrace(&aggregate, runResult.CallTrace); traceErr != nil && runErr == nil {
 				runErr = traceErr
 			}
@@ -366,7 +368,7 @@ func appendTrace(aggregate *domain.CallTrace, next domain.CallTrace) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	if aggregate.LogicalOperationID != next.LogicalOperationID || aggregate.DispatchKind != domain.DispatchDispatched || next.DispatchKind != domain.DispatchDispatched {
+	if aggregate.DispatchKind != domain.DispatchDispatched || next.DispatchKind != domain.DispatchDispatched {
 		return fmt.Errorf("capability CallTrace logical operation mismatch")
 	}
 	aggregate.PhysicalAttemptCallIDs = append(aggregate.PhysicalAttemptCallIDs, next.PhysicalAttemptCallIDs...)

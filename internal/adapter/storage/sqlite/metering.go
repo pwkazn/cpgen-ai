@@ -367,7 +367,11 @@ func (s *Store) CompletePhysical(ctx context.Context, request domain.CompletePhy
 			}
 			return nil
 		}
-		if err := validateMeteringContext(ctx, tx, request.RunID, request.ExpectedRunVersion, request.StageName, request.AttemptID); err != nil {
+		// A call may have crossed the external boundary immediately before a
+		// cancellation request. Terminal settlement is cleanup work and must
+		// remain possible while the run is still in its current attempt; new
+		// dispatches continue to use the cancel-rejecting guard above.
+		if err := validateMeteringSettlementContext(ctx, tx, request.RunID, request.ExpectedRunVersion, request.StageName, request.AttemptID); err != nil {
 			return err
 		}
 		if physical.CallRecordID != request.CallRecordID || physical.RunID != request.RunID || physical.StageName != request.StageName || physical.AttemptID != request.AttemptID {
@@ -506,6 +510,14 @@ func (s *Store) FinishCall(ctx context.Context, request domain.FinishCallRequest
 }
 
 func validateMeteringContext(ctx context.Context, tx *immediateTx, runID domain.RunID, expectedVersion int64, stage domain.StageName, attemptID domain.AttemptID) error {
+	return validateMeteringContextMode(ctx, tx, runID, expectedVersion, stage, attemptID, true)
+}
+
+func validateMeteringSettlementContext(ctx context.Context, tx *immediateTx, runID domain.RunID, expectedVersion int64, stage domain.StageName, attemptID domain.AttemptID) error {
+	return validateMeteringContextMode(ctx, tx, runID, expectedVersion, stage, attemptID, false)
+}
+
+func validateMeteringContextMode(ctx context.Context, tx *immediateTx, runID domain.RunID, expectedVersion int64, stage domain.StageName, attemptID domain.AttemptID, rejectCancel bool) error {
 	run, err := readRun(ctx, tx, runID)
 	if err != nil {
 		return err
@@ -527,7 +539,10 @@ func validateMeteringContext(ctx context.Context, tx *immediateTx, runID domain.
 	if stageState != string(domain.StageRunning) || currentAttempt != string(attemptID) || attemptState != string(domain.StageAttemptRunning) {
 		return wrap(ErrInvalidTransition, "metering requires the current RUNNING stage attempt", nil)
 	}
-	return ValidateNoPendingCancel(ctx, tx, runID)
+	if rejectCancel {
+		return ValidateNoPendingCancel(ctx, tx, runID)
+	}
+	return nil
 }
 
 func ensureCallIdentityAvailable(ctx context.Context, tx *immediateTx, request domain.OpenCallRequest) error {

@@ -263,7 +263,11 @@ func (s *Store) AdvanceResource(ctx context.Context, command domain.AdvanceResou
 		if !allowedSandboxResourceTransition(result.Phase, command.Phase) {
 			return wrap(ErrInvalidTransition, fmt.Sprintf("sandbox resource cannot advance %s -> %s", result.Phase, command.Phase), nil)
 		}
-		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, true); err != nil {
+		// UNKNOWN and CLEANUP_PENDING are settlement edges. They must remain
+		// possible after a cancellation request; every other phase is new work
+		// and retains the cancel-rejecting guard.
+		settlement := command.Phase == domain.SandboxResourceUnknown || command.Phase == domain.SandboxResourceCleanupPending
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, !settlement); err != nil {
 			return err
 		}
 		if command.Phase == domain.SandboxResourceDispatching {
@@ -535,6 +539,37 @@ func (s *Store) GetSandboxExecution(ctx context.Context, executionID domain.Sand
 	}
 	execution.Resources, err = sandboxResourcesTx(ctx, connection, executionID)
 	return execution, err
+}
+
+func (s *Store) GetSandboxWatchdogControl(ctx context.Context, executionID domain.SandboxExecutionID) (domain.SandboxWatchdogControl, error) {
+	if err := executionID.Validate(); err != nil {
+		return domain.SandboxWatchdogControl{}, err
+	}
+	connection, err := s.connection(ctx)
+	if err != nil {
+		return domain.SandboxWatchdogControl{}, err
+	}
+	defer connection.Close()
+	var control domain.SandboxWatchdogControl
+	var rawExecution, rawToken, rawDigest, armed string
+	err = connection.QueryRowContext(ctx, `SELECT sandbox_execution_id, control_id, process_record_ref, control_file_digest, token_digest, armed_at FROM sandbox_watchdog_controls WHERE sandbox_execution_id=?`, string(executionID)).Scan(&rawExecution, &control.ControlID, &control.ProcessRecordRef, &rawDigest, &rawToken, &armed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SandboxWatchdogControl{}, wrap(ErrNotFound, "sandbox watchdog control does not exist", err)
+	}
+	if err != nil {
+		return domain.SandboxWatchdogControl{}, err
+	}
+	control.ExecutionID = domain.SandboxExecutionID(rawExecution)
+	control.ControlFileDigest = domain.Digest(rawDigest)
+	control.TokenDigest = domain.Digest(rawToken)
+	control.ArmedAt, err = parseTime(armed)
+	if err != nil {
+		return domain.SandboxWatchdogControl{}, err
+	}
+	if err := control.Validate(); err != nil {
+		return domain.SandboxWatchdogControl{}, wrap(ErrConsistency, "stored sandbox watchdog control is invalid", err)
+	}
+	return control, nil
 }
 
 // GetSandboxResources is a descriptive alias for SandboxResources used by

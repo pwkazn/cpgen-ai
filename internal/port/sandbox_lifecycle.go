@@ -26,6 +26,13 @@ type SandboxLifecycleReader interface {
 	GetSandboxExecution(context.Context, domain.SandboxExecutionID) (domain.SandboxExecution, error)
 }
 
+// SandboxWatchdogReader exposes immutable fsynced control evidence for replay
+// checks. A durable runner must compare this row before reusing an execution
+// identity after a crash.
+type SandboxWatchdogReader interface {
+	GetSandboxWatchdogControl(context.Context, domain.SandboxExecutionID) (domain.SandboxWatchdogControl, error)
+}
+
 // SandboxCleanupRecorder contains the named proof commands. These methods are
 // deliberately not part of AdvanceResource: cleanup state must be backed by
 // persisted stop/kill/wait and removal evidence.

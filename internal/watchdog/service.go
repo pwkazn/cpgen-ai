@@ -304,6 +304,26 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 	if labels["org.cpgen.sandbox-execution"] == "" {
 		return fmt.Errorf("resource label %q does not match the control record", "org.cpgen.sandbox-execution")
 	}
+	if record.RunID != "" {
+		identityLabels := map[string]string{
+			"org.cpgen.run":               string(record.RunID),
+			"org.cpgen.attempt":           string(record.AttemptID),
+			"org.cpgen.sandbox-execution": string(record.SandboxExecutionID),
+			"org.cpgen.logical-operation": record.LogicalOperationID,
+		}
+		for key, value := range identityLabels {
+			if labels[key] != value {
+				return fmt.Errorf("resource label %q does not match the sealed execution identity", key)
+			}
+		}
+		if resource.Kind == port.ResourceContainer {
+			if err := domain.AttemptCallID(labels["org.cpgen.call"]).Validate(); err != nil {
+				return fmt.Errorf("container call label is invalid: %w", err)
+			}
+		} else if labels["org.cpgen.call"] != "none" {
+			return fmt.Errorf("non-container resource call label must be none")
+		}
+	}
 	base := map[string]string{
 		"org.cpgen.attempt":            labels["org.cpgen.attempt"],
 		"org.cpgen.engine-digest":      labels["org.cpgen.engine-digest"],

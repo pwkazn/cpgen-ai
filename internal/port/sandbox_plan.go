@@ -77,14 +77,19 @@ func (v *ResourceRole) UnmarshalJSON(data []byte) error {
 }
 
 type PlannedResource struct {
-	Ordinal              int                 `json:"ordinal"`
-	Kind                 ResourceKind        `json:"kind"`
-	Role                 ResourceRole        `json:"role"`
-	DeterministicName    string              `json:"deterministic_name"`
-	ExpectedLabelsDigest domain.Digest       `json:"expected_labels_digest"`
-	CreateCallOrdinal    *int                `json:"create_call_ordinal,omitempty"`
-	CgroupRelativePath   *domain.SafeRelPath `json:"cgroup_relative_path,omitempty"`
-	CreationNonce        *string             `json:"creation_nonce,omitempty"`
+	Ordinal              int           `json:"ordinal"`
+	Kind                 ResourceKind  `json:"kind"`
+	Role                 ResourceRole  `json:"role"`
+	DeterministicName    string        `json:"deterministic_name"`
+	ExpectedLabelsDigest domain.Digest `json:"expected_labels_digest"`
+	CreateCallOrdinal    *int          `json:"create_call_ordinal,omitempty"`
+	// PhysicalCallOrdinal identifies the physical call used when an external
+	// resource is created. Container plans historically exposed
+	// CreateCallOrdinal; keep that field for wire compatibility and use this
+	// field for volume creates, which are also real external boundaries.
+	PhysicalCallOrdinal *int                `json:"physical_call_ordinal,omitempty"`
+	CgroupRelativePath  *domain.SafeRelPath `json:"cgroup_relative_path,omitempty"`
+	CreationNonce       *string             `json:"creation_nonce,omitempty"`
 }
 
 type ContainerPlan struct {
@@ -186,6 +191,9 @@ func (p ContainerPlan) validateShape() error {
 			if resource.CreateCallOrdinal != nil || resource.CgroupRelativePath != nil || resource.CreationNonce != nil {
 				return fmt.Errorf("volume resource %d carries container or cgroup identity fields", index)
 			}
+			if resource.PhysicalCallOrdinal != nil && *resource.PhysicalCallOrdinal < 0 {
+				return fmt.Errorf("volume resource %d has invalid physical call ordinal", index)
+			}
 		case ResourceCgroup:
 			if resource.Role != ResourceReleaseParent {
 				return fmt.Errorf("cgroup resource %d has incompatible role %q", index, resource.Role)
@@ -256,6 +264,10 @@ func clonePlannedResources(resources []PlannedResource) []PlannedResource {
 			value := *resource.CreateCallOrdinal
 			clone[index].CreateCallOrdinal = &value
 		}
+		if resource.PhysicalCallOrdinal != nil {
+			value := *resource.PhysicalCallOrdinal
+			clone[index].PhysicalCallOrdinal = &value
+		}
 		if resource.CgroupRelativePath != nil {
 			value := *resource.CgroupRelativePath
 			clone[index].CgroupRelativePath = &value
@@ -289,6 +301,13 @@ func (p ContainerPlan) canonicalDigest() domain.Digest {
 		encoded.WriteByte(1)
 		writeString(*value)
 	}
+	hasPhysicalCallOrdinals := false
+	for _, resource := range p.Resources {
+		if resource.PhysicalCallOrdinal != nil {
+			hasPhysicalCallOrdinals = true
+			break
+		}
+	}
 
 	writeString(containerPlanSchema)
 	writeString(string(p.EngineIdentityDigest))
@@ -307,6 +326,14 @@ func (p ContainerPlan) canonicalDigest() domain.Digest {
 		} else {
 			encoded.WriteByte(1)
 			writeInt64(int64(*resource.CreateCallOrdinal))
+		}
+		if hasPhysicalCallOrdinals {
+			if resource.PhysicalCallOrdinal == nil {
+				encoded.WriteByte(0)
+			} else {
+				encoded.WriteByte(1)
+				writeInt64(int64(*resource.PhysicalCallOrdinal))
+			}
 		}
 		if resource.CgroupRelativePath == nil {
 			writeOptionalString(nil)

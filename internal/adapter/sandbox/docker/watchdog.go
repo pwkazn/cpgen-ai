@@ -81,8 +81,20 @@ func (r *dockerWatchdogReconciler) Begin(ctx context.Context, record watchdogpro
 		return fmt.Errorf("watchdog Engine events are already subscribed")
 	}
 	eventsCtx, cancel := context.WithCancel(ctx)
-	result := r.engine.Events(eventsCtx, moby.EventsListOptions{Filters: moby.Filters{}.
-		Add("type", "container", "volume").Add("label", "org.cpgen.plan-digest="+string(record.Plan.PlanDigest))})
+	filters := moby.Filters{}.Add("type", "container", "volume").Add("label", "org.cpgen.plan-digest="+string(record.Plan.PlanDigest))
+	if record.RunID != "" {
+		filters.Add("label", "org.cpgen.run="+string(record.RunID))
+	}
+	if record.AttemptID != "" {
+		filters.Add("label", "org.cpgen.attempt="+string(record.AttemptID))
+	}
+	if record.SandboxExecutionID != "" {
+		filters.Add("label", "org.cpgen.sandbox-execution="+string(record.SandboxExecutionID))
+	}
+	if record.LogicalOperationID != "" {
+		filters.Add("label", "org.cpgen.logical-operation="+record.LogicalOperationID)
+	}
+	result := r.engine.Events(eventsCtx, moby.EventsListOptions{Filters: filters})
 	r.eventCancel = cancel
 	done := make(chan struct{})
 	r.eventDone = done
@@ -171,7 +183,7 @@ func (r *dockerWatchdogReconciler) Observe(ctx context.Context, resource port.Pl
 		if err != nil {
 			return watchdogprotocol.Observation{}, err
 		}
-		foreign := len(expectedLabels) == 0 || !maps.Equal(inspected.Volume.Labels, expectedLabels)
+		foreign := len(expectedLabels) == 0 || !maps.Equal(inspected.Volume.Labels, expectedLabels) || inspected.Volume.Name != resource.DeterministicName
 		return watchdogprotocol.Observation{Exists: true, ID: inspected.Volume.Name, Foreign: foreign}, nil
 	default:
 		return watchdogprotocol.Observation{}, fmt.Errorf("watchdog does not support resource kind %q", resource.Kind)
@@ -224,8 +236,35 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	if err != nil {
 		return nil, err
 	}
+	controlDir, err := os.MkdirTemp("", "cpgen-watchdog-")
+	if err != nil {
+		return nil, err
+	}
+	cleanupControl := func() error {
+		return cleanupWatchdogControl(controlDir, filepath.Join(controlDir, "control.json"))
+	}
+	if runtime.GOOS == "windows" {
+		if err := applyOwnerOnlyACL(controlDir); err != nil {
+			_ = cleanupControl()
+			return nil, err
+		}
+	} else if err := os.Chmod(controlDir, 0o700); err != nil {
+		_ = cleanupControl()
+		return nil, err
+	}
+	encoded, err := jsonMarshalEnvelope(envelope)
+	if err != nil {
+		_ = cleanupControl()
+		return nil, err
+	}
+	controlPath := filepath.Join(controlDir, "control.json")
+	if err := secureWriteWatchdogControl(controlPath, encoded); err != nil {
+		_ = cleanupControl()
+		return nil, err
+	}
 	reconciler, err := newDockerWatchdogReconciler(c.engine)
 	if err != nil {
+		_ = cleanupControl()
 		return nil, err
 	}
 	owner, service := net.Pipe()
@@ -233,14 +272,10 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	client, err := watchdogprotocol.NewClient(owner, c.token, envelope.RecordDigest)
 	if err != nil {
 		_ = owner.Close()
+		_ = cleanupControl()
 		return nil, err
 	}
-	encoded, err := jsonMarshalEnvelope(envelope)
-	if err != nil {
-		_ = client.Close()
-		return nil, err
-	}
-	return &watchdogSession{client: client, controlRef: "in-process:" + string(envelope.RecordDigest), controlDigest: domain.SumBytes(encoded)}, nil
+	return &watchdogSession{client: client, controlRef: controlPath, controlDigest: domain.SumBytes(encoded), cleanup: cleanupControl}, nil
 }
 
 type DetachedWatchdogOptions struct {

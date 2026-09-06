@@ -19,13 +19,17 @@ const (
 )
 
 type ControlRecord struct {
-	SchemaVersion        domain.SchemaVersion `json:"schema_version"`
-	TokenDigest          domain.Digest        `json:"token_digest"`
-	EngineEndpoint       string               `json:"engine_endpoint"`
-	EngineIdentityDigest domain.Digest        `json:"engine_identity_digest"`
-	LogicalOperationID   string               `json:"logical_operation_id"`
-	Plan                 port.ContainerPlan   `json:"plan"`
-	SafetyDeadlineUTC    time.Time            `json:"safety_deadline_utc"`
+	SchemaVersion        domain.SchemaVersion      `json:"schema_version"`
+	TokenDigest          domain.Digest             `json:"token_digest"`
+	EngineEndpoint       string                    `json:"engine_endpoint"`
+	EngineIdentityDigest domain.Digest             `json:"engine_identity_digest"`
+	RunID                domain.RunID              `json:"run_id,omitempty"`
+	AttemptID            domain.AttemptID          `json:"attempt_id,omitempty"`
+	SandboxExecutionID   domain.SandboxExecutionID `json:"sandbox_execution_id,omitempty"`
+	ScopeDigest          domain.Digest             `json:"scope_digest,omitempty"`
+	LogicalOperationID   string                    `json:"logical_operation_id"`
+	Plan                 port.ContainerPlan        `json:"plan"`
+	SafetyDeadlineUTC    time.Time                 `json:"safety_deadline_utc"`
 }
 
 func (r ControlRecord) Clone() ControlRecord {
@@ -45,6 +49,14 @@ func (r ControlRecord) Validate() error {
 	}
 	if err := r.EngineIdentityDigest.Validate(); err != nil {
 		return fmt.Errorf("Engine identity digest: %w", err)
+	}
+	identityProvided := r.RunID != "" || r.AttemptID != "" || r.SandboxExecutionID != "" || r.ScopeDigest != ""
+	if identityProvided {
+		for _, check := range []error{r.RunID.Validate(), r.AttemptID.Validate(), r.SandboxExecutionID.Validate(), r.ScopeDigest.Validate()} {
+			if check != nil {
+				return fmt.Errorf("watchdog execution identity: %w", check)
+			}
+		}
 	}
 	if r.LogicalOperationID == "" || len(r.LogicalOperationID) > 256 {
 		return fmt.Errorf("logical operation ID is invalid")

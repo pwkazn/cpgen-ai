@@ -5,6 +5,7 @@ package port
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"cpgen/internal/domain"
@@ -16,6 +17,7 @@ type probeSandboxDispatchAuthorization struct {
 	plan              ContainerPlan
 	claims            ProbeClaimStore
 	nextResourceIndex int
+	nextVolumeIndex   int
 	pingClaimed       bool
 	aborted           bool
 }
@@ -108,6 +110,54 @@ func (a *probeSandboxDispatchAuthorization) ClaimNextContainer(ctx context.Conte
 	}, nil
 }
 
+// ClaimNextVolume consumes the next planned volume-create boundary. A probe
+// claim store may provide a durable/prepared call ID through the optional
+// ProbeVolumeClaimStore interface. The deterministic fallback exists only for
+// legacy in-memory Slice 0 fixtures; a real SQLite CallLedger will reject the
+// unprepared ID before any Docker I/O.
+func (a *probeSandboxDispatchAuthorization) ClaimNextVolume(ctx context.Context, role ResourceRole) (VolumeDispatchGrant, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.aborted {
+		return VolumeDispatchGrant{}, fmt.Errorf("probe authorization was aborted")
+	}
+	if len(a.plan.Resources) == 0 {
+		return VolumeDispatchGrant{}, fmt.Errorf("volume claim is not allowed by an Engine-ping plan")
+	}
+	for a.nextVolumeIndex < len(a.plan.Resources) && a.plan.Resources[a.nextVolumeIndex].Kind != ResourceVolume {
+		a.nextVolumeIndex++
+	}
+	if a.nextVolumeIndex >= len(a.plan.Resources) {
+		return VolumeDispatchGrant{}, fmt.Errorf("container plan has no unclaimed volume create")
+	}
+	resource := a.plan.Resources[a.nextVolumeIndex]
+	if role != resource.Role || (role != ResourceInput && role != ResourceOutput) {
+		return VolumeDispatchGrant{}, fmt.Errorf("next volume role is %q, got %q", resource.Role, role)
+	}
+	ordinal := a.nextVolumeIndex
+	if resource.PhysicalCallOrdinal != nil {
+		ordinal = *resource.PhysicalCallOrdinal
+	}
+	var callID domain.AttemptCallID
+	var err error
+	durable := false
+	if claims, ok := a.claims.(ProbeVolumeClaimStore); ok {
+		callID, err = claims.ClaimVolume(ctx, a.identity, ordinal, role)
+		durable = true
+	} else {
+		callID, err = derivedVolumeCallID(a.identity, resource)
+	}
+	if err != nil {
+		return VolumeDispatchGrant{}, err
+	}
+	a.nextVolumeIndex++
+	return VolumeDispatchGrant{
+		Role: role, Auth: probeDispatchGrant{callID: callID, identity: a.identity},
+		CallRecordID: callRecordForAttempt(callID), ExpectedRunVersion: 1,
+		Durable: durable,
+	}, nil
+}
+
 func (a *probeSandboxDispatchAuthorization) AbortRemaining(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -141,4 +191,20 @@ func callRecordForAttempt(id domain.AttemptCallID) domain.CallRecordID {
 		raw = raw[len("call_"):]
 	}
 	return domain.CallRecordID("callrec_" + raw)
+}
+
+// ProbeVolumeClaimStore is optional to preserve the Slice 0 test seam. The
+// production authorization adapter should implement it so VolumeCreate uses
+// a physical call prepared by Task 4 rather than a locally invented key.
+type ProbeVolumeClaimStore interface {
+	ClaimVolume(context.Context, ProbeAuthorizationIdentity, int, ResourceRole) (domain.AttemptCallID, error)
+}
+
+func derivedVolumeCallID(identity ProbeAuthorizationIdentity, resource PlannedResource) (domain.AttemptCallID, error) {
+	digest := domain.SumBytes([]byte("cpgen.volume-call/v1\x00" + string(identity.RunID) + "\x00" + string(identity.AttemptID) + "\x00" + string(identity.SandboxExecutionID) + "\x00" + identity.LogicalOperationID + "\x00" + resource.DeterministicName))
+	value := strings.TrimPrefix(string(digest), "sha256:")
+	if len(value) < 32 {
+		return "", fmt.Errorf("derived volume call digest is too short")
+	}
+	return domain.AttemptCallID("call_" + value[:32]), nil
 }

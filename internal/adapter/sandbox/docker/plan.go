@@ -149,6 +149,7 @@ type resourcePlanBuilder struct {
 	identity      PlanIdentity
 	items         []port.PlannedResource
 	containerCall int
+	physicalCall  int
 }
 
 func newResourcePlan(identity PlanIdentity) *resourcePlanBuilder {
@@ -156,23 +157,28 @@ func newResourcePlan(identity PlanIdentity) *resourcePlanBuilder {
 }
 
 func (b *resourcePlanBuilder) addVolume(role port.ResourceRole) {
-	b.add(port.ResourceVolume, role, nil)
+	physicalCall := b.physicalCall
+	b.physicalCall++
+	b.add(port.ResourceVolume, role, nil, &physicalCall)
 }
 
 func (b *resourcePlanBuilder) addContainer(role port.ResourceRole) {
 	callOrdinal := b.containerCall
 	b.containerCall++
-	b.add(port.ResourceContainer, role, &callOrdinal)
+	physicalCall := b.physicalCall
+	b.physicalCall++
+	b.add(port.ResourceContainer, role, &callOrdinal, &physicalCall)
 }
 
-func (b *resourcePlanBuilder) add(kind port.ResourceKind, role port.ResourceRole, callOrdinal *int) {
+func (b *resourcePlanBuilder) add(kind port.ResourceKind, role port.ResourceRole, callOrdinal, physicalCallOrdinal *int) {
 	ordinal := len(b.items)
 	resource := port.PlannedResource{
-		Ordinal:           ordinal,
-		Kind:              kind,
-		Role:              role,
-		DeterministicName: resourceName(b.identity.OperationNonce, ordinal, kind, role),
-		CreateCallOrdinal: callOrdinal,
+		Ordinal:             ordinal,
+		Kind:                kind,
+		Role:                role,
+		DeterministicName:   resourceName(b.identity.OperationNonce, ordinal, kind, role),
+		CreateCallOrdinal:   callOrdinal,
+		PhysicalCallOrdinal: physicalCallOrdinal,
 	}
 	resource.ExpectedLabelsDigest = digestLabels(baseResourceLabels(b.identity, resource))
 	b.items = append(b.items, resource)
