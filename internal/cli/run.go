@@ -322,6 +322,12 @@ func runReviewCommand(args []string, app *application.Application, stdout, stder
 		if err != nil {
 			return writeStateError(stdout, stderr, 3, "invalid_id", err)
 		}
+		// PendingReview intentionally returns a nil decision when an existing
+		// run has no pending review. Verify the run first so a well-formed but
+		// nonexistent RUN_ID remains distinguishable from that empty result.
+		if _, err := app.Runtime.GetRun(context.Background(), id); err != nil {
+			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
+		}
 		review, err := app.Reviews.PendingReview(context.Background(), id)
 		if err != nil {
 			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
