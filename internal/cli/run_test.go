@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,39 @@ func TestVersionJSON(t *testing.T) {
 	}
 	if output["schema_version"] != "cpgen.cli-version/v1" || output["version"] == "" || output["go_version"] == "" {
 		t.Fatalf("unexpected output: %#v", output)
+	}
+}
+
+func TestStatefulConfigAndGenerateCommandsUseExplicitConfig(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "state")
+	configPath := filepath.Join(root, "cpgen.yaml")
+	requestPath := filepath.Join(root, "request.yaml")
+	if err := os.WriteFile(configPath, []byte("storage:\n  state_root: "+stateRoot+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request := "schema_version: cpgen.request/v1\nmode: offline\nbrief: demo\nlanguage: cpp\ndifficulty: easy\ntime_limit_milliseconds: 1000\nmemory_limit_megabytes: 64\nsolution_language: go\nverification_profile: default\nbudget_limits:\n  max_active_time_milliseconds: 5000\n"
+	if err := os.WriteFile(requestPath, []byte(request), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run([]string{"--config", configPath, "config", "validate"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config validate code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["schema_version"] != "cpgen.cli/v1" || envelope["status"] != "VALID" {
+		t.Fatalf("unexpected config envelope: %#v", envelope)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cli.Run([]string{"--config", configPath, "generate", "--request", requestPath}, &stdout, &stderr); code != 6 {
+		t.Fatalf("generate code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "NEEDS_REVIEW") || stderr.Len() != 0 {
+		t.Fatalf("unexpected generate output stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
