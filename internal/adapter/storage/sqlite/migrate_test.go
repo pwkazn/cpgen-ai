@@ -330,6 +330,60 @@ func TestMigrationUpgradesM14VolumeWithoutPhysicalCallID(t *testing.T) {
 	}
 }
 
+// TestM16RejectsLegacyContainerWithoutPhysicalCallID verifies that the
+// tightened resource-call scope does not silently reinterpret an ambiguous
+// historical CONTAINER dispatch as a no-create interruption.  The migration
+// must fail with the documented typed compatibility error so the caller can
+// remediate the exact database.
+func TestM16RejectsLegacyContainerWithoutPhysicalCallID(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatalf("open M15 database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	migrations, err := loadMigrations()
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("load migrations: %v", err)
+	}
+	for _, migration := range migrations[:15] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			_ = db.Close()
+			t.Fatalf("apply M15 migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			_ = db.Close()
+			t.Fatalf("record M15 migration %d: %v", migration.version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		_ = db.Close()
+		t.Fatalf("disable foreign keys for historical fixture: %v", err)
+	}
+	digest := string(domain.SumBytes([]byte("legacy-container")))
+	if _, err := db.ExecContext(ctx, `INSERT INTO sandbox_resources(
+		resource_id, sandbox_execution_id, plan_ordinal, resource_kind, resource_role,
+		deterministic_name, expected_labels_digest, engine_identity_digest, phase,
+		version, created_at, updated_at)
+		VALUES ('resource_00000000000000000000000000000081',
+		'sandbox_00000000000000000000000000000081', 0, 'CONTAINER', 'TARGET',
+		'cpgen-legacy-container', ?, ?, 'DISPATCHING', 1, ?, ?)`,
+		digest, digest, formatTime(testNow), formatTime(testNow)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert legacy container: %v", err)
+	}
+	store := &Store{db: db, config: Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1}, clock: clock.Real{}}
+	err = store.immediate(ctx, func(tx *immediateTx) error {
+		return prepareM16VolumeCompatibility(ctx, tx)
+	})
+	_ = store.Close()
+	if !errors.Is(err, ErrMigrationCompatibility) {
+		t.Fatalf("legacy container compatibility error = %v, want ErrMigrationCompatibility", err)
+	}
+}
+
 func TestMigrationNineBackfillsPhysicalBytesByHistoricalPinIdentity(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "workflow.db")

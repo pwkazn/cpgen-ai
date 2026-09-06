@@ -48,15 +48,20 @@ func (e *Error) Is(target error) bool {
 }
 
 var (
-	ErrStorageBusy       = &Error{Code: "storage_busy"}
-	ErrMigrationDrift    = &Error{Code: "migration_drift"}
-	ErrMigrationGap      = &Error{Code: "migration_gap"}
-	ErrConsistency       = &Error{Code: "consistency_error"}
-	ErrVersionConflict   = &Error{Code: "version_conflict"}
-	ErrNotFound          = &Error{Code: "not_found"}
-	ErrInvalidTransition = &Error{Code: "invalid_transition"}
-	ErrCancelPending     = &Error{Code: "cancel_pending"}
-	ErrReviewPending     = &Error{Code: "review_pending"}
+	ErrStorageBusy    = &Error{Code: "storage_busy"}
+	ErrMigrationDrift = &Error{Code: "migration_drift"}
+	ErrMigrationGap   = &Error{Code: "migration_gap"}
+	// ErrMigrationCompatibility is returned when a historical database has a
+	// legal shape that the tightened sandbox schema cannot safely upgrade. It
+	// is deliberately distinct from a generic SQL failure so operators can
+	// remediate the exact legacy rows without guessing whether migration ran.
+	ErrMigrationCompatibility = &Error{Code: "migration_compatibility"}
+	ErrConsistency            = &Error{Code: "consistency_error"}
+	ErrVersionConflict        = &Error{Code: "version_conflict"}
+	ErrNotFound               = &Error{Code: "not_found"}
+	ErrInvalidTransition      = &Error{Code: "invalid_transition"}
+	ErrCancelPending          = &Error{Code: "cancel_pending"}
+	ErrReviewPending          = &Error{Code: "review_pending"}
 )
 
 type Store struct {

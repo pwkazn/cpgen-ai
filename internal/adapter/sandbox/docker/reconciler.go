@@ -214,7 +214,10 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 			resource = recovered
 			resources[index] = resource
 		}
-		if resource.Phase != domain.SandboxResourceCleanupPending {
+		// STOPPED already carries an immutable stop proof. It is a cleanup
+		// retry state, not new work; leave it in place so a crash between the
+		// proof and the remove can be retried without a forbidden transition.
+		if resource.Phase != domain.SandboxResourceCleanupPending && resource.Phase != domain.SandboxResourceStopped {
 			key := stableSandboxKey("reconcile_resource_cleanup", string(resource.ID))
 			resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleanupPending, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: stableLifecycleTime(resource.CreatedAt, "cleanup")})
 			if err != nil {
@@ -315,6 +318,9 @@ func (r *sandboxReconciler) recoverCreatedResource(ctx context.Context, executio
 	if err != nil {
 		return resource, fmt.Errorf("%w: cannot recover resource identity: %v", errManualCleanup, err)
 	}
+	if resource.ExpectedLabelsDigest != digestLabels(expectedResourceBaseLabels(execution, resource)) {
+		return resource, fmt.Errorf("%w: persisted expected ownership labels differ from immutable plan", errManualCleanup)
+	}
 	if resource.LabelsDigest != "" && resource.LabelsDigest != digestLabels(expectedLabels) {
 		return resource, fmt.Errorf("%w: persisted ownership labels differ from immutable plan", errManualCleanup)
 	}
@@ -349,6 +355,19 @@ func (r *sandboxReconciler) recoverCreatedResource(ctx context.Context, executio
 	}
 
 	labelsDigest := digestLabels(expectedLabels)
+	if execution.State == domain.SandboxExecutionCleanupPending || execution.State == domain.SandboxExecutionInterrupted {
+		// Startup recovery first settles the execution into CLEANUP_PENDING.
+		// Once cancellation is durable, COMPLETED/SENT are new-work edges and
+		// are rejected by the storage cancel guard. Persist the exact engine ID
+		// directly on the cleanup-only edge instead.
+		return r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{
+			ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+			Phase: domain.SandboxResourceCleanupPending, PhysicalCallID: resource.PhysicalCallID,
+			EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest,
+			LabelsDigest: labelsDigest, IdempotencyKey: stableSandboxKey("reconcile_recovered_cleanup", string(resource.ID)),
+			At: stableLifecycleTime(resource.CreatedAt, "recovered_cleanup"),
+		})
+	}
 	if resource.Phase == domain.SandboxResourceDispatching {
 		// The schema's monotone transition requires SENT before COMPLETED.
 		resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{
@@ -448,6 +467,9 @@ func validatePersistedResourceIdentity(execution domain.SandboxExecution, resour
 	if resource.Kind == "VOLUME" && strings.TrimSpace(resource.EngineResourceID) != "" && resource.EngineResourceID != resource.DeterministicName {
 		return fmt.Errorf("persisted volume resource %s Engine identity does not match sealed deterministic name", resource.ID)
 	}
+	if resource.ExpectedLabelsDigest != digestLabels(expectedResourceBaseLabels(execution, resource)) {
+		return fmt.Errorf("persisted resource %s expected ownership labels digest does not match sealed identity", resource.ID)
+	}
 	// CREATING is persisted before the external create boundary. It may not
 	// have a complete ownership-label record yet, but it is safe to settle as
 	// no-create when no engine ID was persisted.
@@ -468,20 +490,8 @@ func validatePersistedResourceIdentity(execution domain.SandboxExecution, resour
 }
 
 func exactResourceLabels(execution domain.SandboxExecution, resource domain.SandboxResource) (map[string]string, error) {
-	labels := map[string]string{
-		"org.cpgen.attempt":            string(execution.AttemptID),
-		"org.cpgen.engine-digest":      string(execution.EngineIdentityDigest),
-		"org.cpgen.execution-protocol": ExecutionProtocolDockerDirectV2,
-		"org.cpgen.kind":               resource.Kind,
-		"org.cpgen.logical-operation":  execution.LogicalOperationID,
-		"org.cpgen.name":               resource.DeterministicName,
-		"org.cpgen.ordinal":            strconv.Itoa(resource.PlanOrdinal),
-		"org.cpgen.role":               resource.Role,
-		"org.cpgen.run":                string(execution.RunID),
-		"org.cpgen.slice":              "0",
-		"org.cpgen.sandbox-execution":  string(execution.ID),
-		"org.cpgen.plan-digest":        string(execution.PlanDigest),
-	}
+	labels := expectedResourceBaseLabels(execution, resource)
+	labels["org.cpgen.plan-digest"] = string(execution.PlanDigest)
 	if resource.Kind == "CONTAINER" {
 		if resource.PhysicalCallID == nil || strings.TrimSpace(string(*resource.PhysicalCallID)) == "" {
 			return nil, fmt.Errorf("persisted container resource %s has no physical call identity", resource.ID)
@@ -498,6 +508,23 @@ func exactResourceLabels(execution domain.SandboxExecution, resource domain.Sand
 	return labels, nil
 }
 
+func expectedResourceBaseLabels(execution domain.SandboxExecution, resource domain.SandboxResource) map[string]string {
+	return map[string]string{
+		"org.cpgen.attempt":            string(execution.AttemptID),
+		"org.cpgen.engine-digest":      string(execution.EngineIdentityDigest),
+		"org.cpgen.execution-protocol": ExecutionProtocolDockerDirectV2,
+		"org.cpgen.kind":               resource.Kind,
+		"org.cpgen.logical-operation":  execution.LogicalOperationID,
+		"org.cpgen.name":               resource.DeterministicName,
+		"org.cpgen.ordinal":            strconv.Itoa(resource.PlanOrdinal),
+		"org.cpgen.role":               resource.Role,
+		"org.cpgen.run":                string(execution.RunID),
+		"org.cpgen.slice":              "0",
+		"org.cpgen.sandbox-execution":  string(execution.ID),
+	}
+
+}
+
 func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domain.SandboxExecution, resource domain.SandboxResource) (domain.SandboxResource, bool, error) {
 	proofs, ok := r.store.(port.SandboxCleanupRecorder)
 	if !ok {
@@ -511,10 +538,23 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		cleaned, err := proofs.RecordResourceCleaned(ctx, domain.RecordResourceCleanedCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: stopped.Version, EngineResourceID: engineID, EngineIdentityDigest: stopped.EngineIdentityDigest, EvidenceDigest: domain.SumBytes([]byte("cpgen.reconcile-remove/v1\n" + engineID)), At: stableLifecycleTime(resource.CreatedAt, "clean")})
 		return cleaned, err == nil, err
 	}
+	recordCleanedAfterExistingStopProof := func(engineID string) (domain.SandboxResource, bool, error) {
+		cleaned, err := proofs.RecordResourceCleaned(ctx, domain.RecordResourceCleanedCommand{
+			ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version,
+			EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest,
+			EvidenceDigest: domain.SumBytes([]byte("cpgen.reconcile-remove/v1\n" + engineID)),
+			At:             stableLifecycleTime(resource.CreatedAt, "clean"),
+		})
+		return cleaned, err == nil, err
+	}
+	existingStopProof := resource.Phase == domain.SandboxResourceStopped
 	switch resource.Kind {
 	case "CONTAINER":
 		inspected, err := r.engine.ContainerInspect(ctx, resource.EngineResourceID, moby.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
+			if existingStopProof {
+				return recordCleanedAfterExistingStopProof(resource.EngineResourceID)
+			}
 			return stopAndRemove(StopProof{NotFound: true}, resource.EngineResourceID)
 		}
 		if err != nil {
@@ -529,6 +569,12 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		}
 		if !maps.Equal(inspected.Container.Config.Labels, expectedLabels) || digestLabels(inspected.Container.Config.Labels) != resource.LabelsDigest {
 			return resource, false, fmt.Errorf("%w: container labels mismatch", errManualCleanup)
+		}
+		if existingStopProof {
+			if _, err := r.engine.ContainerRemove(ctx, resource.EngineResourceID, moby.ContainerRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+				return resource, false, err
+			}
+			return recordCleanedAfterExistingStopProof(resource.EngineResourceID)
 		}
 		proof, err := portableStop(ctx, r.engine, resource.EngineResourceID, func(result moby.ContainerInspectResult) error {
 			if result.Container.ID != resource.EngineResourceID || trimContainerName(result.Container.Name) != resource.DeterministicName {
@@ -549,6 +595,9 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 	case "VOLUME":
 		inspected, err := r.engine.VolumeInspect(ctx, resource.EngineResourceID, moby.VolumeInspectOptions{})
 		if errdefs.IsNotFound(err) {
+			if existingStopProof {
+				return recordCleanedAfterExistingStopProof(resource.EngineResourceID)
+			}
 			return stopAndRemove(StopProof{NotFound: true}, resource.EngineResourceID)
 		}
 		if err != nil {
@@ -563,6 +612,9 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		}
 		if _, err := r.engine.VolumeRemove(ctx, resource.EngineResourceID, moby.VolumeRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 			return resource, false, err
+		}
+		if existingStopProof {
+			return recordCleanedAfterExistingStopProof(resource.EngineResourceID)
 		}
 		return stopAndRemove(StopProof{InspectStopped: true}, resource.EngineResourceID)
 	default:

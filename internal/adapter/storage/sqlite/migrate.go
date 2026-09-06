@@ -126,6 +126,53 @@ func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {
 	if exists == 0 {
 		return nil
 	}
+	// M16 intentionally removes the legacy NULL call identity from every
+	// externally-created non-volume resource.  A post-dispatch CONTAINER (or
+	// CGROUP) row cannot be downgraded to INTERRUPTED: that state means
+	// "definitely no create", while DISPATCHING/SENT/UNKNOWN and terminal
+	// phases leave an external outcome that still needs exact cleanup.  Refuse
+	// this legal historical shape with a typed compatibility error instead of
+	// allowing the table rebuild to silently lose a cleanup obligation.
+	var incompatible int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_resources
+		WHERE physical_call_id IS NULL
+		  AND resource_kind <> 'VOLUME'
+		  AND phase NOT IN ('PLANNED','CREATING','INTERRUPTED')`).Scan(&incompatible); err != nil {
+		return err
+	}
+	if incompatible > 0 {
+		return wrap(ErrMigrationCompatibility,
+			fmt.Sprintf("%d legacy non-volume sandbox resource(s) lack physical call identity after dispatch", incompatible), nil)
+	}
+	// M14 allowed NULL physical_call_id for every non-CONTAINER resource and
+	// also allowed a legacy container row to reach DISPATCHING/SENT before its
+	// call identity was attached. M16 tightens that boundary. Preserve every
+	// such row in an audit table, and park the non-volume rows as an explicitly
+	// manual-cleanup state rather than letting the table rebuild fail with an
+	// opaque CHECK error. No synthetic physical call is manufactured.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sandbox_m16_legacy_resource_compat(
+		resource_id TEXT PRIMARY KEY,
+		resource_kind TEXT NOT NULL,
+		original_phase TEXT NOT NULL,
+		deterministic_name TEXT NOT NULL,
+		engine_resource_id TEXT,
+		expected_labels_digest TEXT NOT NULL,
+		labels_digest TEXT,
+		disposition TEXT NOT NULL CHECK (disposition = 'MANUAL_CLEANUP_REQUIRED')
+	) STRICT`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO sandbox_m16_legacy_resource_compat(
+		resource_id, resource_kind, original_phase, deterministic_name,
+		engine_resource_id, expected_labels_digest, labels_digest, disposition)
+		SELECT resource_id, resource_kind, phase, deterministic_name,
+			engine_resource_id, expected_labels_digest, labels_digest,
+			'MANUAL_CLEANUP_REQUIRED'
+		FROM sandbox_resources
+		WHERE physical_call_id IS NULL
+		  AND phase NOT IN ('PLANNED','CREATING','INTERRUPTED')`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sandbox_m16_legacy_volume_phases(resource_id TEXT PRIMARY KEY, phase TEXT NOT NULL) STRICT`); err != nil {
 		return err
 	}
@@ -136,7 +183,7 @@ func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {
 		return err
 	}
 	var parked int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_m16_legacy_volume_phases`).Scan(&parked); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_m16_legacy_resource_compat`).Scan(&parked); err != nil {
 		return err
 	}
 	if parked == 0 {
@@ -156,8 +203,16 @@ func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {
 			return err
 		}
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='PLANNED'
-		WHERE resource_id IN (SELECT resource_id FROM sandbox_m16_legacy_volume_phases)`)
+	_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources
+		SET phase = CASE WHEN resource_kind = 'VOLUME' THEN 'PLANNED' ELSE 'INTERRUPTED' END,
+			stop_proof_digest = CASE WHEN resource_kind = 'VOLUME' THEN stop_proof_digest
+				ELSE ? END,
+			stop_proof_kind = CASE WHEN resource_kind = 'VOLUME' THEN stop_proof_kind
+				ELSE 'LEGACY_UNSCOPED_MANUAL_CLEANUP' END,
+			stop_proof_at = CASE WHEN resource_kind = 'VOLUME' THEN stop_proof_at
+				ELSE created_at END
+		WHERE resource_id IN (SELECT resource_id FROM sandbox_m16_legacy_resource_compat)`,
+		string(domain.SumBytes([]byte("cpgen.m16-legacy-resource-compat/v1"))))
 	return err
 }
 

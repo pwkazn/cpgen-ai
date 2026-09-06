@@ -26,7 +26,7 @@ func TestReconcilerCreatingWithoutEngineIDSettlesNoCreate(t *testing.T) {
 	execution := reconcilerTestExecution()
 	resource := domain.SandboxResource{
 		ID: resourceID("creating"), ExecutionID: execution.ID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
-		DeterministicName: "cpgen-creating", EngineIdentityDigest: execution.EngineIdentityDigest,
+		DeterministicName: "cpgen-creating", ExpectedLabelsDigest: digestLabels(expectedResourceBaseLabels(execution, domain.SandboxResource{Kind: "CONTAINER", Role: "TARGET", PlanOrdinal: 0, DeterministicName: "cpgen-creating", ExecutionID: execution.ID})), EngineIdentityDigest: execution.EngineIdentityDigest,
 		Phase: domain.SandboxResourceCreating, Version: 3, CreatedAt: now,
 	}
 	store := &reconcilerTestStore{}
@@ -45,9 +45,92 @@ func TestReconcilerCreatingWithoutEngineIDSettlesNoCreate(t *testing.T) {
 	}
 }
 
+func TestReconcilerRecoveryAfterCancellationUsesCleanupOnlySettlement(t *testing.T) {
+	now := time.Unix(123, 0).UTC()
+	execution := reconcilerTestExecution()
+	resource := domain.SandboxResource{
+		ID: resourceID("cleanup-recover"), ExecutionID: execution.ID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
+		DeterministicName: "cpgen-cleanup-recover", EngineIdentityDigest: execution.EngineIdentityDigest,
+		Phase: domain.SandboxResourceSent, Version: 3, CreatedAt: now, PhysicalCallID: callID("cleanup-recover"),
+	}
+	labels, err := exactResourceLabels(execution, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.LabelsDigest = digestLabels(labels)
+	resource.ExpectedLabelsDigest = digestLabels(expectedResourceBaseLabels(execution, resource))
+	engine := &reconcilerTestEngine{inspect: moby.ContainerInspectResult{Container: container.InspectResponse{
+		ID: "engine-container-id", Name: "/" + resource.DeterministicName, Config: &container.Config{Labels: labels},
+	}}}
+	store := &reconcilerTestStore{}
+	reconciler := &sandboxReconciler{engine: engine, store: store}
+	got, err := reconciler.recoverCreatedResource(context.Background(), execution, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != domain.SandboxResourceCleanupPending || got.EngineResourceID != "engine-container-id" {
+		t.Fatalf("recovered resource = %#v, want CLEANUP_PENDING with exact engine ID", got)
+	}
+	if store.advances != 1 {
+		t.Fatalf("recovery advances = %d, want one cleanup-only CAS", store.advances)
+	}
+}
+
+func TestValidatePersistedResourceIdentityRejectsExpectedLabelsDigestMismatch(t *testing.T) {
+	execution := reconcilerTestExecution()
+	resource := domain.SandboxResource{
+		ID: resourceID("expected-labels"), ExecutionID: execution.ID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
+		DeterministicName: "cpgen-expected-labels", EngineIdentityDigest: execution.EngineIdentityDigest,
+		Phase: domain.SandboxResourceSent, Version: 3, CreatedAt: execution.CreatedAt, PhysicalCallID: callID("expected-labels"),
+	}
+	labels, err := exactResourceLabels(execution, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.LabelsDigest = digestLabels(labels)
+	resource.ExpectedLabelsDigest = domain.SumBytes([]byte("tampered expected labels"))
+	if err := validatePersistedResourceIdentity(execution, resource); err == nil || !strings.Contains(err.Error(), "expected ownership labels digest") {
+		t.Fatalf("validation error = %v, want expected-labels mismatch", err)
+	}
+}
+
+func TestReconcilerRetriesRemoveFromStoppedWithoutNewStopProof(t *testing.T) {
+	now := time.Unix(123, 0).UTC()
+	execution := reconcilerTestExecution()
+	resource := domain.SandboxResource{
+		ID: resourceID("stopped-retry"), ExecutionID: execution.ID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
+		DeterministicName: "cpgen-stopped-retry", EngineResourceID: "engine-container-id",
+		EngineIdentityDigest: execution.EngineIdentityDigest, Phase: domain.SandboxResourceStopped, Version: 7,
+		CreatedAt: now, UpdatedAt: now, StopProofDigest: domain.SumBytes([]byte("stop-proof")), StopProofKind: "STOP_KILL_WAIT_INSPECT",
+		PhysicalCallID: callID("stopped-retry"),
+	}
+	labels, err := exactResourceLabels(execution, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.LabelsDigest = digestLabels(labels)
+	resource.ExpectedLabelsDigest = digestLabels(expectedResourceBaseLabels(execution, resource))
+	engine := &reconcilerTestEngine{inspect: moby.ContainerInspectResult{Container: container.InspectResponse{
+		ID: resource.EngineResourceID, Name: "/" + resource.DeterministicName, Config: &container.Config{Labels: labels},
+	}}}
+	store := &reconcilerTestStore{}
+	reconciler := &sandboxReconciler{engine: engine, store: store}
+	got, cleaned, err := reconciler.cleanupResource(context.Background(), execution, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cleaned || got.Phase != domain.SandboxResourceCleaned {
+		t.Fatalf("cleanup result = %#v cleaned=%v, want CLEANED/true", got, cleaned)
+	}
+	if store.cleaned != 1 || engine.removeCalls != 1 {
+		t.Fatalf("retry calls = cleaned %d remove %d, want 1/1", store.cleaned, engine.removeCalls)
+	}
+}
+
 func TestReconcilerRecoversDispatchedResourceWithExactEngineID(t *testing.T) {
 	now := time.Unix(123, 0).UTC()
 	execution := reconcilerTestExecution()
+	execution.State = domain.SandboxExecutionRunning
 	resource := domain.SandboxResource{
 		ID: resourceID("recover"), ExecutionID: execution.ID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
 		DeterministicName: "cpgen-recover", EngineIdentityDigest: execution.EngineIdentityDigest,
@@ -58,6 +141,7 @@ func TestReconcilerRecoversDispatchedResourceWithExactEngineID(t *testing.T) {
 		t.Fatal(err)
 	}
 	resource.LabelsDigest = digestLabels(labels)
+	resource.ExpectedLabelsDigest = digestLabels(expectedResourceBaseLabels(execution, resource))
 	engine := &reconcilerTestEngine{inspect: moby.ContainerInspectResult{Container: container.InspectResponse{
 		ID: "engine-container-id", Name: "/" + resource.DeterministicName, Config: &container.Config{Labels: labels},
 	}}}
@@ -87,6 +171,7 @@ func TestReconcilerDoesNotTreatMissingDispatchedResourceAsNoCreate(t *testing.T)
 		t.Fatal(err)
 	}
 	resource.LabelsDigest = digestLabels(labels)
+	resource.ExpectedLabelsDigest = digestLabels(expectedResourceBaseLabels(execution, resource))
 	engine := &reconcilerTestEngine{inspectErr: errdefs.ErrNotFound}
 	reconciler := &sandboxReconciler{engine: engine, store: &reconcilerTestStore{}}
 	_, err = reconciler.recoverCreatedResource(context.Background(), execution, resource)
@@ -118,6 +203,7 @@ func callID(s string) *domain.AttemptCallID {
 type reconcilerTestStore struct {
 	interrupted int
 	advances    int
+	cleaned     int
 }
 
 func (*reconcilerTestStore) UnfinishedSandboxExecutions(context.Context, domain.RunID) ([]domain.SandboxExecution, error) {
@@ -150,8 +236,9 @@ func (*reconcilerTestStore) RecordResourceStopProof(context.Context, domain.Reco
 	return domain.SandboxResource{}, nil
 }
 
-func (*reconcilerTestStore) RecordResourceCleaned(context.Context, domain.RecordResourceCleanedCommand) (domain.SandboxResource, error) {
-	return domain.SandboxResource{}, nil
+func (s *reconcilerTestStore) RecordResourceCleaned(_ context.Context, req domain.RecordResourceCleanedCommand) (domain.SandboxResource, error) {
+	s.cleaned++
+	return domain.SandboxResource{ID: req.ResourceID, ExecutionID: req.ExecutionID, Phase: domain.SandboxResourceCleaned, Version: req.ExpectedVersion + 1, EngineResourceID: req.EngineResourceID, EngineIdentityDigest: req.EngineIdentityDigest}, nil
 }
 
 type reconcilerTestEngine struct {
@@ -159,11 +246,17 @@ type reconcilerTestEngine struct {
 	inspect      moby.ContainerInspectResult
 	inspectErr   error
 	inspectCalls int
+	removeCalls  int
 }
 
 func (e *reconcilerTestEngine) ContainerInspect(context.Context, string, moby.ContainerInspectOptions) (moby.ContainerInspectResult, error) {
 	e.inspectCalls++
 	return e.inspect, e.inspectErr
+}
+
+func (e *reconcilerTestEngine) ContainerRemove(context.Context, string, moby.ContainerRemoveOptions) (moby.ContainerRemoveResult, error) {
+	e.removeCalls++
+	return moby.ContainerRemoveResult{}, nil
 }
 
 var _ port.SandboxCleanupRecorder = (*reconcilerTestStore)(nil)
