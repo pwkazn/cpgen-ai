@@ -2,6 +2,8 @@
 
 Status: Current under ADR-0006
 
+Slice 1 checkpoint: **complete**. Next: Slice 2 — idea, statement, model, and similarity.
+
 ## Rules
 
 - Follow the accepted ADRs and the lightweight local workflow design.
@@ -14,7 +16,7 @@ Status: Current under ADR-0006
 ## Milestones
 
 - [x] Slice 0: execution foundation
-- [ ] Slice 1 lightweight local workflow
+- [x] Slice 1 lightweight local workflow
 - [ ] Slice 2: idea, statement, model, similarity
 - [ ] Slice 3: solution and Docker Judge
 - [ ] Slice 4: data and quality
@@ -36,88 +38,88 @@ Status: Current under ADR-0006
 
 ### Architecture contract
 
-- [ ] Add executable documentation consistency checking.
-- [ ] Accept ADR-0006 and the lightweight design.
-- [ ] Reconcile architecture, ADRs, detailed designs, plan, traceability, README, and TODO.
+- [x] Add executable documentation consistency checking.
+- [x] Accept ADR-0006 and the lightweight design.
+- [x] Reconcile architecture, ADRs, detailed designs, plan, traceability, README, and TODO.
 
 ### Lifecycle and locking
 
-- [ ] Add closed run, stage, attempt, and review values.
-- [ ] Add cross-platform OS-backed locks derived from validated RunID.
-- [ ] Test same-run exclusion, different-run concurrency, and release after process death.
+- [x] Add closed run, stage, attempt, and review values.
+- [x] Add cross-platform OS-backed locks derived from validated RunID.
+- [x] Test same-run exclusion, different-run concurrency, and release after process death.
 
 ### SQLite projection
 
-- [ ] Add ordered migrations and migration checksums.
-- [ ] Persist runs, stage records, attempts, events, control requests, and review decisions.
-- [ ] Implement expected-version transitions and atomic projection plus event.
-- [ ] Add active-time accounting timestamps for metering only.
+- [x] Add ordered migrations and migration checksums.
+- [x] Persist runs, stage records, attempts, events, control requests, and review decisions.
+- [x] Implement expected-version transitions and atomic projection plus event.
+- [x] Add active-time accounting timestamps for metering only.
 
 ### Calls and budgets
 
-- [ ] Persist logical operations, physical call records, reservations, settlement, and CallTrace.
-- [ ] Enforce call, token, cost, similarity, sandbox, artifact, and active-time limits.
-- [ ] Keep logical idempotency stable across physical retry.
-- [ ] Settle unknown send boundaries conservatively.
-- [ ] Test concurrent reservation limits.
+- [x] Persist logical operations, physical call records, reservations, settlement, and CallTrace.
+- [x] Enforce call, token, cost, similarity, sandbox, artifact, and active-time limits.
+- [x] Keep logical idempotency stable across physical retry.
+- [x] Settle unknown send boundaries conservatively.
+- [x] Test concurrent reservation limits.
 
 ### Blob and occurrences
 
-- [ ] Add private SHA-256 Blob publication and verified reads.
-- [ ] Add artifact declarations, writer tokens, pins, and run-scoped occurrences.
-- [ ] Test traversal, symlink escape, corruption, deduplication, and crash boundaries.
-- [ ] Commit occurrence attachment with stage results.
+- [x] Add private SHA-256 Blob publication and verified reads.
+- [x] Add artifact declarations, writer tokens, pins, and run-scoped occurrences.
+- [x] Test traversal, symlink escape, corruption, deduplication, and crash boundaries.
+- [x] Commit occurrence attachment with stage results.
 
 ### Cache and maintenance
 
-- [ ] Add canonical cache keys, source-call references, Blob references, and current-run uses.
-- [ ] Retain mutation and provenance accounting.
-- [ ] Add explicit garbage collection under the exclusive artifact lock.
-- [ ] Test cache provenance and GC exclusion.
+- [x] Add canonical cache keys, source-call references, Blob references, and current-run uses.
+- [x] Retain mutation and provenance accounting.
+- [x] Add explicit garbage collection under the exclusive artifact lock.
+- [x] Test cache provenance and GC exclusion.
 
 ### Docker persistence and reconciliation
 
-- [ ] Persist SandboxExecution and the complete resource plan before Docker create.
-- [ ] Bind authorization to run, attempt, sandbox execution, logical operation, scope, plan, and engine identities.
-- [ ] Retain deterministic labels and detached watchdog behavior.
-- [ ] Add narrow exact-resource inspect, stop, kill, wait, remove, and settlement.
-- [ ] Prove unrelated resources are never touched.
+- [x] Persist SandboxExecution and the complete resource plan before Docker create.
+- [x] Bind authorization to run, attempt, sandbox execution, logical operation, scope, plan, and engine identities.
+- [x] Retain deterministic labels and detached watchdog behavior.
+- [x] Add narrow exact-resource inspect, stop, kill, wait, remove, and settlement.
+- [x] Prove unrelated resources are never touched.
 
 ### Fixed typed Fake pipeline
 
-- [ ] Assemble the concrete typed constructor.
-- [ ] Pass immutable RunView and minimum metered ports.
-- [ ] Implement bounded stage retry and stable identity.
-- [ ] Implement BLOCKED current-stage resume with fresh dependency revalidation.
-- [ ] Implement review application, cancellation, and current-stage restart.
-- [ ] Keep external work outside write transactions.
+- [x] Assemble the concrete typed constructor.
+- [x] Pass immutable RunView and minimum metered ports.
+- [x] Implement bounded stage retry and stable identity.
+- [x] Implement BLOCKED current-stage resume with fresh dependency revalidation.
+- [x] Implement review application, cancellation, and current-stage restart.
+- [x] Keep external work outside write transactions.
 
 ### CLI and configuration
 
-- [ ] Add strict local runtime, storage, lock, accounting, provider, and sandbox configuration.
-- [ ] Implement generate and run list/show/events/resume/cancel.
-- [ ] Implement review show/revise/retry/waive/reject.
-- [ ] Preserve stable JSON envelopes and exit codes.
-- [ ] Document immediate process-lock conflicts and restart semantics.
+- [x] Add strict local runtime, storage, lock, accounting, provider, and sandbox configuration.
+- [x] Implement generate and run list/show/events/resume/cancel.
+- [x] Implement review show/revise/retry/waive/reject.
+- [x] Preserve stable JSON envelopes and exit codes.
+- [x] Document immediate process-lock conflicts and restart semantics.
 
 ### Crash and boundary proof
 
-- [ ] Inject process death at every durable stage boundary.
-- [ ] Prove no duplicate effects, budget overspend, event duplication, or corrupt artifacts.
-- [ ] Kill the CLI while a target runs, after target stop, and during cleanup.
-- [ ] Prove restart does not continue an incomplete old export.
-- [ ] Run full tests, vet, race, Linux cross-build, architecture check, and patch check.
-- [ ] Record the Slice 1 checkpoint.
+- [x] Inject process death at every durable stage boundary.
+- [x] Prove no duplicate effects, budget overspend, event duplication, or corrupt artifacts.
+- [x] Kill the CLI while a target runs, after target stop, and during cleanup.
+- [x] Prove restart does not continue an incomplete old export.
+- [x] Run full tests, vet, race, Linux cross-build, architecture check, and patch check.
+- [x] Record the Slice 1 checkpoint.
 
 ### Slice 1 exit criteria
 
-- [ ] One local executor can create, pause, resume, review, cancel, and inspect a run.
-- [ ] A competing same-run process cannot start stage work.
-- [ ] Process death releases the lock and manual resume reconciles the current stage.
-- [ ] SQLite and all domain ledgers remain consistent at crash boundaries.
-- [ ] CANCELLED waits for proof that untrusted targets stopped.
-- [ ] The deterministic Fake pipeline covers all pause and failure paths.
-- [ ] Completed Slice 0 tests remain green.
+- [x] One local executor can create, pause, resume, review, cancel, and inspect a run.
+- [x] A competing same-run process cannot start stage work.
+- [x] Process death releases the lock and manual resume reconciles the current stage.
+- [x] SQLite and all domain ledgers remain consistent at crash boundaries.
+- [x] CANCELLED waits for proof that untrusted targets stopped.
+- [x] The deterministic Fake pipeline covers all pause and failure paths.
+- [x] Completed Slice 0 tests remain green.
 
 ## Slice 2: idea, statement, model, similarity
 

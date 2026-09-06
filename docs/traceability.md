@@ -2,6 +2,8 @@
 
 Status: Current under ADR-0006
 
+Slice 1 checkpoint: **complete**. Slice 2 (idea, statement, model, and similarity) is next; see [Slice 1 verification evidence](evidence/slice1-verification.md).
+
 ## MVP functional requirements
 
 | Requirement | Decision/design | Verification |
@@ -40,7 +42,7 @@ Status: Current under ADR-0006
 | Slice | Scope | Evidence |
 |---|---|---|
 | 0 | direct Docker execution, watchdog, Judge foundation | docs/evidence/slice0-verification.md |
-| 1 | lightweight local workflow, persistence, ledgers, Fake pipeline, CLI | Slice 1 checkpoint and architecture check |
+| 1 | lightweight local workflow, persistence, ledgers, Fake pipeline, CLI | [Slice 1 verification evidence](evidence/slice1-verification.md) and architecture check |
 | 2 | request, idea, statement, model, similarity | provider and content evidence |
 | 3 | solution and Docker Judge | compile/run/checker evidence |
 | 4 | data and quality | differential and gate evidence |

@@ -5,8 +5,9 @@ CPGen is a local, auditable system for generating, validating, judging, and pack
 ## Current status
 
 - Slice 0 is completed: strict domain values, Judge foundation, direct Docker execution, detached watchdog, and verification evidence.
-- Slice 1 lightweight local workflow is the active implementation slice.
-- The current branch preserves Slice 0 code and evidence while adding the recoverable local core.
+- Slice 1 lightweight local workflow is complete, including persistence, ledgers, the fixed typed Fake pipeline, CLI, and crash-recovery evidence.
+- Slice 2 (idea, statement, model, and similarity) is next.
+- The current branch preserves Slice 0 and Slice 1 code and evidence while keeping the workflow local and foreground-only.
 
 ## Runtime boundary
 
@@ -41,6 +42,7 @@ Generative models propose candidates. Deterministic validators, compilers, targe
 - docs/superpowers/plans/2026-08-31-slice1-lightweight-local-workflow.md — Slice 1 implementation plan
 - docs/README.md — documentation index
 - docs/evidence/slice0-verification.md — completed Slice 0 evidence
+- docs/evidence/slice1-verification.md — completed Slice 1 checkpoint evidence
 
 ## Development gates
 
