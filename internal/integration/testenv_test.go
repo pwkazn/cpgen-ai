@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,7 +139,26 @@ const (
 type helperProcess struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
-	stderr bytes.Buffer
+	stderr synchronizedBuffer
+}
+
+// synchronizedBuffer keeps diagnostics safe while the child-process stderr
+// copy goroutine is still draining output during readiness failures.
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
 }
 
 // TestSlice1IntegrationHelper is the only test entry point executed in a
