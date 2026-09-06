@@ -27,6 +27,19 @@ type StructuralPackageReport struct {
 	Artifacts      []domain.PendingArtifact `json:"artifacts"`
 }
 
+// Artifact returns the immutable evidence entry for one package path. Keeping
+// this lookup on the report makes crash/restart canaries inspect persisted
+// package evidence without reaching into the package builder or its storage
+// implementation.
+func (r StructuralPackageReport) Artifact(logicalPath string) (domain.PendingArtifact, bool) {
+	for _, artifact := range r.Artifacts {
+		if string(artifact.LogicalPath) == logicalPath {
+			return artifact, true
+		}
+	}
+	return domain.PendingArtifact{}, false
+}
+
 func (r StructuralPackageReport) Validate() error {
 	if r.Kind != StructuralPackageReportKind || r.Status != "PASSED" || r.FileCount <= 0 {
 		return fmt.Errorf("invalid structural-only package report")
@@ -44,10 +57,15 @@ func (r StructuralPackageReport) Validate() error {
 		return fmt.Errorf("structural package artifact count is incomplete")
 	}
 	manifestFound := false
+	seenPaths := make(map[domain.SafeRelPath]struct{}, len(r.Artifacts))
 	for _, artifact := range r.Artifacts {
 		if err := artifact.Validate(); err != nil {
 			return err
 		}
+		if _, exists := seenPaths[artifact.LogicalPath]; exists {
+			return fmt.Errorf("structural package contains duplicate artifact path %q", artifact.LogicalPath)
+		}
+		seenPaths[artifact.LogicalPath] = struct{}{}
 		if artifact.CallID != r.ArtifactCallID {
 			return fmt.Errorf("structural package artifact call identity mismatch")
 		}
