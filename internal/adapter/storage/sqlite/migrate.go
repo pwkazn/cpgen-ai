@@ -88,6 +88,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 		for _, item := range migrations[len(applied):] {
+			// M16 is immutable historical SQL. Its tightened physical-call
+			// check rejected a legal M14 VOLUME row whose call identity was
+			// intentionally NULL. Park only those legacy phase values before
+			// M16 rebuilds the table; M17 restores them under the explicit
+			// volume compatibility rule. This keeps M1-M16 bytes and hashes
+			// unchanged while making an actual M14 -> latest upgrade safe.
+			if item.version == 16 {
+				if err := prepareM16VolumeCompatibility(ctx, tx); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.ExecContext(ctx, item.sql); err != nil {
 				return fmt.Errorf("execute migration %d: %w", item.version, err)
 			}
@@ -105,6 +116,44 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sandbox_resources'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sandbox_m16_legacy_volume_phases(resource_id TEXT PRIMARY KEY, phase TEXT NOT NULL) STRICT`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO sandbox_m16_legacy_volume_phases(resource_id, phase)
+		SELECT resource_id, phase FROM sandbox_resources
+		WHERE resource_kind='VOLUME' AND physical_call_id IS NULL
+		  AND phase NOT IN ('PLANNED','CREATING','INTERRUPTED')`); err != nil {
+		return err
+	}
+	var parked int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_m16_legacy_volume_phases`).Scan(&parked); err != nil {
+		return err
+	}
+	if parked == 0 {
+		return nil
+	}
+	for _, trigger := range []string{
+		"sandbox_resource_phase_monotone",
+		"sandbox_resource_stopped_requires_proof",
+		"sandbox_resource_cleaned_requires_evidence",
+	} {
+		if _, err := tx.ExecContext(ctx, "DROP TRIGGER IF EXISTS "+trigger); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='PLANNED'
+		WHERE resource_id IN (SELECT resource_id FROM sandbox_m16_legacy_volume_phases)`)
+	return err
 }
 
 type appliedMigration struct {

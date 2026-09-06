@@ -14,13 +14,19 @@ import (
 	"sync"
 	"time"
 
+	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
 
 type Observation struct {
-	Exists  bool
-	ID      string
+	Exists bool
+	ID     string
+	// Kind identifies the exact Engine resource represented by the
+	// observation.  It is deliberately carried through the watchdog protocol
+	// so cleanup cannot accidentally apply container-only operations to a
+	// volume (or vice versa).
+	Kind    port.ResourceKind
 	Running bool
 	Foreign bool
 }
@@ -45,6 +51,7 @@ type Service struct {
 	PollInterval     time.Duration
 	LateCreateWindow time.Duration
 	CleanupTimeout   time.Duration
+	Clock            clock.Clock
 }
 
 func (s Service) Validate() error {
@@ -52,6 +59,15 @@ func (s Service) Validate() error {
 		return fmt.Errorf("watchdog service durations must be positive")
 	}
 	return nil
+}
+
+func (s Service) now() time.Time {
+	if s.Clock != nil {
+		if now := s.Clock.Now(); !now.IsZero() {
+			return now.UTC()
+		}
+	}
+	return time.Now().UTC()
 }
 
 type commandType string
@@ -135,7 +151,7 @@ func (s Service) Serve(ctx context.Context, conn net.Conn, envelope Envelope, re
 		}
 	}()
 
-	deadlineDelay := time.Until(envelope.Record.SafetyDeadlineUTC)
+	deadlineDelay := envelope.Record.SafetyDeadlineUTC.Sub(s.now())
 	if deadlineDelay < 0 {
 		deadlineDelay = 0
 	}
@@ -316,12 +332,12 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 				return fmt.Errorf("resource label %q does not match the sealed execution identity", key)
 			}
 		}
-		if resource.Kind == port.ResourceContainer {
+		if resource.Kind == port.ResourceContainer || resource.Kind == port.ResourceVolume {
 			if err := domain.AttemptCallID(labels["org.cpgen.call"]).Validate(); err != nil {
-				return fmt.Errorf("container call label is invalid: %w", err)
+				return fmt.Errorf("resource call label is invalid: %w", err)
 			}
 		} else if labels["org.cpgen.call"] != "none" {
-			return fmt.Errorf("non-container resource call label must be none")
+			return fmt.Errorf("non-Engine resource call label must be none")
 		}
 	}
 	base := map[string]string{
@@ -348,7 +364,7 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 }
 
 func (s Service) reconcile(record ControlRecord, labels map[int]map[string]string, created map[int]string, reconciler Reconciler, holdUnknown bool) error {
-	cleanupDeadline := time.Now().Add(s.CleanupTimeout)
+	cleanupDeadline := s.now().Add(s.CleanupTimeout)
 	unknownHoldUntil := time.Time{}
 	if holdUnknown {
 		unknownHoldUntil = record.SafetyDeadlineUTC.Add(s.CleanupTimeout)
@@ -359,7 +375,7 @@ func (s Service) reconcile(record ControlRecord, labels map[int]map[string]strin
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), cleanupDeadline)
 	defer cancel()
-	quietSince := time.Now()
+	quietSince := s.now()
 	ticker := time.NewTicker(s.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -373,7 +389,10 @@ func (s Service) reconcile(record ControlRecord, labels map[int]map[string]strin
 			if observed.Foreign || observed.Exists && len(expected) == 0 {
 				return ForeignResourceError{Name: resource.DeterministicName, ID: observed.ID}
 			}
-			if observed.Exists && observed.Running {
+			// Volumes do not have a process state.  Their existence is itself
+			// cleanup work, so the reconciler must remove them even when
+			// Running is false.
+			if observed.Exists && (observed.Running || resource.Kind == port.ResourceVolume) {
 				activity = true
 				if err := reconciler.Stop(ctx, observed); err != nil {
 					return err
@@ -381,13 +400,13 @@ func (s Service) reconcile(record ControlRecord, labels map[int]map[string]strin
 			}
 		}
 		if activity {
-			quietSince = time.Now()
+			quietSince = s.now()
 		} else {
 			effectiveQuietSince := quietSince
 			if holdUnknown && unknownHoldUntil.After(effectiveQuietSince) {
 				effectiveQuietSince = unknownHoldUntil
 			}
-			if time.Since(effectiveQuietSince) >= s.LateCreateWindow {
+			if s.now().Sub(effectiveQuietSince) >= s.LateCreateWindow {
 				return nil
 			}
 		}

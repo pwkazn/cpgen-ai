@@ -401,8 +401,10 @@ func (s *Store) RecordResourceCleaned(ctx context.Context, command domain.Record
 	return result, err
 }
 
-// RecordResourceInterrupted settles a planned resource for which no external
-// create crossed the boundary. The reason is persisted as its stop proof.
+// RecordResourceInterrupted settles a resource before the external create
+// boundary. PLANNED and CREATING both mean no Docker request was authorized;
+// the latter covers a crash or dispatch rejection after the CREATING CAS but
+// before BeginDispatch committed.
 func (s *Store) RecordResourceInterrupted(ctx context.Context, command domain.RecordResourceInterruptedCommand) (domain.SandboxResource, error) {
 	if err := command.Validate(); err != nil {
 		return domain.SandboxResource{}, err
@@ -427,8 +429,8 @@ func (s *Store) RecordResourceInterrupted(ctx context.Context, command domain.Re
 			}
 			return wrap(ErrVersionConflict, "sandbox resource version changed", nil)
 		}
-		if result.Phase != domain.SandboxResourcePlanned {
-			return wrap(ErrInvalidTransition, "only an uncreated planned resource may be interrupted", nil)
+		if result.Phase != domain.SandboxResourcePlanned && result.Phase != domain.SandboxResourceCreating {
+			return wrap(ErrInvalidTransition, "only a pre-dispatch resource may be interrupted", nil)
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='INTERRUPTED', version=version+1, stop_proof_digest=?, stop_proof_kind='NO_CREATE', stop_proof_at=?, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND resource_id=? AND version=?`,
 			string(command.ReasonDigest), formatTime(command.At), "interrupt_"+string(command.ResourceID), string(digest), formatTime(command.At), string(command.ExecutionID), string(command.ResourceID), command.ExpectedVersion)

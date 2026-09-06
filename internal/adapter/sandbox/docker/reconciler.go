@@ -2,9 +2,11 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	watchdogprotocol "cpgen/internal/watchdog"
 	"github.com/containerd/errdefs"
 	moby "github.com/moby/moby/client"
 )
@@ -56,6 +59,13 @@ type sandboxReconciler struct {
 	lock                 SandboxExecutionLock
 }
 
+// The default lock is process-wide so two independently constructed
+// reconcilers cannot concurrently mutate the same run. Callers which need a
+// cross-process lock can inject an implementation backed by the run lock or
+// database; the nil default still provides the required shared process
+// serialization.
+var defaultSandboxExecutionLocks = newRunExecutionLocks()
+
 func NewSandboxReconciler(options SandboxReconcilerOptions) (SandboxReconciler, error) {
 	if options.Engine == nil || options.Store == nil {
 		return nil, errors.New("sandbox reconciler Engine and store are required")
@@ -68,7 +78,7 @@ func NewSandboxReconciler(options SandboxReconcilerOptions) (SandboxReconciler, 
 	}
 	lock := options.ExecutionLock
 	if lock == nil {
-		lock = newRunExecutionLocks()
+		lock = defaultSandboxExecutionLocks
 	}
 	return &sandboxReconciler{engine: options.Engine, store: options.Store, engineIdentityDigest: options.EngineIdentityDigest, cleanupTimeout: options.CleanupTimeout, lock: lock}, nil
 }
@@ -118,6 +128,20 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		for _, resource := range resources {
 			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, ResourceID: resource.ID, Reason: "persisted Engine identity does not match reconciler Engine", Manual: true})
 		}
+		return nil, nil
+	}
+	if controlReader, ok := r.store.(port.SandboxWatchdogReader); ok {
+		control, controlErr := controlReader.GetSandboxWatchdogControl(ctx, execution.ID)
+		if controlErr != nil {
+			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, Reason: fmt.Sprintf("watchdog control evidence unavailable: %v", controlErr), Manual: true})
+			return nil, nil
+		}
+		if controlErr := verifyPersistedWatchdogControl(execution, control); controlErr != nil {
+			report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, Reason: controlErr.Error(), Manual: true})
+			return nil, nil
+		}
+	} else {
+		report.ManualCleanup = append(report.ManualCleanup, domain.SandboxCleanupBlocker{ExecutionID: execution.ID, Reason: "sandbox reconciler store lacks watchdog control evidence reader", Manual: true})
 		return nil, nil
 	}
 	for _, resource := range resources {
@@ -195,6 +219,56 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		}
 	}
 	return resources, nil
+}
+
+// verifyPersistedWatchdogControl validates both the immutable database row
+// and the owner-only control file. Reconciliation must never trust a path or
+// digest merely because it was persisted by a prior process: the file is an
+// independently readable, fsynced envelope whose full execution identity and
+// deadlines must still match the ledger.
+func verifyPersistedWatchdogControl(execution domain.SandboxExecution, control domain.SandboxWatchdogControl) error {
+	if control.ExecutionID != execution.ID || control.ControlID != execution.WatchdogControlRef || control.ProcessRecordRef != execution.WatchdogControlRef {
+		return fmt.Errorf("persisted watchdog control reference differs from sandbox execution")
+	}
+	if control.TokenDigest != execution.WatchdogTokenDigest {
+		return fmt.Errorf("persisted watchdog token digest differs from sandbox execution")
+	}
+	if !filepath.IsAbs(execution.WatchdogControlRef) {
+		return fmt.Errorf("persisted watchdog control reference is not an absolute owner-only path")
+	}
+	data, err := secureReadWatchdogControl(execution.WatchdogControlRef, 1<<20)
+	if err != nil {
+		return fmt.Errorf("read persisted watchdog control: %w", err)
+	}
+	if domain.SumBytes(data) != control.ControlFileDigest {
+		return fmt.Errorf("persisted watchdog control file digest differs from ledger")
+	}
+	envelope, err := watchdogprotocol.ParseEnvelope(data)
+	if err != nil {
+		return fmt.Errorf("parse persisted watchdog control: %w", err)
+	}
+	record := envelope.Record
+	if record.RunID != execution.RunID || record.AttemptID != execution.AttemptID || record.SandboxExecutionID != execution.ID ||
+		record.LogicalOperationID != execution.LogicalOperationID || record.ScopeDigest != execution.ScopeDigest || record.Plan.PlanDigest != execution.PlanDigest ||
+		record.EngineIdentityDigest != execution.EngineIdentityDigest || record.TokenDigest != execution.WatchdogTokenDigest ||
+		!record.SafetyDeadlineUTC.Equal(execution.SafetyDeadlineUTC) {
+		return fmt.Errorf("persisted watchdog envelope identity or deadline differs from sandbox execution")
+	}
+	if envelope.RecordDigest != domainDigestRecord(record) {
+		return fmt.Errorf("persisted watchdog envelope record digest is invalid")
+	}
+	return nil
+}
+
+// domainDigestRecord mirrors watchdog's private canonical record digest. The
+// envelope parser already validates it; this small canonical check only
+// rejects JSON that was altered after the persisted file digest was recorded.
+func domainDigestRecord(record watchdogprotocol.ControlRecord) domain.Digest {
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return ""
+	}
+	return domain.SumBytes(encoded)
 }
 
 var errManualCleanup = errors.New("manual cleanup required")
@@ -297,6 +371,11 @@ func exactResourceLabels(execution domain.SandboxExecution, resource domain.Sand
 	if resource.Kind == "CONTAINER" {
 		if resource.PhysicalCallID == nil || strings.TrimSpace(string(*resource.PhysicalCallID)) == "" {
 			return nil, fmt.Errorf("persisted container resource %s has no physical call identity", resource.ID)
+		}
+		labels["org.cpgen.call"] = string(*resource.PhysicalCallID)
+	} else if resource.Kind == "VOLUME" {
+		if resource.PhysicalCallID == nil || strings.TrimSpace(string(*resource.PhysicalCallID)) == "" {
+			return nil, fmt.Errorf("persisted volume resource %s has no physical call identity", resource.ID)
 		}
 		labels["org.cpgen.call"] = string(*resource.PhysicalCallID)
 	} else {

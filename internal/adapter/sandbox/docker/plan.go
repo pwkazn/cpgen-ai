@@ -193,9 +193,10 @@ func resourceName(nonce string, ordinal int, kind port.ResourceKind, role port.R
 }
 
 // ResourceLabels completes the exact Engine label set after the plan and the
-// per-container call reservation exist. ExpectedLabelsDigest intentionally
-// commits to the pre-plan ownership labels; plan-digest and call are then
-// added without creating a digest cycle.
+// physical call reservation exist. Both containers and volumes carry the
+// physical call identity when a call is supplied. A nil volume call retains
+// the legacy plan-inspection form ("none"); the Runner never uses that form
+// for an actual VolumeCreate.
 func ResourceLabels(identity PlanIdentity, plan port.ContainerPlan, resource port.PlannedResource, callID *domain.AttemptCallID) (map[string]string, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
@@ -216,8 +217,13 @@ func ResourceLabels(identity PlanIdentity, plan port.ContainerPlan, resource por
 	labels["org.cpgen.plan-digest"] = string(plan.PlanDigest)
 	if resource.Kind == port.ResourceContainer {
 		if callID == nil {
-			return nil, fmt.Errorf("container resource requires a call ID")
+			return nil, fmt.Errorf("Engine resource requires a call ID")
 		}
+		if err := callID.Validate(); err != nil {
+			return nil, err
+		}
+		labels["org.cpgen.call"] = string(*callID)
+	} else if resource.Kind == port.ResourceVolume && callID != nil {
 		if err := callID.Validate(); err != nil {
 			return nil, err
 		}

@@ -11,12 +11,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 )
 
 func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, error) {
+	watchdogControlMu.Lock()
+	defer watchdogControlMu.Unlock()
 	if !filepath.IsAbs(base) {
 		return nil, "", "", fmt.Errorf("watchdog control base must be absolute")
+	}
+	if !operationNoncePattern.MatchString(nonce) {
+		return nil, "", "", fmt.Errorf("watchdog control nonce is invalid")
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, "", "", err
@@ -24,8 +31,32 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 	if err := os.Chmod(base, 0o700); err != nil {
 		return nil, "", "", err
 	}
+	if err := validateOwnerOnlyDirectory(base); err != nil {
+		return nil, "", "", err
+	}
 	directory := filepath.Join(base, "watchdog-"+nonce)
 	if err := os.Mkdir(directory, 0o700); err != nil {
+		if !os.IsExist(err) {
+			return nil, "", "", err
+		}
+		// A live listener means the same sealed identity is still owned by
+		// another process. Never remove its directory while trying to replay
+		// the operation; stale-but-unbound socket files are safe to retire.
+		socket := filepath.Join(directory, "control.sock")
+		if conn, dialErr := net.DialTimeout("unix", socket, 50*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			return nil, "", "", fmt.Errorf("watchdog control for this identity is already active")
+		} else if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, syscall.ENOENT) {
+			return nil, "", "", fmt.Errorf("watchdog control socket may be active: %w", dialErr)
+		}
+		if err := removeStaleWatchdogControl(directory); err != nil {
+			return nil, "", "", err
+		}
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			return nil, "", "", err
+		}
+	}
+	if err := validateOwnerOnlyDirectory(directory); err != nil {
 		return nil, "", "", err
 	}
 	address := filepath.Join(directory, "control.sock")
@@ -41,6 +72,65 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 		return nil, "", "", err
 	}
 	return listener, address, directory, nil
+}
+
+// prepareWatchdogControlDirectory applies the platform-neutral owner-only
+// directory policy used by the in-process controller. It exists behind the
+// platform file so portable builds never reference Windows ACL symbols.
+func prepareWatchdogControlDirectory(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("watchdog control directory must be absolute")
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return err
+	}
+	return validateOwnerOnlyDirectory(path)
+}
+
+func validateOwnerOnlyDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("watchdog control directory must be a direct 0700 directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("watchdog control directory owner is not the current user")
+	}
+	return nil
+}
+
+func removeStaleWatchdogControl(directory string) error {
+	if err := validateOwnerOnlyDirectory(directory); err != nil {
+		return fmt.Errorf("refusing unsafe stale watchdog directory: %w", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name != "control.json" && name != "control.sock" {
+			return fmt.Errorf("refusing stale watchdog directory with unexpected entry %q", name)
+		}
+		path := filepath.Join(directory, name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (!info.Mode().IsRegular() && info.Mode()&os.ModeSocket == 0) {
+			return fmt.Errorf("refusing unsafe stale watchdog entry %q", name)
+		}
+		if name == "control.json" && info.Mode().Perm() != 0o600 {
+			return fmt.Errorf("refusing stale watchdog control with unsafe permissions")
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return os.Remove(directory)
 }
 
 func secureWriteWatchdogControl(path string, data []byte) (returnErr error) {
@@ -126,3 +216,5 @@ func cleanupWatchdogControl(directory, controlPath string) error {
 	}
 	return errors.Join(failures...)
 }
+
+var watchdogControlMu sync.Mutex

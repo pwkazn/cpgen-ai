@@ -62,6 +62,7 @@ type dockerWatchdogReconciler struct {
 	engine      Engine
 	mu          sync.Mutex
 	owned       map[string]*ownedContainer
+	ownedVolume map[string]*ownedVolume
 	eventCancel context.CancelFunc
 	eventDone   chan struct{}
 	eventErr    error
@@ -71,7 +72,7 @@ func newDockerWatchdogReconciler(engine Engine) (*dockerWatchdogReconciler, erro
 	if engine == nil {
 		return nil, fmt.Errorf("watchdog Engine is required")
 	}
-	return &dockerWatchdogReconciler{engine: engine, owned: map[string]*ownedContainer{}}, nil
+	return &dockerWatchdogReconciler{engine: engine, owned: map[string]*ownedContainer{}, ownedVolume: map[string]*ownedVolume{}}, nil
 }
 
 func (r *dockerWatchdogReconciler) Begin(ctx context.Context, record watchdogprotocol.ControlRecord) error {
@@ -163,7 +164,7 @@ func (r *dockerWatchdogReconciler) Observe(ctx context.Context, resource port.Pl
 		}
 		actual := inspected.Container.Config
 		foreign := actual == nil || len(expectedLabels) == 0 || !maps.Equal(actual.Labels, expectedLabels) || trimContainerName(inspected.Container.Name) != resource.DeterministicName
-		observation := watchdogprotocol.Observation{Exists: true, ID: inspected.Container.ID, Foreign: foreign}
+		observation := watchdogprotocol.Observation{Exists: true, ID: inspected.Container.ID, Kind: port.ResourceContainer, Foreign: foreign}
 		if inspected.Container.State != nil {
 			observation.Running = inspected.Container.State.Running
 		}
@@ -184,7 +185,16 @@ func (r *dockerWatchdogReconciler) Observe(ctx context.Context, resource port.Pl
 			return watchdogprotocol.Observation{}, err
 		}
 		foreign := len(expectedLabels) == 0 || !maps.Equal(inspected.Volume.Labels, expectedLabels) || inspected.Volume.Name != resource.DeterministicName
-		return watchdogprotocol.Observation{Exists: true, ID: inspected.Volume.Name, Foreign: foreign}, nil
+		observation := watchdogprotocol.Observation{Exists: true, ID: inspected.Volume.Name, Kind: port.ResourceVolume, Foreign: foreign}
+		if !foreign {
+			r.mu.Lock()
+			r.ownedVolume[observation.ID] = &ownedVolume{
+				resource: resource, name: resource.DeterministicName, labels: maps.Clone(expectedLabels), driver: inspected.Volume.Driver,
+				options: maps.Clone(inspected.Volume.Options),
+			}
+			r.mu.Unlock()
+		}
+		return observation, nil
 	default:
 		return watchdogprotocol.Observation{}, fmt.Errorf("watchdog does not support resource kind %q", resource.Kind)
 	}
@@ -196,7 +206,29 @@ func (r *dockerWatchdogReconciler) Stop(ctx context.Context, observation watchdo
 	}
 	r.mu.Lock()
 	owned := r.owned[observation.ID]
+	volume := r.ownedVolume[observation.ID]
 	r.mu.Unlock()
+	if observation.Kind == port.ResourceVolume || (observation.Kind == "" && volume != nil) {
+		if volume == nil {
+			return fmt.Errorf("watchdog has no exact volume ownership evidence for %q", observation.ID)
+		}
+		inspected, err := r.engine.VolumeInspect(ctx, observation.ID, moby.VolumeInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if inspected.Volume.Name != volume.name || !maps.Equal(inspected.Volume.Labels, volume.labels) ||
+			inspected.Volume.Driver != volume.driver || !maps.Equal(inspected.Volume.Options, volume.options) {
+			return fmt.Errorf("watchdog volume ownership changed for %q", observation.ID)
+		}
+		_, err = r.engine.VolumeRemove(ctx, observation.ID, moby.VolumeRemoveOptions{Force: true})
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
 	if owned == nil {
 		return fmt.Errorf("watchdog has no exact ownership evidence for %q", observation.ID)
 	}
@@ -243,12 +275,7 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	cleanupControl := func() error {
 		return cleanupWatchdogControl(controlDir, filepath.Join(controlDir, "control.json"))
 	}
-	if runtime.GOOS == "windows" {
-		if err := applyOwnerOnlyACL(controlDir); err != nil {
-			_ = cleanupControl()
-			return nil, err
-		}
-	} else if err := os.Chmod(controlDir, 0o700); err != nil {
+	if err := prepareWatchdogControlDirectory(controlDir); err != nil {
 		_ = cleanupControl()
 		return nil, err
 	}
@@ -320,7 +347,54 @@ func NewDetachedWatchdogController(options DetachedWatchdogOptions) (*DetachedWa
 
 func (c *DetachedWatchdogController) TokenDigest() domain.Digest { return c.tokenHash }
 
-func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogprotocol.ControlRecord) (WatchdogSession, error) {
+type detachedWatchdogPreparation struct {
+	controller  *DetachedWatchdogController
+	listener    net.Listener
+	address     string
+	controlDir  string
+	controlPath string
+	envelope    watchdogprotocol.Envelope
+	encoded     []byte
+	command     *exec.Cmd
+	mu          sync.Mutex
+	started     bool
+	aborted     bool
+}
+
+func (p *detachedWatchdogPreparation) ControlRecordRef() string {
+	return p.controlPath
+}
+
+func (p *detachedWatchdogPreparation) ControlFileDigest() domain.Digest {
+	return domain.SumBytes(p.encoded)
+}
+
+func (p *detachedWatchdogPreparation) Abort() error {
+	p.mu.Lock()
+	if p.aborted {
+		p.mu.Unlock()
+		return nil
+	}
+	p.aborted = true
+	command := p.command
+	listener := p.listener
+	p.mu.Unlock()
+	var failures []error
+	if command != nil && p.started && command.Process != nil {
+		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			failures = append(failures, err)
+		}
+	}
+	if listener != nil {
+		if err := listener.Close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	failures = append(failures, cleanupWatchdogControl(p.controlDir, p.controlPath))
+	return errors.Join(failures...)
+}
+
+func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdogprotocol.ControlRecord) (PreparedWatchdog, error) {
 	if record.TokenDigest != c.tokenHash || record.EngineEndpoint != c.options.Config.EngineEndpoint || record.EngineIdentityDigest != c.options.EngineIdentity {
 		return nil, fmt.Errorf("watchdog control record does not match the configured controller")
 	}
@@ -329,10 +403,10 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 	if err != nil {
 		return nil, err
 	}
-	defer listener.Close()
 	controlPath := filepath.Join(controlDir, "control.json")
 	envelope, err := watchdogprotocol.NewEnvelope(record, c.token, address)
 	if err != nil {
+		_ = listener.Close()
 		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
@@ -342,10 +416,12 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 	}
 	encoded, err := jsonMarshalEnvelope(envelope)
 	if err != nil {
+		_ = listener.Close()
 		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
 	if err := secureWriteWatchdogControl(controlPath, encoded); err != nil {
+		_ = listener.Close()
 		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
@@ -356,12 +432,38 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 		command = exec.Command(c.options.Executable, "sandbox-watchdog", "--control", controlPath)
 	}
 	if command == nil {
+		_ = listener.Close()
 		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, fmt.Errorf("watchdog command factory returned nil")
 	}
 	detachWatchdogCommand(command)
-	if err := command.Start(); err != nil {
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
 		_ = cleanupWatchdogControl(controlDir, controlPath)
+		return nil, err
+	}
+	return &detachedWatchdogPreparation{controller: c, listener: listener, address: address, controlDir: controlDir, controlPath: controlPath, envelope: envelope, encoded: encoded, command: command}, nil
+}
+
+func (p *detachedWatchdogPreparation) Start(ctx context.Context) (WatchdogSession, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("watchdog start context is required")
+	}
+	p.mu.Lock()
+	if p.aborted {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("watchdog preparation was aborted")
+	}
+	if p.started {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("watchdog preparation was already started")
+	}
+	p.started = true
+	command := p.command
+	listener := p.listener
+	p.mu.Unlock()
+	if err := command.Start(); err != nil {
+		_ = p.Abort()
 		return nil, err
 	}
 	acceptDone := make(chan struct {
@@ -375,31 +477,42 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 			err  error
 		}{conn: conn, err: acceptErr}
 	}()
-	armCtx, cancel := context.WithTimeout(ctx, c.options.ArmTimeout)
+	armCtx, cancel := context.WithTimeout(ctx, p.controller.options.ArmTimeout)
 	defer cancel()
 	var accepted net.Conn
 	select {
 	case result := <-acceptDone:
 		if result.err != nil {
-			_ = command.Process.Kill()
-			_ = cleanupWatchdogControl(controlDir, controlPath)
+			_ = p.Abort()
 			return nil, result.err
 		}
 		accepted = result.conn
 	case <-armCtx.Done():
-		_ = command.Process.Kill()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
+		_ = p.Abort()
 		return nil, armCtx.Err()
 	}
+	_ = listener.Close()
 	_ = command.Process.Release()
-	client, err := watchdogprotocol.NewClient(accepted, c.token, envelope.RecordDigest)
+	client, err := watchdogprotocol.NewClient(accepted, p.controller.token, p.envelope.RecordDigest)
 	if err != nil {
 		_ = accepted.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
+		_ = p.Abort()
 		return nil, err
 	}
-	controlDigest := domain.SumBytes(encoded)
-	return &watchdogSession{client: client, controlRef: controlPath, controlDigest: controlDigest, cleanup: func() error { return cleanupWatchdogControl(controlDir, controlPath) }}, nil
+	return &watchdogSession{client: client, controlRef: p.controlPath, controlDigest: p.ControlFileDigest(), cleanup: func() error { return cleanupWatchdogControl(p.controlDir, p.controlPath) }}, nil
+}
+
+func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogprotocol.ControlRecord) (WatchdogSession, error) {
+	prepared, err := c.Prepare(ctx, record)
+	if err != nil {
+		return nil, err
+	}
+	session, err := prepared.Start(ctx)
+	if err != nil {
+		_ = prepared.Abort()
+		return nil, err
+	}
+	return session, nil
 }
 
 func RunWatchdogService(ctx context.Context, controlPath string) error {

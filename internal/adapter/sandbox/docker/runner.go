@@ -51,6 +51,20 @@ type WatchdogSessionEvidence interface {
 	ControlFileDigest() domain.Digest
 }
 
+// WatchdogPreparer is implemented by controllers which can materialize and
+// fsync the process-owned control envelope before launching a detached child.
+// Keeping this optional preserves the in-process controller and existing
+// lightweight fakes while enforcing the stronger detached startup ordering.
+type WatchdogPreparer interface {
+	Prepare(context.Context, watchdog.ControlRecord) (PreparedWatchdog, error)
+}
+
+type PreparedWatchdog interface {
+	WatchdogSessionEvidence
+	Start(context.Context) (WatchdogSession, error)
+	Abort() error
+}
+
 type ControlLimits struct {
 	HelperMemoryBytes int64
 	HelperPIDs        int64
@@ -258,7 +272,7 @@ func (r *Runner) newOperation(auth port.SandboxDispatchAuthorization) (*operatio
 	return op, nil
 }
 
-func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, controlDigest domain.Digest) error {
+func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, controlDigest domain.Digest, safetyDeadline, cleanupDeadline time.Time) error {
 	stage := domain.StageName("sandbox")
 	if value, ok := op.auth.(interface{ StageName() domain.StageName }); ok && value.StageName() != "" {
 		stage = value.StageName()
@@ -269,6 +283,9 @@ func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, co
 	if err := controlDigest.Validate(); err != nil {
 		return fmt.Errorf("watchdog control file digest: %w", err)
 	}
+	if safetyDeadline.IsZero() || cleanupDeadline.IsZero() || cleanupDeadline.Before(safetyDeadline) || safetyDeadline.Location() != time.UTC || cleanupDeadline.Location() != time.UTC {
+		return fmt.Errorf("watchdog lifecycle deadlines are invalid")
+	}
 	now, err := op.runner.now()
 	if err != nil {
 		return err
@@ -278,7 +295,7 @@ func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, co
 		return fmt.Errorf("sandbox lifecycle reader is required")
 	}
 	if existing, err := reader.GetSandboxExecution(ctx, op.identity.SandboxExecutionID); err == nil {
-		if existing.RunID != op.identity.RunID || existing.AttemptID != op.identity.AttemptID || existing.StageName != stage || existing.LogicalOperationID != op.identity.LogicalOperationID || existing.ScopeDigest != op.auth.ScopeDigest() || existing.PlanDigest != op.plan.PlanDigest || existing.EngineIdentityDigest != op.identity.EngineIdentityDigest || existing.WatchdogControlRef != controlRef || existing.WatchdogTokenDigest != op.runner.watchdog.TokenDigest() {
+		if existing.RunID != op.identity.RunID || existing.AttemptID != op.identity.AttemptID || existing.StageName != stage || existing.LogicalOperationID != op.identity.LogicalOperationID || existing.ScopeDigest != op.auth.ScopeDigest() || existing.PlanDigest != op.plan.PlanDigest || existing.EngineIdentityDigest != op.identity.EngineIdentityDigest || existing.WatchdogControlRef != controlRef || existing.WatchdogTokenDigest != op.runner.watchdog.TokenDigest() || !existing.SafetyDeadlineUTC.Equal(safetyDeadline) || !existing.CleanupDeadlineUTC.Equal(cleanupDeadline) {
 			return fmt.Errorf("persisted SandboxExecution identity differs from authorization")
 		}
 		controlReader, ok := op.runner.lifecycle.(port.SandboxWatchdogReader)
@@ -311,7 +328,7 @@ func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, co
 		op.lifecycleResources[planned.Ordinal] = resource
 	}
 	key := stableSandboxKey("prepare", string(op.identity.SandboxExecutionID), string(op.plan.PlanDigest))
-	execution, err := op.runner.lifecycle.PrepareExecution(ctx, domain.PrepareExecutionRequest{ExecutionID: op.identity.SandboxExecutionID, RunID: op.identity.RunID, AttemptID: op.identity.AttemptID, StageName: stage, LogicalOperationID: op.identity.LogicalOperationID, ScopeDigest: op.auth.ScopeDigest(), PlanDigest: op.plan.PlanDigest, EngineIdentityDigest: op.identity.EngineIdentityDigest, Resources: resources, WatchdogControlRef: controlRef, WatchdogTokenDigest: op.runner.watchdog.TokenDigest(), SafetyDeadlineUTC: now.Add(time.Hour), CleanupDeadlineUTC: now.Add(2 * time.Hour), IdempotencyKey: key, At: now})
+	execution, err := op.runner.lifecycle.PrepareExecution(ctx, domain.PrepareExecutionRequest{ExecutionID: op.identity.SandboxExecutionID, RunID: op.identity.RunID, AttemptID: op.identity.AttemptID, StageName: stage, LogicalOperationID: op.identity.LogicalOperationID, ScopeDigest: op.auth.ScopeDigest(), PlanDigest: op.plan.PlanDigest, EngineIdentityDigest: op.identity.EngineIdentityDigest, Resources: resources, WatchdogControlRef: controlRef, WatchdogTokenDigest: op.runner.watchdog.TokenDigest(), SafetyDeadlineUTC: safetyDeadline, CleanupDeadlineUTC: cleanupDeadline, IdempotencyKey: key, At: now})
 	if err != nil {
 		return err
 	}
@@ -353,6 +370,22 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 			deadline = bounded
 		}
 	}
+	cleanupDeadline := deadline.Add(op.runner.limits.CleanupTimeout).UTC()
+	// On replay, the deadline is part of the sealed execution identity. Read
+	// it before constructing the watchdog envelope so a retry cannot widen or
+	// shorten the safety window merely because wall time advanced.
+	if reader, ok := op.runner.lifecycle.(port.SandboxLifecycleReader); ok {
+		if existing, readErr := reader.GetSandboxExecution(ctx, op.identity.SandboxExecutionID); readErr == nil {
+			if existing.RunID != op.identity.RunID || existing.AttemptID != op.identity.AttemptID || existing.LogicalOperationID != op.identity.LogicalOperationID || existing.ScopeDigest != op.auth.ScopeDigest() || existing.PlanDigest != op.plan.PlanDigest || existing.EngineIdentityDigest != op.identity.EngineIdentityDigest {
+				return fmt.Errorf("persisted SandboxExecution identity differs from authorization")
+			}
+			deadline = existing.SafetyDeadlineUTC
+			cleanupDeadline = existing.CleanupDeadlineUTC
+			now = existing.CreatedAt
+		} else if readErr != nil && !strings.Contains(strings.ToLower(readErr.Error()), "not found") && !strings.Contains(strings.ToLower(readErr.Error()), "does not exist") {
+			return readErr
+		}
+	}
 	if !deadline.After(now) {
 		return fmt.Errorf("watchdog safety envelope is already exhausted")
 	}
@@ -367,6 +400,37 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 	if err := record.Validate(); err != nil {
 		return err
 	}
+	// Detached controllers split preparation from startup. This lets the
+	// owner-only, fsynced control file and its digest commit to SQLite before
+	// any child process can begin cleanup work.
+	if preparer, ok := op.runner.watchdog.(WatchdogPreparer); ok {
+		prepared, err := preparer.Prepare(ctx, record)
+		if err != nil {
+			return err
+		}
+		if prepared == nil {
+			return fmt.Errorf("watchdog Prepare returned no handle")
+		}
+		if err := op.prepareLifecycle(ctx, prepared.ControlRecordRef(), prepared.ControlFileDigest(), record.SafetyDeadlineUTC, cleanupDeadline); err != nil {
+			_ = prepared.Abort()
+			return err
+		}
+		session, err := prepared.Start(ctx)
+		if err != nil {
+			_ = prepared.Abort()
+			return err
+		}
+		if session == nil {
+			_ = prepared.Abort()
+			return fmt.Errorf("watchdog Start returned no session")
+		}
+		op.watchdog = session
+		return nil
+	}
+
+	// In-process controllers intentionally retain their existing single-call
+	// behavior. They still commit the exact envelope evidence immediately
+	// after Arm, before the first resource Create.
 	session, err := op.runner.watchdog.Arm(ctx, record)
 	if err != nil {
 		return err
@@ -380,7 +444,7 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 		_ = session.Close()
 		return fmt.Errorf("watchdog session did not provide durable control evidence")
 	}
-	if err := op.prepareLifecycle(ctx, evidence.ControlRecordRef(), evidence.ControlFileDigest()); err != nil {
+	if err := op.prepareLifecycle(ctx, evidence.ControlRecordRef(), evidence.ControlFileDigest(), record.SafetyDeadlineUTC, cleanupDeadline); err != nil {
 		_ = session.Close()
 		return err
 	}
@@ -944,10 +1008,6 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 		if resource.Kind != port.ResourceVolume {
 			continue
 		}
-		labels, err := ResourceLabels(op.identity, op.plan, resource, nil)
-		if err != nil {
-			return err
-		}
 		driverOptions := map[string]string(nil)
 		if resource.Role == port.ResourceOutput {
 			if outputBytes <= 0 {
@@ -955,12 +1015,20 @@ func (op *operation) createVolumes(ctx context.Context, outputBytes int64) error
 			}
 			driverOptions = outputVolumeOptions(outputBytes)
 		}
-		owned := &ownedVolume{resource: resource, name: resource.DeterministicName, labels: maps.Clone(labels), driver: "local", options: maps.Clone(driverOptions)}
+		// Retain the planned volume before claiming its physical call. If
+		// claiming or dispatch authorization fails, finish() must settle this
+		// exact row as NO_CREATE without inspecting Docker.
+		owned := &ownedVolume{resource: resource, name: resource.DeterministicName, driver: "local", options: maps.Clone(driverOptions)}
 		op.volumes = append(op.volumes, owned)
 		callID, claimed, err := op.claimVolume(ctx, resource)
 		if err != nil {
 			return err
 		}
+		labels, err := ResourceLabels(op.identity, op.plan, resource, &callID)
+		if err != nil {
+			return err
+		}
+		owned.labels = maps.Clone(labels)
 		if err := op.lifecycleBeginCreate(ctx, resource, maps.Clone(labels), &callID); err != nil {
 			return err
 		}
@@ -1307,7 +1375,11 @@ func (op *operation) finish() error {
 			failures = append(failures, fmt.Errorf("sandbox cleanup proof recorder is required"))
 		} else {
 			for ordinal, resource := range op.lifecycleResources {
-				if resource.Phase == domain.SandboxResourcePlanned {
+				// No Docker operation can have crossed the external boundary
+				// while a resource is PLANNED or CREATING. This includes a
+				// failed physical claim/BeginDispatch after the CREATING CAS.
+				// Settle those rows as NO_CREATE without an Engine inspect.
+				if resource.Phase == domain.SandboxResourcePlanned || resource.Phase == domain.SandboxResourceCreating {
 					updated, interruptErr := proofs.RecordResourceInterrupted(cleanupCtx, domain.RecordResourceInterruptedCommand{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, ReasonDigest: domain.SumBytes([]byte("cpgen.no-create/v1\n" + string(resource.ID))), At: stableLifecycleTime(resource.CreatedAt, "interrupt")})
 					if interruptErr != nil {
 						failures = append(failures, interruptErr)

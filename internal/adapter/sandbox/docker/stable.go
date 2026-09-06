@@ -57,7 +57,15 @@ func stableLifecycleTime(base time.Time, phase string) time.Time {
 }
 
 func stableControlNonce(record watchdog.ControlRecord) string {
-	return stableHex(string(record.Plan.PlanDigest), record.LogicalOperationID, string(record.EngineIdentityDigest))
+	// The control path is an authorization boundary, not merely a plan cache
+	// key. Bind every field of the sealed execution identity so two attempts or
+	// scopes can never address the same detached watchdog directory.
+	return stableHex(
+		"cpgen.watchdog-control/v2",
+		string(record.RunID), string(record.AttemptID), string(record.SandboxExecutionID),
+		record.LogicalOperationID, string(record.ScopeDigest), string(record.Plan.PlanDigest),
+		string(record.EngineIdentityDigest),
+	)
 }
 
 func stableHex(values ...string) string {

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/Microsoft/go-winio"
@@ -19,8 +20,13 @@ import (
 )
 
 func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, error) {
+	watchdogControlMu.Lock()
+	defer watchdogControlMu.Unlock()
 	if !filepath.IsAbs(base) {
 		return nil, "", "", fmt.Errorf("watchdog control base must be absolute")
+	}
+	if !operationNoncePattern.MatchString(nonce) {
+		return nil, "", "", fmt.Errorf("watchdog control nonce is invalid")
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, "", "", err
@@ -28,11 +34,32 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 	if err := applyOwnerOnlyACL(base); err != nil {
 		return nil, "", "", err
 	}
-	directory := filepath.Join(base, "watchdog-"+nonce)
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if info, err := os.Lstat(base); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err == nil {
+			err = fmt.Errorf("watchdog control base must be a direct directory")
+		}
 		return nil, "", "", err
 	}
+	directory := filepath.Join(base, "watchdog-"+nonce)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		if !os.IsExist(err) {
+			return nil, "", "", err
+		}
+		if err := removeStaleWatchdogControl(directory); err != nil {
+			return nil, "", "", err
+		}
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			return nil, "", "", err
+		}
+	}
 	if err := applyOwnerOnlyACL(directory); err != nil {
+		_ = os.Remove(directory)
+		return nil, "", "", err
+	}
+	if info, err := os.Lstat(directory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err == nil {
+			err = fmt.Errorf("watchdog control directory must be a direct directory")
+		}
 		_ = os.Remove(directory)
 		return nil, "", "", err
 	}
@@ -50,6 +77,46 @@ func prepareWatchdogControl(base, nonce string) (net.Listener, string, string, e
 		return nil, "", "", err
 	}
 	return listener, address, directory, nil
+}
+
+func prepareWatchdogControlDirectory(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("watchdog control directory must be absolute")
+	}
+	if err := applyOwnerOnlyACL(path); err != nil {
+		return err
+	}
+	return validateOwnerOnlyACL(path)
+}
+
+func removeStaleWatchdogControl(directory string) error {
+	if err := validateOwnerOnlyACL(directory); err != nil {
+		return fmt.Errorf("refusing unsafe stale watchdog directory: %w", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() != "control.json" {
+			return fmt.Errorf("refusing stale watchdog directory with unexpected entry %q", entry.Name())
+		}
+		path := filepath.Join(directory, entry.Name())
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing unsafe stale watchdog entry %q", entry.Name())
+		}
+		if err := validateOwnerOnlyACL(path); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return os.Remove(directory)
 }
 
 func secureWriteWatchdogControl(path string, data []byte) (returnErr error) {
@@ -194,3 +261,5 @@ func cleanupWatchdogControl(directory, controlPath string) error {
 	}
 	return errors.Join(failures...)
 }
+
+var watchdogControlMu sync.Mutex

@@ -449,9 +449,10 @@ func (c RecordResourceCleanedCommand) Validate() error {
 	return c.EvidenceDigest.Validate()
 }
 
-// RecordResourceInterrupted is used only for a planned resource for which no
-// external create was authorized. It still records a deterministic reason
-// digest and cannot be reached through the arbitrary phase command.
+// RecordResourceInterrupted is used for a resource before any external create
+// was authorized. It covers PLANNED and CREATING rows when claim/dispatch
+// failed, and records a deterministic reason digest instead of consulting the
+// Engine. It cannot be reached through the arbitrary phase command.
 type RecordResourceInterruptedCommand struct {
 	ExecutionID     SandboxExecutionID `json:"execution_id"`
 	ResourceID      SandboxResourceID  `json:"resource_id"`
