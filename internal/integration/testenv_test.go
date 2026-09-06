@@ -68,6 +68,57 @@ func openIntegrationApp(t *testing.T, env integrationEnvironment) *application.A
 	return app
 }
 
+// openIntegrationRecoveryApp composes the same SQLite/blob/lock application
+// as Bootstrap, but wires the durable adapter recovery hook into the public
+// RunService.Resume path. The child process only leaves committed state; it
+// never repairs that state itself before being killed.
+func openIntegrationRecoveryApp(t *testing.T, env integrationEnvironment, boundary string) *application.Application {
+	t.Helper()
+	app := openIntegrationApp(t, env)
+	recovery := integrationRecovery{runtime: app.Runtime, config: env.cfg, boundary: boundary}
+	return replaceIntegrationRecovery(t, env, app, recovery)
+}
+
+func replaceIntegrationRecovery(t *testing.T, env integrationEnvironment, app *application.Application, recovery application.RunRecovery) *application.Application {
+	t.Helper()
+	pipeline, err := workflow.NewSlice1Pipeline(
+		fake.NewPrepareStep(workflow.PrepareCapabilities{}),
+		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
+		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewRunService(application.RunServiceConfig{
+		Runtime: app.Runtime, Reviews: app.Reviews, Locks: app.Locks, Clock: clock.Real{}, Pipeline: pipeline,
+		ActiveTimeInterval: env.cfg.Runtime.AccountingHeartbeat, Recovery: recovery,
+		Scenario: "review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Runs = service
+	return app
+}
+
+type integrationRecovery struct {
+	runtime  port.RuntimeStore
+	config   config.Config
+	boundary string
+}
+
+func (r integrationRecovery) RecoverRun(ctx context.Context, runID domain.RunID) error {
+	if isArtifactCrashBoundary(r.boundary) && r.boundary != "occurrence_commit" {
+		return recoverArtifactAfterCrash(ctx, r.runtime, r.config, runID, r.boundary)
+	}
+	if r.boundary == "sandbox_resource" {
+		return recoverSandboxAfterCrash(ctx, r.runtime, runID)
+	}
+	return nil
+}
+
+var _ application.RunRecovery = integrationRecovery{}
+
 func integrationRequest() domain.RunRequest {
 	return domain.RunRequest{
 		SchemaVersion: "cpgen.request/v1", Mode: "offline", Brief: "integration A+B",
@@ -133,16 +184,17 @@ func TestSlice1IntegrationHelper(t *testing.T) {
 	defer app.Close()
 
 	if strings.HasPrefix(action, "block-") {
-		// Each named adapter boundary is represented by the same durable
-		// dispatching point: the SQL transaction has committed the call and
-		// budget reservation before the external adapter is allowed to block.
-		// The parent force-kills this process, then proves another SQLite
-		// connection can make progress on a different run.
 		if err := runBoundaryUntil(context.Background(), app, env, runID, "dispatching"); err != nil {
 			t.Fatal(err)
 		}
-		fmt.Fprintf(os.Stdout, "READY %s\n", action)
-		select {}
+		// The durable dispatch transaction is closed before the named adapter
+		// is entered. Each adapter below is a real blocking call site in the
+		// child process, rather than a sleep after READY; the parent can now
+		// kill the owner while an external operation is genuinely in flight.
+		if err := blockExternalAdapter(context.Background(), strings.TrimPrefix(action, "block-")); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
 
 	if strings.HasPrefix(action, "crash-") {
@@ -153,6 +205,33 @@ func TestSlice1IntegrationHelper(t *testing.T) {
 		select {}
 	}
 	t.Fatalf("unknown integration helper action %q", action)
+}
+
+type blockingExternalAdapter struct {
+	name string
+}
+
+// Block is the integration equivalent of the network/Docker/blob/watchdog
+// and reconciliation calls. It is deliberately invoked only after
+// runBoundaryUntil has committed the call, dispatch, and budget rows. A
+// second process can therefore exercise SQLite while this external call is
+// blocked, proving that no write transaction spans adapter I/O.
+func (a blockingExternalAdapter) Block(ctx context.Context) error {
+	fmt.Fprintf(os.Stdout, "READY block-%s\n", a.name)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-make(chan struct{}):
+		return nil
+	}
+}
+
+func blockExternalAdapter(ctx context.Context, name string) error {
+	valid := map[string]bool{"network": true, "docker": true, "blob": true, "watchdog": true, "reconciler": true}
+	if !valid[name] {
+		return fmt.Errorf("unknown blocking external adapter %q", name)
+	}
+	return blockingExternalAdapter{name: name}.Block(ctx)
 }
 
 type blockingPrepareStep struct {
@@ -372,8 +451,8 @@ func runSandboxBoundary(ctx context.Context, cfg config.Config, runtimeStore por
 	return err
 }
 
-func recoverSandboxAfterCrash(ctx context.Context, app *application.Application, runID domain.RunID) error {
-	store, ok := app.Runtime.(sandboxLifecycleStore)
+func recoverSandboxAfterCrash(ctx context.Context, runtimeStore port.RuntimeStore, runID domain.RunID) error {
+	store, ok := runtimeStore.(sandboxLifecycleStore)
 	if !ok {
 		return errors.New("bootstrap runtime does not expose sandbox lifecycle store")
 	}
@@ -486,6 +565,17 @@ func runArtifactBoundary(ctx context.Context, cfg config.Config, ledger port.Cal
 	if err != nil {
 		return domain.PendingArtifact{}, err
 	}
+	grant, err := ledger.BeginDispatch(ctx, domain.BeginDispatchRequest{
+		RunID: runID, ExpectedRunVersion: expectedVersion, StageName: "prepare", AttemptID: attemptID,
+		CallRecordID: call.ID, AttemptCallID: integrationArtifactAttemptCallID,
+		IdempotencyKey: "artifact_dispatch_00000000000000000000000000000001", At: now.Add(11 * time.Microsecond),
+	})
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	if err := ledger.MarkSent(ctx, grant, now.Add(12*time.Microsecond)); err != nil {
+		return domain.PendingArtifact{}, err
+	}
 	declaration := domain.ArtifactDeclarationRecord{
 		ID: integrationArtifactDeclarationID, RunID: runID, StageName: "prepare", AttemptID: attemptID,
 		CallRecordID: call.ID, AttemptCallID: integrationArtifactAttemptCallID, ReservationID: integrationArtifactReservationID,
@@ -557,16 +647,15 @@ func integrationArtifactContent(boundary string) []byte {
 	return []byte("integration durable artifact evidence:" + boundary + "\n")
 }
 
-// recoverArtifactAfterCrash completes the exact public adapter transitions
-// left by a kill at SEALED, PUBLISHED, or READY. It is invoked before the
-// normal application resume so the test can assert both filesystem and ledger
-// ownership are converged without using SQL internals.
-func recoverArtifactAfterCrash(ctx context.Context, app *application.Application, cfg config.Config, runID domain.RunID, boundary string) error {
-	ledger, ok := app.Runtime.(port.CallLedger)
+// recoverArtifactAfterCrash reopens the exact public adapter transitions left
+// by a killed owner. It is called by integrationRecovery from RunService's
+// public Resume path, never by the child before it is killed.
+func recoverArtifactAfterCrash(ctx context.Context, runtimeStore port.RuntimeStore, cfg config.Config, runID domain.RunID, boundary string) error {
+	ledger, ok := runtimeStore.(port.CallLedger)
 	if !ok {
 		return errors.New("bootstrap runtime does not expose call ledger")
 	}
-	artifactLedger, ok := app.Runtime.(port.ArtifactLedger)
+	artifactLedger, ok := runtimeStore.(port.ArtifactLedger)
 	if !ok {
 		return errors.New("bootstrap runtime does not expose artifact ledger")
 	}
@@ -587,7 +676,6 @@ func recoverArtifactAfterCrash(ctx context.Context, app *application.Application
 	if err != nil {
 		return err
 	}
-	var ref domain.BlobRef
 	switch token.State {
 	case domain.ArtifactWriterPrepared:
 		if err := artifactLedger.OpenArtifactWriter(ctx, token.ID); err != nil {
@@ -613,7 +701,6 @@ func recoverArtifactAfterCrash(ctx context.Context, app *application.Application
 		if err := artifactLedger.FinalizeArtifact(ctx, token.ID, pending.Blob); err != nil {
 			return err
 		}
-		ref = pending.Blob
 	case domain.ArtifactWriterSealed:
 		if token.Blob == nil {
 			return errors.New("SEALED artifact token has no blob")
@@ -628,26 +715,45 @@ func recoverArtifactAfterCrash(ctx context.Context, app *application.Application
 		if err := artifactLedger.FinalizeArtifact(ctx, token.ID, *token.Blob); err != nil {
 			return err
 		}
-		ref = *token.Blob
 	case domain.ArtifactWriterFinalized:
 		if token.Blob == nil {
 			return errors.New("FINALIZED artifact token has no blob")
 		}
-		ref = *token.Blob
 	default:
 		return fmt.Errorf("unexpected artifact token state %q after %s crash", token.State, boundary)
 	}
-	runtimeStore, ok := app.Runtime.(port.RuntimeStore)
-	if !ok {
-		return errors.New("bootstrap runtime does not expose runtime store")
+	if len(prepared.PhysicalCalls) != 1 {
+		return fmt.Errorf("artifact recovery loaded %d physical calls, want 1", len(prepared.PhysicalCalls))
 	}
-	pending := domain.PendingArtifact{Blob: ref, MediaType: declaration.MediaType, Role: declaration.Role, LogicalPath: declaration.LogicalPath, CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID, PhysicalNewBytes: ref.Size, Provenance: declaration.Provenance}
-	output := domain.SumBytes([]byte("integration prepare output"))
-	_, err = runtimeStore.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: prepared.Call.AttemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, Occurrences: []domain.PendingOccurrence{{Kind: domain.PendingOccurrenceNewWrite, NewWrite: &pending}}, IdempotencyKey: "artifact_occurrence_00000000000000000000000000000001", At: time.Now().UTC()})
-	return err
+	physical := prepared.PhysicalCalls[0]
+	if physical.State == domain.PhysicalDispatching || physical.State == domain.PhysicalSent {
+		if err := ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{
+			RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: prepared.Call.AttemptID,
+			CallRecordID: prepared.Call.ID, AttemptCallID: physical.ID, State: domain.PhysicalUnknown,
+			Outcome: domain.PhysicalOutcomeUnknown, Failure: &domain.PortFailure{Code: domain.FailureBoundaryUnknown, Class: domain.FailureUnknown},
+			IdempotencyKey: "artifact_unknown_00000000000000000000000000000001", At: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	prepared, err = ledger.LoadCall(ctx, integrationArtifactCallRecordID)
+	if err != nil {
+		return err
+	}
+	if prepared.Call.State != domain.CallRecordTerminal {
+		_, err = ledger.FinishCall(ctx, domain.FinishCallRequest{
+			RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: prepared.Call.AttemptID,
+			CallRecordID: prepared.Call.ID, DispatchKind: domain.DispatchDispatched, ResultAttemptCallID: &physical.ID,
+			IdempotencyKey: "artifact_finish_00000000000000000000000000000001", At: time.Now().UTC(),
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func assertArtifactRecovered(t *testing.T, app *application.Application, cfg config.Config, runID domain.RunID) {
+func assertArtifactRecovered(t *testing.T, app *application.Application, cfg config.Config, runID domain.RunID, boundary string) {
 	t.Helper()
 	callLedger, ok := app.Runtime.(port.CallLedger)
 	if !ok {
@@ -660,8 +766,15 @@ func assertArtifactRecovered(t *testing.T, app *application.Application, cfg con
 	if len(prepared.PhysicalCalls) != 1 || prepared.PhysicalCalls[0].ID != integrationArtifactAttemptCallID {
 		t.Fatalf("recovered artifact physical calls = %+v, want one immutable call", prepared.PhysicalCalls)
 	}
-	if len(prepared.Reservations) != 1 || prepared.Reservations[0].State != domain.ReservationSettled || prepared.Reservations[0].SettledValue == nil {
-		t.Fatalf("recovered artifact reservations = %+v, want one settled reservation", prepared.Reservations)
+	if len(prepared.Reservations) != 1 {
+		t.Fatalf("recovered artifact reservations = %+v, want one reservation", prepared.Reservations)
+	}
+	if boundary == "occurrence_commit" {
+		if prepared.PhysicalCalls[0].State != domain.PhysicalSent || prepared.Reservations[0].State != domain.ReservationSettled || prepared.Reservations[0].SettledValue == nil {
+			t.Fatalf("committed artifact physical state = %s reservations = %+v", prepared.PhysicalCalls[0].State, prepared.Reservations)
+		}
+	} else if prepared.PhysicalCalls[0].State != domain.PhysicalUnknown || prepared.Reservations[0].State != domain.ReservationSettled || prepared.Reservations[0].SettledValue == nil || *prepared.Reservations[0].SettledValue != prepared.Reservations[0].UpperBound {
+		t.Fatalf("recovered artifact physical state = %s reservations = %+v, want UNKNOWN/upper-bound SETTLED", prepared.PhysicalCalls[0].State, prepared.Reservations)
 	}
 	artifactLedger, ok := app.Runtime.(port.ArtifactLedger)
 	if !ok {
@@ -671,8 +784,15 @@ func assertArtifactRecovered(t *testing.T, app *application.Application, cfg con
 	if err != nil {
 		t.Fatalf("read recovered artifact token: %v", err)
 	}
-	if token.State != domain.ArtifactWriterFinalized || token.Blob == nil {
-		t.Fatalf("recovered artifact token = %+v, want FINALIZED with blob", token)
+	if token.Blob == nil {
+		t.Fatalf("recovered artifact token = %+v, want a blob", token)
+	}
+	if boundary == "occurrence_commit" {
+		if token.State != domain.ArtifactWriterFinalized {
+			t.Fatalf("committed artifact token = %+v, want FINALIZED", token)
+		}
+	} else if token.State != domain.ArtifactWriterReleased {
+		t.Fatalf("recovered artifact token = %+v, want RELEASED", token)
 	}
 	store, err := blob.NewStore(cfg.Paths.Artifacts)
 	if err != nil {
@@ -695,11 +815,15 @@ func assertArtifactRecovered(t *testing.T, app *application.Application, cfg con
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occurrences) != 1 {
-		t.Fatalf("recovered artifact occurrences = %d, want 1", len(occurrences))
-	}
-	if occurrences[0].Blob != *token.Blob || occurrences[0].LogicalPath != declaration.LogicalPath {
-		t.Fatalf("recovered artifact occurrence = %+v, token = %+v declaration = %+v", occurrences[0], *token.Blob, declaration)
+	if boundary == "occurrence_commit" {
+		if len(occurrences) != 1 {
+			t.Fatalf("recovered artifact occurrences = %d, want 1", len(occurrences))
+		}
+		if occurrences[0].Blob != *token.Blob || occurrences[0].LogicalPath != declaration.LogicalPath {
+			t.Fatalf("recovered artifact occurrence = %+v, token = %+v declaration = %+v", occurrences[0], *token.Blob, declaration)
+		}
+	} else if len(occurrences) != 0 {
+		t.Fatalf("uncommitted artifact occurrences = %d, want 0", len(occurrences))
 	}
 	budgetReader, ok := app.Runtime.(interface {
 		BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
@@ -711,7 +835,12 @@ func assertArtifactRecovered(t *testing.T, app *application.Application, cfg con
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRemaining := integrationRequest().BudgetLimits.MaxArtifactBytes - token.Blob.Size
+	wantRemaining := integrationRequest().BudgetLimits.MaxArtifactBytes
+	if boundary == "occurrence_commit" {
+		wantRemaining -= token.Blob.Size
+	} else {
+		wantRemaining -= prepared.Reservations[0].UpperBound
+	}
 	if got := budget.Remaining[domain.BudgetArtifactPhysicalNewBytes]; got != wantRemaining {
 		t.Fatalf("artifact budget remaining = %d, want %d after one settlement", got, wantRemaining)
 	}

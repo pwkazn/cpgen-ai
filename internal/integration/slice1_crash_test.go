@@ -27,20 +27,10 @@ func TestSlice1CrashDurableBoundariesConvergeAfterForceKill(t *testing.T) {
 			helper := startIntegrationHelper(t, env, "crash-"+boundary, runID)
 			helper.kill(t)
 
-			app := openIntegrationApp(t, env)
-			if boundary == "blob_sealed" || boundary == "blob_published" || boundary == "blob_ready" {
-				if err := recoverArtifactAfterCrash(context.Background(), app, env.cfg, runID, boundary); err != nil {
-					t.Fatalf("recover artifact after %s: %v", boundary, err)
-				}
-			}
-			if boundary == "sandbox_resource" {
-				if err := recoverSandboxAfterCrash(context.Background(), app, runID); err != nil {
-					t.Fatalf("recover sandbox after %s: %v", boundary, err)
-				}
-			}
-			// Resume through the real application service. It must repair an
-			// interrupted attempt, not continue a stale occurrence or mint a
-			// second physical identity.
+			// Resume through the real application service. Its durable recovery
+			// hook reopens the filesystem/SQLite boundary while the public Resume
+			// lock is held; the killed helper never repairs rows in advance.
+			app := openIntegrationRecoveryApp(t, env, boundary)
 			snapshot, err := app.Runs.Resume(context.Background(), runID)
 			if err != nil {
 				t.Fatalf("resume after %s: %v", boundary, err)
@@ -49,7 +39,7 @@ func TestSlice1CrashDurableBoundariesConvergeAfterForceKill(t *testing.T) {
 				t.Fatalf("resume after %s = %+v, want NEEDS_REVIEW", boundary, snapshot)
 			}
 			if isArtifactCrashBoundary(boundary) {
-				assertArtifactRecovered(t, app, env.cfg, runID)
+				assertArtifactRecovered(t, app, env.cfg, runID, boundary)
 			}
 			if boundary == "sandbox_resource" {
 				assertSandboxRecovered(t, app, runID)

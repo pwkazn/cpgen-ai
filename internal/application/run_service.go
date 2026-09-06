@@ -27,6 +27,15 @@ type SandboxReconciler interface {
 	ReconcileRun(context.Context, domain.RunID) (domain.SandboxReconcileReport, error)
 }
 
+// RunRecovery is the narrow restart hook used by durable adapters that have
+// their own persisted boundary state (for example an artifact writer). It is
+// invoked from Resume while the run lock is held, before the interrupted
+// stage is reset. Implementations must only replay or settle already durable
+// identities; they must never plan new work.
+type RunRecovery interface {
+	RecoverRun(context.Context, domain.RunID) error
+}
+
 // ErrCleanupPending means the exact external sandbox resources are still
 // unresolved. It is deliberately separate from a generic host failure so the
 // CLI can report exit code 10 while preserving the RUNNING projection.
@@ -54,6 +63,7 @@ type RunServiceConfig struct {
 	Clock              clock.Clock
 	ActiveTimeInterval time.Duration
 	Reconciler         SandboxReconciler
+	Recovery           RunRecovery
 	// EffectiveConfigJSON and EffectiveConfigDigest bind every newly created
 	// run to the validated, redacted configuration that composed this service.
 	// They are optional for direct unit-test composition; in that case Generate
@@ -71,6 +81,7 @@ type LocalRunService struct {
 	clock                 clock.Clock
 	active                *ActiveTime
 	reconciler            SandboxReconciler
+	recovery              RunRecovery
 	effectiveConfigJSON   []byte
 	effectiveConfigDigest domain.Digest
 	scenario              string
@@ -92,7 +103,7 @@ func NewRunService(config RunServiceConfig) (*LocalRunService, error) {
 	if err != nil {
 		return nil, err
 	}
-	service := &LocalRunService{runtime: config.Runtime, reviews: config.Reviews, locks: config.Locks, pipeline: config.Pipeline, clock: config.Clock, active: active, reconciler: config.Reconciler, attempts: make(map[domain.RunID]domain.AttemptID), scenario: config.Scenario}
+	service := &LocalRunService{runtime: config.Runtime, reviews: config.Reviews, locks: config.Locks, pipeline: config.Pipeline, clock: config.Clock, active: active, reconciler: config.Reconciler, recovery: config.Recovery, attempts: make(map[domain.RunID]domain.AttemptID), scenario: config.Scenario}
 	if len(config.EffectiveConfigJSON) != 0 || config.EffectiveConfigDigest != "" {
 		if len(config.EffectiveConfigJSON) == 0 || config.EffectiveConfigDigest == "" {
 			return nil, errors.New("effective config JSON and digest must be supplied together")
@@ -683,6 +694,11 @@ func (s *LocalRunService) cancelPoller(ctx context.Context, runID domain.RunID, 
 }
 
 func (s *LocalRunService) recoverRunning(ctx context.Context, snapshot domain.RunSnapshot) (domain.RunSnapshot, error) {
+	if s.recovery != nil {
+		if err := s.recovery.RecoverRun(ctx, snapshot.RunID); err != nil {
+			return snapshot, err
+		}
+	}
 	if s.reconciler != nil {
 		report, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID)
 		if err != nil {

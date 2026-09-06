@@ -571,6 +571,13 @@ func (s *Store) InterruptStage(ctx context.Context, command domain.InterruptStag
 			WHERE run_id = ? AND stage_name = ?`, formatTime(command.At), string(command.RunID), string(command.StageName)); err != nil {
 			return err
 		}
+		// A force-killed owner may have durably sealed or finalized an artifact
+		// before the stage interruption was recorded. Release that exact writer
+		// token and pin in the same short transaction; otherwise Resume would
+		// leave a writer/pin leak even though the interrupted attempt is gone.
+		if err := releasePendingArtifactTokens(ctx, tx, command.RunID, command.StageName, command.AttemptID, command.At); err != nil {
+			return err
+		}
 		newVersion := run.Version + 1
 		if _, err := tx.ExecContext(ctx, `UPDATE runs SET state = 'CREATED', version = ?, updated_at = ? WHERE run_id = ?`,
 			newVersion, formatTime(command.At), string(command.RunID)); err != nil {
