@@ -575,12 +575,23 @@ type BeginResourceCreate struct {
 	ExecutionID     SandboxExecutionID `json:"execution_id"`
 	ResourceID      SandboxResourceID  `json:"resource_id"`
 	ExpectedVersion int64              `json:"expected_version"`
-	IdempotencyKey  string             `json:"idempotency_key"`
-	At              time.Time          `json:"at"`
+	// PhysicalCallID identifies the prepared call which may cross the
+	// external resource boundary. It is optional while entering CREATING for
+	// compatibility with older callers, but must be persisted before
+	// DISPATCHING is recorded.
+	PhysicalCallID *AttemptCallID `json:"physical_call_id,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	At             time.Time      `json:"at"`
 }
 
 func (r BeginResourceCreate) Validate() error {
-	return validateSandboxResourceCommand(r.ExecutionID, r.ResourceID, r.ExpectedVersion, r.IdempotencyKey, r.At)
+	if err := validateSandboxResourceCommand(r.ExecutionID, r.ResourceID, r.ExpectedVersion, r.IdempotencyKey, r.At); err != nil {
+		return err
+	}
+	if r.PhysicalCallID != nil {
+		return r.PhysicalCallID.Validate()
+	}
+	return nil
 }
 
 type PreCreateRequest struct {

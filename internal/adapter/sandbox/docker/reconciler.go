@@ -260,6 +260,9 @@ func validatePersistedResourceIdentity(execution domain.SandboxExecution, resour
 	if resource.EngineIdentityDigest != execution.EngineIdentityDigest {
 		return fmt.Errorf("persisted resource %s Engine identity does not match execution", resource.ID)
 	}
+	if resource.Kind == "VOLUME" && strings.TrimSpace(resource.EngineResourceID) != "" && resource.EngineResourceID != resource.DeterministicName {
+		return fmt.Errorf("persisted volume resource %s Engine identity does not match sealed deterministic name", resource.ID)
+	}
 	if resource.Phase == domain.SandboxResourcePlanned || resource.Phase == domain.SandboxResourceInterrupted {
 		return nil
 	}
@@ -362,7 +365,7 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		if labelErr != nil {
 			return resource, false, fmt.Errorf("%w: %v", errManualCleanup, labelErr)
 		}
-		if inspected.Volume.Name != resource.EngineResourceID || !maps.Equal(inspected.Volume.Labels, expectedLabels) || digestLabels(inspected.Volume.Labels) != resource.LabelsDigest {
+		if inspected.Volume.Name != resource.EngineResourceID || inspected.Volume.Name != resource.DeterministicName || !maps.Equal(inspected.Volume.Labels, expectedLabels) || digestLabels(inspected.Volume.Labels) != resource.LabelsDigest {
 			return resource, false, fmt.Errorf("%w: volume identity or labels mismatch", errManualCleanup)
 		}
 		if _, err := r.engine.VolumeRemove(ctx, resource.EngineResourceID, moby.VolumeRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {

@@ -56,17 +56,6 @@ func stableLifecycleTime(base time.Time, phase string) time.Time {
 	return base.UTC().Add(offset)
 }
 
-func stableExecutionTime(values ...string) time.Time {
-	h := sha256.New()
-	for _, value := range values {
-		_, _ = h.Write([]byte(value))
-		h.Write([]byte{0})
-	}
-	sum := h.Sum(nil)
-	seconds := int64(binary.BigEndian.Uint32(sum[:4]) % (365 * 24 * 60 * 60))
-	return time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(seconds) * time.Second)
-}
-
 func stableControlNonce(record watchdog.ControlRecord) string {
 	return stableHex(string(record.Plan.PlanDigest), record.LogicalOperationID, string(record.EngineIdentityDigest))
 }

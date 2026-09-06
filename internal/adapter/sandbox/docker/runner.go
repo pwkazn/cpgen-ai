@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
@@ -75,6 +76,10 @@ type RunnerOptions struct {
 	Limits               ControlLimits
 	Lifecycle            port.SandboxLifecycleRecorder
 	CallLedger           port.CallLedger
+	// Clock supplies the persisted operation time. Replays use the timestamp
+	// already sealed in SandboxExecution; new executions use this clock rather
+	// than a synthetic far-future timestamp.
+	Clock clock.Clock
 }
 
 type Runner struct {
@@ -88,6 +93,7 @@ type Runner struct {
 	limits         ControlLimits
 	lifecycle      port.SandboxLifecycleRecorder
 	callLedger     port.CallLedger
+	clock          clock.Clock
 }
 
 func NewRunner(options RunnerOptions) (*Runner, error) {
@@ -112,6 +118,9 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	if err := options.Limits.Validate(); err != nil {
 		return nil, err
 	}
+	if options.Clock == nil {
+		options.Clock = clock.Real{}
+	}
 	encoded, err := options.Lock.MarshalIndent()
 	if err != nil {
 		return nil, err
@@ -123,8 +132,19 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	return &Runner{
 		engine: options.Engine, config: options.Config, lock: lockCopy, engineIdentity: options.EngineIdentityDigest,
 		blobs: options.Blobs, artifacts: options.Artifacts, watchdog: options.Watchdog, limits: options.Limits,
-		lifecycle: options.Lifecycle, callLedger: options.CallLedger,
+		lifecycle: options.Lifecycle, callLedger: options.CallLedger, clock: options.Clock,
 	}, nil
+}
+
+func (r *Runner) now() (time.Time, error) {
+	if r == nil || r.clock == nil {
+		return time.Time{}, errors.New("Docker Runner clock is required")
+	}
+	now := r.clock.Now()
+	if now.IsZero() {
+		return time.Time{}, errors.New("Docker Runner clock returned a zero time")
+	}
+	return now.UTC(), nil
 }
 
 type payloadGroup struct {
@@ -249,7 +269,10 @@ func (op *operation) prepareLifecycle(ctx context.Context, controlRef string, co
 	if err := controlDigest.Validate(); err != nil {
 		return fmt.Errorf("watchdog control file digest: %w", err)
 	}
-	now := stableExecutionTime(string(op.identity.SandboxExecutionID), string(op.plan.PlanDigest))
+	now, err := op.runner.now()
+	if err != nil {
+		return err
+	}
 	reader, ok := op.runner.lifecycle.(port.SandboxLifecycleReader)
 	if !ok {
 		return fmt.Errorf("sandbox lifecycle reader is required")
@@ -317,7 +340,11 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 	}
 	now := op.lifecycleAt
 	if now.IsZero() {
-		now = stableExecutionTime(string(op.identity.SandboxExecutionID), string(op.plan.PlanDigest))
+		var err error
+		now, err = op.runner.now()
+		if err != nil {
+			return err
+		}
 	}
 	deadline := now.Add(programLimit + op.runner.limits.CleanupTimeout + 5*time.Second)
 	if contextDeadline, ok := ctx.Deadline(); ok {
@@ -369,7 +396,7 @@ func (op *operation) lifecycleBeginCreate(ctx context.Context, planned port.Plan
 		return fmt.Errorf("sandbox resource %d was not durably prepared", planned.Ordinal)
 	}
 	key := stableSandboxKey("creating", string(resource.ID))
-	pre, err := op.runner.lifecycle.BeginResourceCreate(ctx, domain.BeginResourceCreate{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, IdempotencyKey: key, At: stableLifecycleTime(resource.CreatedAt, "creating")})
+	pre, err := op.runner.lifecycle.BeginResourceCreate(ctx, domain.BeginResourceCreate{ExecutionID: resource.ExecutionID, ResourceID: resource.ID, ExpectedVersion: resource.Version, PhysicalCallID: callID, IdempotencyKey: key, At: stableLifecycleTime(resource.CreatedAt, "creating")})
 	if err != nil {
 		return err
 	}

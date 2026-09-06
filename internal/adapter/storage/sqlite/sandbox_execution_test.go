@@ -53,8 +53,21 @@ func TestSandboxExecutionLifecyclePersistsBeforeCreateAndSettlesWithCAS(t *testi
 	executionID := domain.SandboxExecutionID("sandbox_00000000000000000000000000000001")
 	resourceID := domain.SandboxResourceID("resource_00000000000000000000000000000001")
 	createdAt := testNow.Add(2 * time.Second)
+	metering := meteringFixture{store: store, runID: testRunID, attemptID: testAttemptID, stage: "prepare", now: testNow}
+	callRecord := mustOpenMeteringCall(t, metering, 1, domain.CallSandboxRun)
+	preparedCalls, err := store.PrepareCalls(ctx, domain.PrepareCallsRequest{
+		RunID: testRunID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: testAttemptID,
+		CallRecordID: callRecord.ID, PlanDigest: domain.SumBytes([]byte("sandbox physical plan")),
+		Calls:          []domain.PhysicalCallPlan{oneReservationPhysicalPlan(1, 1, domain.PhysicalDockerContainerCreate, domain.BudgetDockerContainerCreates, 1)},
+		IdempotencyKey: meteringID("prepare", "sandbox physical"), At: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCalls: %v", err)
+	}
+	physicalCallID := preparedCalls.PhysicalCalls[0].ID
 	resource := domain.SandboxResource{
 		ID: resourceID, ExecutionID: executionID, PlanOrdinal: 0, Kind: "CONTAINER", Role: "TARGET",
+		PhysicalCallID:    &physicalCallID,
 		DeterministicName: "cpgen-target-0001", ExpectedLabelsDigest: domain.SumBytes([]byte("expected labels")),
 		EngineIdentityDigest: engineIdentity, Phase: domain.SandboxResourcePlanned, Version: 1,
 		CreatedAt: createdAt, UpdatedAt: createdAt,
@@ -112,7 +125,7 @@ func TestSandboxExecutionLifecyclePersistsBeforeCreateAndSettlesWithCAS(t *testi
 	if err := store.RecordPreCreateACK(ctx, domain.PreCreateACK{ExecutionID: executionID, ResourceID: resourceID, ResourceVersion: pre.Version, LabelsDigest: labelsDigest, WatchdogRecordRef: prepare.WatchdogControlRef, IdempotencyKey: "precreate_00000000000000000000000000000001", At: armAt.Add(2 * time.Second)}); err != nil {
 		t.Fatalf("RecordPreCreateACK: %v", err)
 	}
-	if _, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: pre.Version, Phase: domain.SandboxResourceDispatching, EngineIdentityDigest: engineIdentity, LabelsDigest: labelsDigest, IdempotencyKey: "dispatch_00000000000000000000000000000001", At: armAt.Add(3 * time.Second)}); err != nil {
+	if _, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: pre.Version, Phase: domain.SandboxResourceDispatching, PhysicalCallID: &physicalCallID, EngineIdentityDigest: engineIdentity, LabelsDigest: labelsDigest, IdempotencyKey: "dispatch_00000000000000000000000000000001", At: armAt.Add(3 * time.Second)}); err != nil {
 		t.Fatalf("AdvanceResource DISPATCHING: %v", err)
 	}
 	if _, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: 3, Phase: domain.SandboxResourceSent, EngineIdentityDigest: engineIdentity, LabelsDigest: labelsDigest, IdempotencyKey: "sent_00000000000000000000000000000001", At: armAt.Add(4 * time.Second)}); err != nil {
@@ -134,6 +147,18 @@ func TestSandboxExecutionLifecyclePersistsBeforeCreateAndSettlesWithCAS(t *testi
 	}
 	if _, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: 5, Phase: domain.SandboxResourceStarted, EngineResourceID: completed.EngineResourceID, EngineIdentityDigest: engineIdentity, IdempotencyKey: "started_00000000000000000000000000000002", At: armAt.Add(6 * time.Second)}); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale resource transition = %v, want ErrVersionConflict", err)
+	}
+	// Cleanup settlement must remain possible after the workflow has finalized
+	// cancellation. New-work methods still use the RUNNING-only guard, while
+	// these exact resource/evidence methods use the cleanup-only scope guard.
+	if _, err := store.db.ExecContext(ctx, `UPDATE stage_attempts SET state='CANCELLED', cause='user_cancel', finished_at=? WHERE attempt_id=?`, formatTime(armAt.Add(7*time.Second)), string(testAttemptID)); err != nil {
+		t.Fatalf("mark attempt cancelled: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE stage_records SET state='CANCELLED', current_attempt_id=NULL, updated_at=? WHERE run_id=? AND stage_name=?`, formatTime(armAt.Add(7*time.Second)), string(testRunID), "prepare"); err != nil {
+		t.Fatalf("mark stage cancelled: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE runs SET state='CANCELLED', cancel_summary='operator requested cancellation', updated_at=? WHERE run_id=?`, formatTime(armAt.Add(7*time.Second)), string(testRunID)); err != nil {
+		t.Fatalf("mark run cancelled: %v", err)
 	}
 
 	pending, err := store.MarkCleanupPending(ctx, domain.MarkCleanupPendingCommand{ExecutionID: executionID, ExpectedVersion: 2, Reason: "test cleanup", IdempotencyKey: "cleanup_00000000000000000000000000000001", At: armAt.Add(6 * time.Second)})

@@ -97,8 +97,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	if err := check.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration history: %v", err)
 	}
-	if count != 15 {
-		t.Fatalf("migration rows = %d, want 15", count)
+	if count != 16 {
+		t.Fatalf("migration rows = %d, want 16", count)
 	}
 }
 
@@ -178,7 +178,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 	if err != nil {
 		t.Fatalf("upgrade historical M4 database: %v", err)
 	}
-	assertMigrationHistory(t, store, 15)
+	assertMigrationHistory(t, store, 16)
 	for _, name := range []string{"call_records_terminal_matrix_insert", "physical_calls_terminal_parent_update"} {
 		var count int
 		if err := store.db.QueryRowContext(ctx,
@@ -197,7 +197,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 		t.Fatalf("reopen upgraded M4 database: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 15)
+	assertMigrationHistory(t, reopened, 16)
 }
 
 // TestMigrationFreshOpenAppliesForwardWorkflowMigration catches fresh stores
@@ -210,7 +210,7 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 15)
+	assertMigrationHistory(t, store, 16)
 	assertForwardWorkflowSchema(t, store)
 }
 
@@ -385,7 +385,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("upgrade historical database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 15)
+	assertMigrationHistory(t, store, 16)
 	assertForwardWorkflowSchema(t, store)
 
 	for table, want := range fixture.rowCounts {
@@ -480,7 +480,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("idempotent reopen after upgrade: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 15)
+	assertMigrationHistory(t, reopened, 16)
 }
 
 // TestCreateRunReplaysLegacyCreateAfterHistoricalMigration catches rejecting
@@ -632,7 +632,7 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertMigrationHistory(t, store, 15)
+	assertMigrationHistory(t, store, 16)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -645,8 +645,8 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 15 {
-		t.Fatalf("migration count = %d, want 15", count)
+	if count != 16 {
+		t.Fatalf("migration count = %d, want 16", count)
 	}
 }
 
@@ -807,6 +807,12 @@ func assertMigrationHistory(t *testing.T, store *Store, want int) {
 	}
 	if want >= 14 && got[13].name != "000014_sandbox_execution.sql" {
 		t.Fatalf("migration 14 name = %q", got[13].name)
+	}
+	if want >= 15 && got[14].name != "000015_sandbox_cleanup_evidence.sql" {
+		t.Fatalf("migration 15 name = %q", got[14].name)
+	}
+	if want >= 16 && got[15].name != "000016_sandbox_resource_call_scope.sql" {
+		t.Fatalf("migration 16 name = %q", got[15].name)
 	}
 }
 

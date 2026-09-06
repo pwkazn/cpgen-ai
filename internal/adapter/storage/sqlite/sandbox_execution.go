@@ -77,11 +77,11 @@ func (s *Store) PrepareExecution(ctx context.Context, request domain.PrepareExec
 				return fmt.Errorf("resource %d has no stable id", index)
 			}
 			_, err := tx.ExecContext(ctx, `INSERT INTO sandbox_resources(
-				resource_id, sandbox_execution_id, plan_ordinal, resource_kind, resource_role, physical_call_id,
+				resource_id, sandbox_execution_id, run_id, stage_name, attempt_id, plan_ordinal, resource_kind, resource_role, physical_call_id,
 				deterministic_name, expected_labels_digest, labels_digest, engine_resource_id, engine_identity_digest,
 				cgroup_identity_digest, creation_nonce, phase, version, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED', 1, ?, ?)`,
-				string(resource.ID), string(result.ID), resource.PlanOrdinal, resource.Kind, resource.Role, nullableAttemptCall(resource.PhysicalCallID),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED', 1, ?, ?)`,
+				string(resource.ID), string(result.ID), string(result.RunID), string(result.StageName), string(result.AttemptID), resource.PlanOrdinal, resource.Kind, resource.Role, nullableAttemptCall(resource.PhysicalCallID),
 				resource.DeterministicName, string(resource.ExpectedLabelsDigest), nullableDigest(resource.LabelsDigest), nullableString(resource.EngineResourceID),
 				string(resource.EngineIdentityDigest), nullableDigestPtr(resource.CgroupIdentityDigest), nullableString(resource.CreationNonce),
 				formatTime(request.At), formatTime(request.At))
@@ -178,12 +178,16 @@ func (s *Store) BeginResourceCreate(ctx context.Context, command domain.BeginRes
 		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, true); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='CREATING', version=version+1, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE resource_id=? AND version=? AND phase='PLANNED'`, command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ResourceID), command.ExpectedVersion); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='CREATING', version=version+1, physical_call_id=COALESCE(?, physical_call_id), last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE resource_id=? AND version=? AND phase='PLANNED'`, nullableAttemptCall(command.PhysicalCallID), command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ResourceID), command.ExpectedVersion); err != nil {
 			return err
 		}
 		if resource.Version == command.ExpectedVersion {
 			resource.Version++
 			resource.Phase = domain.SandboxResourceCreating
+			if command.PhysicalCallID != nil {
+				callID := *command.PhysicalCallID
+				resource.PhysicalCallID = &callID
+			}
 			resource.UpdatedAt = command.At
 		}
 		result = domain.PreCreateRequest{ExecutionID: command.ExecutionID, ResourceID: command.ResourceID, Resource: resource, Version: resource.Version}
@@ -323,6 +327,9 @@ func (s *Store) RecordResourceStopProof(ctx context.Context, command domain.Reco
 		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
 			return err
 		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, false); err != nil {
+			return err
+		}
 		if result.Version != command.ExpectedVersion {
 			var last string
 			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
@@ -367,6 +374,9 @@ func (s *Store) RecordResourceCleaned(ctx context.Context, command domain.Record
 		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
 			return err
 		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, false); err != nil {
+			return err
+		}
 		if result.Version != command.ExpectedVersion {
 			var last string
 			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
@@ -406,6 +416,9 @@ func (s *Store) RecordResourceInterrupted(ctx context.Context, command domain.Re
 		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
 			return err
 		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, false); err != nil {
+			return err
+		}
 		if result.Version != command.ExpectedVersion {
 			var last string
 			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
@@ -440,6 +453,9 @@ func (s *Store) MarkCleanupPending(ctx context.Context, command domain.MarkClean
 		var err error
 		stored, err := readSandboxExecution(ctx, tx, command.ExecutionID)
 		if err != nil {
+			return err
+		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, false); err != nil {
 			return err
 		}
 		result = stored
@@ -487,6 +503,9 @@ func (s *Store) FinishCleanup(ctx context.Context, command domain.FinishCleanupC
 		var err error
 		stored, err := readSandboxExecution(ctx, tx, command.ExecutionID)
 		if err != nil {
+			return err
+		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, false); err != nil {
 			return err
 		}
 		result = stored
@@ -819,11 +838,19 @@ func sandboxRunGuard(ctx context.Context, tx *immediateTx, runID domain.RunID, s
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM stage_attempts WHERE run_id=? AND stage_name=? AND attempt_id=?`, string(runID), string(stage), string(attempt)).Scan(&attemptState); err != nil {
 		return err
 	}
-	if state != string(domain.RunRunning) || attemptState != string(domain.StageAttemptRunning) {
-		return wrap(ErrInvalidTransition, "sandbox work requires a RUNNING run attempt", nil)
-	}
 	if rejectCancel {
+		if state != string(domain.RunRunning) || attemptState != string(domain.StageAttemptRunning) {
+			return wrap(ErrInvalidTransition, "sandbox work requires a RUNNING run attempt", nil)
+		}
 		return sandboxCancelGuard(ctx, tx, runID)
+	}
+	// Cleanup is a settlement-only boundary. It must retain the exact current
+	// stage/attempt binding above, but it is deliberately allowed to run after
+	// interruption, cancellation, failure, or a finalized cancel. Callers of
+	// this path are restricted to UNKNOWN/CLEANUP_PENDING/stop-proof commands;
+	// new Create/Start/export operations always use rejectCancel=true.
+	if !domain.RunState(state).Valid() || !domain.StageAttemptState(attemptState).Valid() {
+		return wrap(ErrConsistency, "sandbox cleanup scope contains an invalid run or attempt state", nil)
 	}
 	return nil
 }
