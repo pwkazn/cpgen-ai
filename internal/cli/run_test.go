@@ -94,6 +94,36 @@ func TestReviewShowReturnsNotFoundForMissingRun(t *testing.T) {
 	}
 }
 
+func TestRunEventsReturnsNotFoundForMissingRun(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "cpgen.yaml")
+	stateRoot := filepath.Join(root, "state")
+	if err := os.WriteFile(configPath, []byte("storage:\n  state_root: "+stateRoot+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"--config", configPath,
+		"run", "events", "run_00000000000000000000000000000000",
+	}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("exit code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var envelope struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v; stdout=%q", err, stdout.String())
+	}
+	if envelope.Status != "ERROR" || envelope.Error.Code != "not_found" {
+		t.Fatalf("unexpected error envelope: %#v", envelope)
+	}
+}
+
 func TestRunListRejectsInvalidLimitWithArgumentExitCode(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "cpgen.yaml")

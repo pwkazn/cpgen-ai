@@ -192,7 +192,10 @@ func Decode(data []byte) (Config, error) {
 	}
 	result := Config{Storage: StorageConfig{StateRoot: raw.Storage.StateRoot}, SQLite: SQLiteConfig{MaxReaders: raw.SQLite.MaxReaders}, FakeWorkflow: FakeWorkflowConfig{Scenario: raw.FakeWorkflow.Scenario}}
 	result.Runtime = RuntimeConfig{}
-	if result.SQLite.MaxReaders == 0 {
+	// Preserve the default only when max_readers is omitted. An explicitly
+	// configured zero (or null) must reach Validate so it is rejected instead
+	// of being silently rewritten to the default.
+	if !hasYAMLField(&root, "sqlite", "max_readers") {
 		result.SQLite.MaxReaders = 4
 	}
 	if result.FakeWorkflow.Scenario == "" {
@@ -456,6 +459,37 @@ func inspectNode(node *yaml.Node, path string, allowed map[string]map[string]str
 		}
 	}
 	return nil
+}
+
+func hasYAMLField(node *yaml.Node, path ...string) bool {
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) != 1 {
+			return false
+		}
+		node = node.Content[0]
+	}
+	for index, name := range path {
+		if node.Kind != yaml.MappingNode {
+			return false
+		}
+		found := false
+		for position := 0; position+1 < len(node.Content); position += 2 {
+			key, value := node.Content[position], node.Content[position+1]
+			if key.Value != name {
+				continue
+			}
+			if index == len(path)-1 {
+				return true
+			}
+			node = value
+			found = true
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return false
 }
 
 func pathOrRoot(path string) string {

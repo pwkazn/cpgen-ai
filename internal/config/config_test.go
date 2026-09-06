@@ -83,6 +83,23 @@ func TestDecodeRejectsInvalidRootDurationAndScenarioWithTypedField(t *testing.T)
 	}
 }
 
+func TestDecodeRejectsExplicitNonPositiveMaxReaders(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	for _, value := range []string{"0", "-1", "null"} {
+		t.Run(value, func(t *testing.T) {
+			data := "storage:\n  state_root: " + root + "\nsqlite:\n  max_readers: " + value + "\n"
+			_, err := config.Decode([]byte(data))
+			if err == nil {
+				t.Fatal("explicit non-positive max_readers was accepted")
+			}
+			var fieldErr *config.FieldError
+			if !errors.As(err, &fieldErr) || fieldErr.Field != "sqlite.max_readers" {
+				t.Fatalf("error field = %v, want sqlite.max_readers: %v", fieldErr, err)
+			}
+		})
+	}
+}
+
 func TestConfigDigestIsAValidDomainDigest(t *testing.T) {
 	cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.Join(t.TempDir(), "state") + "\n"))
 	if err != nil {

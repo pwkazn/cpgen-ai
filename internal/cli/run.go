@@ -275,6 +275,12 @@ func runEvents(args []string, app *application.Application, stdout, stderr io.Wr
 	if err != nil {
 		return writeStateError(stdout, stderr, 3, "invalid_id", err)
 	}
+	// Events intentionally returns an empty slice for an existing run when no
+	// event is newer than after-version. Verify the run first so a well-formed
+	// but nonexistent RUN_ID remains distinguishable from that empty result.
+	if _, err := app.Runtime.GetRun(context.Background(), id); err != nil {
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
+	}
 	events, err := app.Runtime.Events(context.Background(), id, *after)
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
