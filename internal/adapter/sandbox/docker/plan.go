@@ -22,7 +22,6 @@ type PlanIdentity struct {
 	AttemptID            domain.AttemptID
 	SandboxExecutionID   domain.SandboxExecutionID
 	LogicalOperationID   string
-	LeaseEpoch           int64
 	OperationNonce       string
 	EngineIdentityDigest domain.Digest
 }
@@ -36,16 +35,11 @@ func (i PlanIdentity) Validate() error {
 	if err := i.AttemptID.Validate(); err != nil {
 		return err
 	}
-	if i.SandboxExecutionID != "" {
-		if err := i.SandboxExecutionID.Validate(); err != nil {
-			return err
-		}
+	if err := i.SandboxExecutionID.Validate(); err != nil {
+		return err
 	}
 	if i.LogicalOperationID == "" || len(i.LogicalOperationID) > 256 || !utf8.ValidString(i.LogicalOperationID) || strings.IndexFunc(i.LogicalOperationID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return fmt.Errorf("invalid logical operation ID %q", i.LogicalOperationID)
-	}
-	if i.SandboxExecutionID == "" && i.LeaseEpoch <= 0 {
-		return fmt.Errorf("lease epoch must be positive")
 	}
 	if !operationNoncePattern.MatchString(i.OperationNonce) {
 		return fmt.Errorf("operation nonce must be 32 lowercase hexadecimal characters")
@@ -244,12 +238,7 @@ func baseResourceLabels(identity PlanIdentity, resource port.PlannedResource) ma
 		"org.cpgen.run":                string(identity.RunID),
 		"org.cpgen.slice":              "0",
 	}
-	if identity.SandboxExecutionID != "" {
-		labels["org.cpgen.sandbox-execution"] = string(identity.SandboxExecutionID)
-	} else {
-		// Compatibility for the pre-SandboxExecution Slice 0 canary only.
-		labels["org.cpgen.lease-epoch"] = strconv.FormatInt(identity.LeaseEpoch, 10)
-	}
+	labels["org.cpgen.sandbox-execution"] = string(identity.SandboxExecutionID)
 	return labels
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cpgen/internal/domain"
+	"cpgen/internal/port"
 	"github.com/containerd/errdefs"
 	moby "github.com/moby/moby/client"
 )
@@ -91,11 +92,8 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		return nil, nil
 	}
 	if execution.State != domain.SandboxExecutionCleanupPending && execution.State != domain.SandboxExecutionCleaned {
-		key, keyErr := domain.NewID("cleanup")
-		if keyErr != nil {
-			return nil, keyErr
-		}
-		execution, err = r.store.MarkCleanupPending(ctx, domain.MarkCleanupPendingCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, Reason: "startup exact-resource reconciliation", IdempotencyKey: key, At: time.Now().UTC()})
+		key := stableSandboxKey("reconcile_cleanup", string(execution.ID))
+		execution, err = r.store.MarkCleanupPending(ctx, domain.MarkCleanupPendingCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, Reason: "startup exact-resource reconciliation", IdempotencyKey: key, At: stableLifecycleTime(execution.CreatedAt, "cleanup")})
 		if err != nil {
 			return nil, err
 		}
@@ -109,11 +107,11 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		// interrupted without consulting the engine; cleanup must never turn
 		// an uncreated plan row into a create or discovery opportunity.
 		if resource.Phase == domain.SandboxResourcePlanned {
-			key, keyErr := domain.NewID("interrupt")
-			if keyErr != nil {
-				return nil, keyErr
+			proofs, ok := r.store.(port.SandboxCleanupRecorder)
+			if !ok {
+				return nil, errors.New("sandbox reconciler store lacks named cleanup proof methods")
 			}
-			resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceInterrupted, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+			resource, err = proofs.RecordResourceInterrupted(ctx, domain.RecordResourceInterruptedCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, ReasonDigest: domain.SumBytes([]byte("cpgen.reconcile-no-create/v1\n" + string(resource.ID))), At: stableLifecycleTime(resource.CreatedAt, "interrupt")})
 			if err != nil {
 				return nil, err
 			}
@@ -125,11 +123,8 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 			continue
 		}
 		if resource.Phase != domain.SandboxResourceCleanupPending {
-			key, keyErr := domain.NewID("cleanup")
-			if keyErr != nil {
-				return nil, keyErr
-			}
-			resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleanupPending, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
+			key := stableSandboxKey("reconcile_resource_cleanup", string(resource.ID))
+			resource, err = r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleanupPending, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: stableLifecycleTime(resource.CreatedAt, "cleanup")})
 			if err != nil {
 				return nil, err
 			}
@@ -153,11 +148,12 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		resources[index] = updated
 	}
 	if len(report.ManualCleanup) == 0 {
-		key, keyErr := domain.NewID("cleanup")
-		if keyErr != nil {
-			return nil, keyErr
+		resourceSnapshot := make(map[int]domain.SandboxResource, len(resources))
+		for _, resource := range resources {
+			resourceSnapshot[resource.PlanOrdinal] = resource
 		}
-		if _, err := r.store.FinishCleanup(ctx, domain.FinishCleanupCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, ReconciliationDigest: domain.SumBytes([]byte(string(execution.ID))), IdempotencyKey: key, At: time.Now().UTC()}); err != nil {
+		key := stableSandboxKey("reconcile_finish", string(execution.ID))
+		if _, err := r.store.FinishCleanup(ctx, domain.FinishCleanupCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, ReconciliationDigest: reconciliationDigest(resourceSnapshot), IdempotencyKey: key, At: stableLifecycleTime(execution.CreatedAt, "finish")}); err != nil {
 			return nil, err
 		}
 	}
@@ -167,11 +163,23 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 var errManualCleanup = errors.New("manual cleanup required")
 
 func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domain.SandboxExecution, resource domain.SandboxResource) (domain.SandboxResource, bool, error) {
+	proofs, ok := r.store.(port.SandboxCleanupRecorder)
+	if !ok {
+		return resource, false, errors.New("sandbox reconciler store lacks named cleanup proof methods")
+	}
+	stopAndRemove := func(proof StopProof, engineID string) (domain.SandboxResource, bool, error) {
+		stopped, err := proofs.RecordResourceStopProof(ctx, domain.RecordResourceStopProofCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, EngineResourceID: engineID, EngineIdentityDigest: resource.EngineIdentityDigest, LabelsDigest: resource.LabelsDigest, ProofDigest: proof.Digest(), ProofKind: "STOP_KILL_WAIT_INSPECT", At: stableLifecycleTime(resource.CreatedAt, "stop")})
+		if err != nil {
+			return resource, false, err
+		}
+		cleaned, err := proofs.RecordResourceCleaned(ctx, domain.RecordResourceCleanedCommand{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: stopped.Version, EngineResourceID: engineID, EngineIdentityDigest: stopped.EngineIdentityDigest, EvidenceDigest: domain.SumBytes([]byte("cpgen.reconcile-remove/v1\n" + engineID)), At: stableLifecycleTime(resource.CreatedAt, "clean")})
+		return cleaned, err == nil, err
+	}
 	switch resource.Kind {
 	case "CONTAINER":
 		inspected, err := r.engine.ContainerInspect(ctx, resource.EngineResourceID, moby.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
-			return r.markResourceCleaned(ctx, resource, execution)
+			return stopAndRemove(StopProof{NotFound: true}, resource.EngineResourceID)
 		}
 		if err != nil {
 			return resource, false, err
@@ -182,7 +190,7 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		if resource.LabelsDigest != "" && digestLabels(inspected.Container.Config.Labels) != resource.LabelsDigest {
 			return resource, false, fmt.Errorf("%w: container labels mismatch", errManualCleanup)
 		}
-		if _, err := portableStop(ctx, r.engine, resource.EngineResourceID, func(result moby.ContainerInspectResult) error {
+		proof, err := portableStop(ctx, r.engine, resource.EngineResourceID, func(result moby.ContainerInspectResult) error {
 			if result.Container.ID != resource.EngineResourceID || trimContainerName(result.Container.Name) != resource.DeterministicName {
 				return fmt.Errorf("container identity changed")
 			}
@@ -190,17 +198,18 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 				return fmt.Errorf("container labels changed")
 			}
 			return nil
-		}); err != nil {
+		})
+		if err != nil {
 			return resource, false, err
 		}
 		if _, err := r.engine.ContainerRemove(ctx, resource.EngineResourceID, moby.ContainerRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 			return resource, false, err
 		}
-		return r.markResourceCleaned(ctx, resource, execution)
+		return stopAndRemove(proof, resource.EngineResourceID)
 	case "VOLUME":
 		inspected, err := r.engine.VolumeInspect(ctx, resource.EngineResourceID, moby.VolumeInspectOptions{})
 		if errdefs.IsNotFound(err) {
-			return r.markResourceCleaned(ctx, resource, execution)
+			return stopAndRemove(StopProof{NotFound: true}, resource.EngineResourceID)
 		}
 		if err != nil {
 			return resource, false, err
@@ -211,17 +220,8 @@ func (r *sandboxReconciler) cleanupResource(ctx context.Context, execution domai
 		if _, err := r.engine.VolumeRemove(ctx, resource.EngineResourceID, moby.VolumeRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 			return resource, false, err
 		}
-		return r.markResourceCleaned(ctx, resource, execution)
+		return stopAndRemove(StopProof{InspectStopped: true}, resource.EngineResourceID)
 	default:
 		return resource, false, fmt.Errorf("%w: resource kind %q has no exact cleanup adapter", errManualCleanup, resource.Kind)
 	}
-}
-
-func (r *sandboxReconciler) markResourceCleaned(ctx context.Context, resource domain.SandboxResource, execution domain.SandboxExecution) (domain.SandboxResource, bool, error) {
-	key, err := domain.NewID("cleanup")
-	if err != nil {
-		return resource, false, err
-	}
-	updated, err := r.store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: execution.ID, ResourceID: resource.ID, ExpectedVersion: resource.Version, Phase: domain.SandboxResourceCleaned, EngineResourceID: resource.EngineResourceID, EngineIdentityDigest: resource.EngineIdentityDigest, IdempotencyKey: key, At: time.Now().UTC()})
-	return updated, err == nil, err
 }

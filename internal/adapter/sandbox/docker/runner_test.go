@@ -137,8 +137,8 @@ func newRunnerFixture(t *testing.T) runnerFixture {
 	}
 	probeIdentity := port.ProbeAuthorizationIdentity{
 		LogicalOperationID: identity.LogicalOperationID, RunID: identity.RunID, AttemptID: identity.AttemptID,
-		OwnerID: "owner_00000000000000000000000000000003", LeaseEpoch: identity.LeaseEpoch,
-		ScopeDigest: domain.SumBytes([]byte("scope")), PlanDigest: plan.PlanDigest,
+		SandboxExecutionID: identity.SandboxExecutionID,
+		ScopeDigest:        domain.SumBytes([]byte("scope")), PlanDigest: plan.PlanDigest, EngineIdentityDigest: identity.EngineIdentityDigest,
 	}
 	claims := newRecordingClaims(events, probeIdentity, calls)
 	auth, err := port.NewSlice0ProbeAuthorization(probeIdentity, plan, claims)
@@ -179,6 +179,7 @@ func newRunnerFixture(t *testing.T) runnerFixture {
 		},
 		Lock: lock, EngineIdentityDigest: identity.EngineIdentityDigest,
 		Blobs: blobs, Artifacts: sink, Watchdog: &recordingWatchdog{events: events},
+		Lifecycle: newRecordingLifecycle(), CallLedger: recordingCallLedger{},
 		Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: 5 * time.Second},
 	})
 	if err != nil {
@@ -350,10 +351,17 @@ func (w *recordingWatchdog) Arm(_ context.Context, record watchdog.ControlRecord
 		return nil, errors.New("recording watchdog token mismatch")
 	}
 	w.events.add("watchdog-arm")
-	return &recordingWatchdogSession{events: w.events}, nil
+	return &recordingWatchdogSession{events: w.events, controlRef: "test-control", controlDigest: domain.SumBytes([]byte("test-control"))}, nil
 }
 
-type recordingWatchdogSession struct{ events *eventLog }
+type recordingWatchdogSession struct {
+	events        *eventLog
+	controlRef    string
+	controlDigest domain.Digest
+}
+
+func (w *recordingWatchdogSession) ControlRecordRef() string         { return w.controlRef }
+func (w *recordingWatchdogSession) ControlFileDigest() domain.Digest { return w.controlDigest }
 
 func (w *recordingWatchdogSession) PreCreate(_ context.Context, resource port.PlannedResource, _ map[string]string) error {
 	w.events.add("watchdog-before:" + string(resource.Role))

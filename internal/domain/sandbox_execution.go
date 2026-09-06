@@ -163,24 +163,25 @@ func (i SandboxAuthorizationIdentity) Digest() Digest {
 }
 
 type SandboxExecution struct {
-	ID                   SandboxExecutionID    `json:"id"`
-	RunID                RunID                 `json:"run_id"`
-	AttemptID            AttemptID             `json:"attempt_id"`
-	StageName            StageName             `json:"stage_name"`
-	LogicalOperationID   string                `json:"logical_operation_id"`
-	ScopeDigest          Digest                `json:"scope_digest"`
-	PlanDigest           Digest                `json:"plan_digest"`
-	EngineIdentityDigest Digest                `json:"engine_identity_digest"`
-	WatchdogControlRef   string                `json:"watchdog_control_ref,omitempty"`
-	WatchdogTokenDigest  Digest                `json:"watchdog_token_digest"`
-	State                SandboxExecutionState `json:"state"`
-	LifecycleVersion     int64                 `json:"lifecycle_version"`
-	CleanupVersion       int64                 `json:"cleanup_version"`
-	SafetyDeadlineUTC    time.Time             `json:"safety_deadline_utc"`
-	CleanupDeadlineUTC   time.Time             `json:"cleanup_deadline_utc"`
-	CreatedAt            time.Time             `json:"created_at"`
-	UpdatedAt            time.Time             `json:"updated_at"`
-	Resources            []SandboxResource     `json:"resources,omitempty"`
+	ID                           SandboxExecutionID    `json:"id"`
+	RunID                        RunID                 `json:"run_id"`
+	AttemptID                    AttemptID             `json:"attempt_id"`
+	StageName                    StageName             `json:"stage_name"`
+	LogicalOperationID           string                `json:"logical_operation_id"`
+	ScopeDigest                  Digest                `json:"scope_digest"`
+	PlanDigest                   Digest                `json:"plan_digest"`
+	EngineIdentityDigest         Digest                `json:"engine_identity_digest"`
+	WatchdogControlRef           string                `json:"watchdog_control_ref,omitempty"`
+	WatchdogTokenDigest          Digest                `json:"watchdog_token_digest"`
+	State                        SandboxExecutionState `json:"state"`
+	LifecycleVersion             int64                 `json:"lifecycle_version"`
+	CleanupVersion               int64                 `json:"cleanup_version"`
+	SafetyDeadlineUTC            time.Time             `json:"safety_deadline_utc"`
+	CleanupDeadlineUTC           time.Time             `json:"cleanup_deadline_utc"`
+	CreatedAt                    time.Time             `json:"created_at"`
+	UpdatedAt                    time.Time             `json:"updated_at"`
+	ReconciliationEvidenceDigest Digest                `json:"reconciliation_evidence_digest,omitempty"`
+	Resources                    []SandboxResource     `json:"resources,omitempty"`
 }
 
 func (e SandboxExecution) Identity() SandboxAuthorizationIdentity {
@@ -205,6 +206,11 @@ func (e SandboxExecution) Validate() error {
 	if strings.TrimSpace(e.WatchdogControlRef) == "" {
 		return errors.New("watchdog control reference is required")
 	}
+	if e.ReconciliationEvidenceDigest != "" {
+		if err := e.ReconciliationEvidenceDigest.Validate(); err != nil {
+			return fmt.Errorf("reconciliation evidence digest: %w", err)
+		}
+	}
 	if !e.State.Valid() || e.LifecycleVersion <= 0 || e.CleanupVersion < 0 {
 		return errors.New("sandbox execution state or version is invalid")
 	}
@@ -227,23 +233,26 @@ func (e SandboxExecution) Validate() error {
 }
 
 type SandboxResource struct {
-	ID                   SandboxResourceID    `json:"id"`
-	ExecutionID          SandboxExecutionID   `json:"execution_id"`
-	PlanOrdinal          int                  `json:"plan_ordinal"`
-	Kind                 string               `json:"kind"`
-	Role                 string               `json:"role"`
-	PhysicalCallID       *AttemptCallID       `json:"physical_call_id,omitempty"`
-	DeterministicName    string               `json:"deterministic_name"`
-	ExpectedLabelsDigest Digest               `json:"expected_labels_digest"`
-	LabelsDigest         Digest               `json:"labels_digest"`
-	EngineResourceID     string               `json:"engine_resource_id,omitempty"`
-	EngineIdentityDigest Digest               `json:"engine_identity_digest"`
-	CgroupIdentityDigest *Digest              `json:"cgroup_identity_digest,omitempty"`
-	CreationNonce        string               `json:"creation_nonce,omitempty"`
-	Phase                SandboxResourcePhase `json:"phase"`
-	Version              int64                `json:"version"`
-	CreatedAt            time.Time            `json:"created_at"`
-	UpdatedAt            time.Time            `json:"updated_at"`
+	ID                    SandboxResourceID    `json:"id"`
+	ExecutionID           SandboxExecutionID   `json:"execution_id"`
+	PlanOrdinal           int                  `json:"plan_ordinal"`
+	Kind                  string               `json:"kind"`
+	Role                  string               `json:"role"`
+	PhysicalCallID        *AttemptCallID       `json:"physical_call_id,omitempty"`
+	DeterministicName     string               `json:"deterministic_name"`
+	ExpectedLabelsDigest  Digest               `json:"expected_labels_digest"`
+	LabelsDigest          Digest               `json:"labels_digest"`
+	EngineResourceID      string               `json:"engine_resource_id,omitempty"`
+	EngineIdentityDigest  Digest               `json:"engine_identity_digest"`
+	CgroupIdentityDigest  *Digest              `json:"cgroup_identity_digest,omitempty"`
+	CreationNonce         string               `json:"creation_nonce,omitempty"`
+	StopProofDigest       Digest               `json:"stop_proof_digest,omitempty"`
+	StopProofKind         string               `json:"stop_proof_kind,omitempty"`
+	CleanupEvidenceDigest Digest               `json:"cleanup_evidence_digest,omitempty"`
+	Phase                 SandboxResourcePhase `json:"phase"`
+	Version               int64                `json:"version"`
+	CreatedAt             time.Time            `json:"created_at"`
+	UpdatedAt             time.Time            `json:"updated_at"`
 }
 
 func (r SandboxResource) Validate() error {
@@ -277,6 +286,19 @@ func (r SandboxResource) Validate() error {
 			return err
 		}
 	}
+	if r.StopProofDigest != "" {
+		if err := r.StopProofDigest.Validate(); err != nil {
+			return fmt.Errorf("stop proof digest: %w", err)
+		}
+		if strings.TrimSpace(r.StopProofKind) == "" {
+			return errors.New("stop proof kind is required with stop proof digest")
+		}
+	}
+	if r.CleanupEvidenceDigest != "" {
+		if err := r.CleanupEvidenceDigest.Validate(); err != nil {
+			return fmt.Errorf("cleanup evidence digest: %w", err)
+		}
+	}
 	if !r.Phase.Valid() || r.Version <= 0 {
 		return errors.New("sandbox resource phase or version is invalid")
 	}
@@ -293,6 +315,14 @@ func (r SandboxResource) Validate() error {
 		if strings.TrimSpace(r.EngineResourceID) == "" {
 			return errors.New("settled resource requires engine identity")
 		}
+	}
+	if r.Phase == SandboxResourceStopped || r.Phase == SandboxResourceCleaned || r.Phase == SandboxResourceInterrupted {
+		if r.StopProofDigest == "" || strings.TrimSpace(r.StopProofKind) == "" {
+			return errors.New("cleanup-settled resource requires persisted stop proof")
+		}
+	}
+	if r.Phase == SandboxResourceCleaned && r.CleanupEvidenceDigest == "" {
+		return errors.New("CLEANED resource requires persisted cleanup evidence")
 	}
 	return nil
 }
@@ -359,6 +389,82 @@ type SandboxCleanupBlocker struct {
 	ResourceID  SandboxResourceID  `json:"resource_id"`
 	Reason      string             `json:"reason"`
 	Manual      bool               `json:"manual"`
+}
+
+// RecordResourceStopProofCommand is the only command allowed to persist a
+// stopped resource. The proof digest is generated from an independent
+// stop/kill/wait/inspect observation outside the database transaction.
+type RecordResourceStopProofCommand struct {
+	ExecutionID          SandboxExecutionID `json:"execution_id"`
+	ResourceID           SandboxResourceID  `json:"resource_id"`
+	ExpectedVersion      int64              `json:"expected_version"`
+	EngineResourceID     string             `json:"engine_resource_id"`
+	EngineIdentityDigest Digest             `json:"engine_identity_digest"`
+	LabelsDigest         Digest             `json:"labels_digest,omitempty"`
+	ProofDigest          Digest             `json:"proof_digest"`
+	ProofKind            string             `json:"proof_kind"`
+	At                   time.Time          `json:"at"`
+}
+
+func (c RecordResourceStopProofCommand) Validate() error {
+	if err := validateSandboxResourceCommand(c.ExecutionID, c.ResourceID, c.ExpectedVersion, "stop_"+string(c.ResourceID), c.At); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.EngineResourceID) == "" || strings.TrimSpace(c.ProofKind) == "" {
+		return errors.New("stop proof requires exact engine resource and proof kind")
+	}
+	if err := c.EngineIdentityDigest.Validate(); err != nil {
+		return err
+	}
+	if c.LabelsDigest != "" {
+		if err := c.LabelsDigest.Validate(); err != nil {
+			return err
+		}
+	}
+	return c.ProofDigest.Validate()
+}
+
+// RecordResourceCleaned persists removal evidence after a resource has been
+// proven stopped. It is deliberately separate from AdvanceResource.
+type RecordResourceCleanedCommand struct {
+	ExecutionID          SandboxExecutionID `json:"execution_id"`
+	ResourceID           SandboxResourceID  `json:"resource_id"`
+	ExpectedVersion      int64              `json:"expected_version"`
+	EngineResourceID     string             `json:"engine_resource_id"`
+	EngineIdentityDigest Digest             `json:"engine_identity_digest"`
+	EvidenceDigest       Digest             `json:"evidence_digest"`
+	At                   time.Time          `json:"at"`
+}
+
+func (c RecordResourceCleanedCommand) Validate() error {
+	if err := validateSandboxResourceCommand(c.ExecutionID, c.ResourceID, c.ExpectedVersion, "clean_"+string(c.ResourceID), c.At); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.EngineResourceID) == "" {
+		return errors.New("cleaned resource requires exact engine resource")
+	}
+	if err := c.EngineIdentityDigest.Validate(); err != nil {
+		return err
+	}
+	return c.EvidenceDigest.Validate()
+}
+
+// RecordResourceInterrupted is used only for a planned resource for which no
+// external create was authorized. It still records a deterministic reason
+// digest and cannot be reached through the arbitrary phase command.
+type RecordResourceInterruptedCommand struct {
+	ExecutionID     SandboxExecutionID `json:"execution_id"`
+	ResourceID      SandboxResourceID  `json:"resource_id"`
+	ExpectedVersion int64              `json:"expected_version"`
+	ReasonDigest    Digest             `json:"reason_digest"`
+	At              time.Time          `json:"at"`
+}
+
+func (c RecordResourceInterruptedCommand) Validate() error {
+	if err := validateSandboxResourceCommand(c.ExecutionID, c.ResourceID, c.ExpectedVersion, "interrupt_"+string(c.ResourceID), c.At); err != nil {
+		return err
+	}
+	return c.ReasonDigest.Validate()
 }
 
 type SandboxReconcileReport struct {
@@ -516,7 +622,7 @@ func (r AdvanceResourceRequest) Validate() error {
 	if err := validateSandboxResourceCommand(r.ExecutionID, r.ResourceID, r.ExpectedVersion, r.IdempotencyKey, r.At); err != nil {
 		return err
 	}
-	if !r.Phase.Valid() || r.Phase == SandboxResourcePlanned {
+	if !r.Phase.Valid() || r.Phase == SandboxResourcePlanned || r.Phase == SandboxResourceStopped || r.Phase == SandboxResourceCleaned || r.Phase == SandboxResourceInterrupted {
 		return errors.New("resource advance phase is invalid")
 	}
 	if r.PhysicalCallID != nil {

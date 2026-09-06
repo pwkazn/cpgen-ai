@@ -301,6 +301,9 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 	if labels["org.cpgen.call"] == "" {
 		return fmt.Errorf("resource label %q does not match the control record", "org.cpgen.call")
 	}
+	if labels["org.cpgen.sandbox-execution"] == "" {
+		return fmt.Errorf("resource label %q does not match the control record", "org.cpgen.sandbox-execution")
+	}
 	base := map[string]string{
 		"org.cpgen.attempt":            labels["org.cpgen.attempt"],
 		"org.cpgen.engine-digest":      labels["org.cpgen.engine-digest"],
@@ -313,11 +316,7 @@ func validateControlLabels(record ControlRecord, resource port.PlannedResource, 
 		"org.cpgen.run":                labels["org.cpgen.run"],
 		"org.cpgen.slice":              labels["org.cpgen.slice"],
 	}
-	if labels["org.cpgen.sandbox-execution"] != "" {
-		base["org.cpgen.sandbox-execution"] = labels["org.cpgen.sandbox-execution"]
-	} else {
-		base["org.cpgen.lease-epoch"] = labels["org.cpgen.lease-epoch"]
-	}
+	base["org.cpgen.sandbox-execution"] = labels["org.cpgen.sandbox-execution"]
 	encoded, err := json.Marshal(base)
 	if err != nil {
 		return fmt.Errorf("encode resource ownership labels: %w", err)

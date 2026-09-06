@@ -158,7 +158,7 @@ func assertPlanResourceIdentity(t *testing.T, plan port.ContainerPlan, identity 
 			"org.cpgen.run":               string(identity.RunID),
 			"org.cpgen.attempt":           string(identity.AttemptID),
 			"org.cpgen.logical-operation": identity.LogicalOperationID,
-			"org.cpgen.lease-epoch":       "7",
+			"org.cpgen.sandbox-execution": string(identity.SandboxExecutionID),
 			"org.cpgen.role":              string(resource.Role),
 			"org.cpgen.plan-digest":       string(plan.PlanDigest),
 			"org.cpgen.engine-digest":     string(identity.EngineIdentityDigest),
@@ -206,7 +206,7 @@ func planIdentity() docker.PlanIdentity {
 		RunID:                "run_00000000000000000000000000000001",
 		AttemptID:            "attempt_00000000000000000000000000000002",
 		LogicalOperationID:   "compile-solution",
-		LeaseEpoch:           7,
+		SandboxExecutionID:   "sandbox_00000000000000000000000000000003",
 		OperationNonce:       "0123456789abcdef0123456789abcdef",
 		EngineIdentityDigest: domain.SumBytes([]byte("engine")),
 	}

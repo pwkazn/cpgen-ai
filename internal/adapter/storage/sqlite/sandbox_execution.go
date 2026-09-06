@@ -127,6 +127,9 @@ func (s *Store) RecordWatchdogArmed(ctx context.Context, command domain.Watchdog
 		if state != string(domain.SandboxExecutionPlanned) {
 			return wrap(ErrInvalidTransition, "sandbox execution is not PLANNED", nil)
 		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, true); err != nil {
+			return err
+		}
 		if !controlRef.Valid || !token.Valid || command.ControlRecordRef != controlRef.String || string(command.TokenDigest) != token.String {
 			return wrap(ErrConsistency, "watchdog identity does not match execution", nil)
 		}
@@ -172,7 +175,7 @@ func (s *Store) BeginResourceCreate(ctx context.Context, command domain.BeginRes
 		if execState != string(domain.SandboxExecutionArmed) && execState != string(domain.SandboxExecutionRunning) {
 			return wrap(ErrInvalidTransition, "sandbox execution is not armed", nil)
 		}
-		if err := sandboxRunCancelGuard(ctx, tx, command.ExecutionID); err != nil {
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, true); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='CREATING', version=version+1, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE resource_id=? AND version=? AND phase='PLANNED'`, command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ResourceID), command.ExpectedVersion); err != nil {
@@ -194,6 +197,30 @@ func (s *Store) RecordPreCreateACK(ctx context.Context, ack domain.PreCreateACK)
 		return err
 	}
 	return s.immediate(ctx, func(tx *immediateTx) error {
+		if err := sandboxExecutionRunGuard(ctx, tx, ack.ExecutionID, true); err != nil {
+			return err
+		}
+		var executionRef string
+		if err := tx.QueryRowContext(ctx, `SELECT watchdog_control_ref FROM sandbox_executions WHERE sandbox_execution_id=?`, string(ack.ExecutionID)).Scan(&executionRef); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return wrap(ErrNotFound, "sandbox execution does not exist", err)
+			}
+			return err
+		}
+		if ack.WatchdogRecordRef != executionRef {
+			return wrap(ErrConsistency, "pre-create ACK watchdog reference differs from execution", nil)
+		}
+		var currentVersion int64
+		var currentPhase string
+		if err := tx.QueryRowContext(ctx, `SELECT version, phase FROM sandbox_resources WHERE sandbox_execution_id=? AND resource_id=?`, string(ack.ExecutionID), string(ack.ResourceID)).Scan(&currentVersion, &currentPhase); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return wrap(ErrNotFound, "sandbox resource does not exist", err)
+			}
+			return err
+		}
+		if currentVersion != ack.ResourceVersion || currentPhase != string(domain.SandboxResourceCreating) {
+			return wrap(ErrInvalidTransition, "pre-create ACK does not match the CREATING resource version", nil)
+		}
 		var storedVersion int64
 		var storedDigest, storedRef, storedKey, storedAt string
 		err := tx.QueryRowContext(ctx, `SELECT resource_version, labels_digest, watchdog_record_ref, idempotency_key, acked_at FROM sandbox_precreate_acks WHERE sandbox_execution_id=? AND resource_id=?`, string(ack.ExecutionID), string(ack.ResourceID)).Scan(&storedVersion, &storedDigest, &storedRef, &storedKey, &storedAt)
@@ -236,6 +263,9 @@ func (s *Store) AdvanceResource(ctx context.Context, command domain.AdvanceResou
 		if !allowedSandboxResourceTransition(result.Phase, command.Phase) {
 			return wrap(ErrInvalidTransition, fmt.Sprintf("sandbox resource cannot advance %s -> %s", result.Phase, command.Phase), nil)
 		}
+		if err := sandboxExecutionRunGuard(ctx, tx, command.ExecutionID, true); err != nil {
+			return err
+		}
 		if command.Phase == domain.SandboxResourceDispatching {
 			var ackCount int
 			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_precreate_acks WHERE sandbox_execution_id=? AND resource_id=? AND resource_version=?`, string(command.ExecutionID), string(command.ResourceID), result.Version).Scan(&ackCount); err != nil {
@@ -252,6 +282,12 @@ func (s *Store) AdvanceResource(ctx context.Context, command domain.AdvanceResou
 		if command.EngineIdentityDigest != "" && string(command.EngineIdentityDigest) != executionDigest {
 			return wrap(ErrConsistency, "engine identity changed", nil)
 		}
+		if result.EngineIdentityDigest != domain.Digest(executionDigest) {
+			return wrap(ErrConsistency, "resource engine identity changed", nil)
+		}
+		if result.LabelsDigest != "" && command.LabelsDigest != "" && result.LabelsDigest != command.LabelsDigest {
+			return wrap(ErrConsistency, "resource labels identity changed", nil)
+		}
 		if command.Phase == domain.SandboxResourceCompleted || command.Phase == domain.SandboxResourceStarted || command.Phase == domain.SandboxResourceStopped || command.Phase == domain.SandboxResourceCleaned {
 			if strings.TrimSpace(command.EngineResourceID) == "" {
 				return errors.New("settled sandbox resource requires exact engine ID")
@@ -259,6 +295,126 @@ func (s *Store) AdvanceResource(ctx context.Context, command domain.AdvanceResou
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase=?, version=version+1, physical_call_id=COALESCE(?, physical_call_id), engine_resource_id=COALESCE(?, engine_resource_id), engine_identity_digest=?, labels_digest=COALESCE(?, labels_digest), last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE resource_id=? AND sandbox_execution_id=? AND version=?`,
 			string(command.Phase), nullableAttemptCall(command.PhysicalCallID), nullableString(command.EngineResourceID), executionDigest, nullableDigest(command.LabelsDigest), command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ResourceID), string(command.ExecutionID), command.ExpectedVersion)
+		if err != nil {
+			return err
+		}
+		return readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result)
+	})
+	return result, err
+}
+
+// RecordResourceStopProof is the sole persistence boundary for STOPPED. The
+// caller must have already performed stop, kill, wait, and ownership inspect;
+// only its immutable digest enters the transaction.
+func (s *Store) RecordResourceStopProof(ctx context.Context, command domain.RecordResourceStopProofCommand) (domain.SandboxResource, error) {
+	if err := command.Validate(); err != nil {
+		return domain.SandboxResource{}, err
+	}
+	digest, _, err := digestJSON(command)
+	if err != nil {
+		return domain.SandboxResource{}, err
+	}
+	var result domain.SandboxResource
+	err = s.immediate(ctx, func(tx *immediateTx) error {
+		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
+			return err
+		}
+		if result.Version != command.ExpectedVersion {
+			var last string
+			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
+			if result.Phase == domain.SandboxResourceStopped && last == string(digest) {
+				return nil
+			}
+			return wrap(ErrVersionConflict, "sandbox resource version changed", nil)
+		}
+		if result.Phase != domain.SandboxResourceCleanupPending && result.Phase != domain.SandboxResourceStarted && result.Phase != domain.SandboxResourceCompleted && result.Phase != domain.SandboxResourceUnknown && result.Phase != domain.SandboxResourceStopped {
+			return wrap(ErrInvalidTransition, "resource stop proof requires an externally created resource", nil)
+		}
+		if strings.TrimSpace(result.EngineResourceID) != "" && result.EngineResourceID != command.EngineResourceID {
+			return wrap(ErrConsistency, "stop proof engine identity differs", nil)
+		}
+		if result.EngineIdentityDigest != command.EngineIdentityDigest {
+			return wrap(ErrConsistency, "stop proof Engine identity differs", nil)
+		}
+		if result.LabelsDigest != "" && command.LabelsDigest != "" && result.LabelsDigest != command.LabelsDigest {
+			return wrap(ErrConsistency, "stop proof labels identity differs", nil)
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='STOPPED', version=version+1, engine_resource_id=?, engine_identity_digest=?, labels_digest=COALESCE(?, labels_digest), stop_proof_digest=?, stop_proof_kind=?, stop_proof_at=?, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND resource_id=? AND version=?`,
+			command.EngineResourceID, string(command.EngineIdentityDigest), nullableDigest(command.LabelsDigest), string(command.ProofDigest), command.ProofKind, formatTime(command.At), "stop_"+string(command.ResourceID), string(digest), formatTime(command.At), string(command.ExecutionID), string(command.ResourceID), command.ExpectedVersion)
+		if err != nil {
+			return err
+		}
+		return readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result)
+	})
+	return result, err
+}
+
+// RecordResourceCleaned persists the removal observation after a stop proof.
+func (s *Store) RecordResourceCleaned(ctx context.Context, command domain.RecordResourceCleanedCommand) (domain.SandboxResource, error) {
+	if err := command.Validate(); err != nil {
+		return domain.SandboxResource{}, err
+	}
+	digest, _, err := digestJSON(command)
+	if err != nil {
+		return domain.SandboxResource{}, err
+	}
+	var result domain.SandboxResource
+	err = s.immediate(ctx, func(tx *immediateTx) error {
+		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
+			return err
+		}
+		if result.Version != command.ExpectedVersion {
+			var last string
+			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
+			if result.Phase == domain.SandboxResourceCleaned && last == string(digest) {
+				return nil
+			}
+			return wrap(ErrVersionConflict, "sandbox resource version changed", nil)
+		}
+		if result.Phase != domain.SandboxResourceStopped {
+			return wrap(ErrInvalidTransition, "resource cleanup requires persisted stop proof", nil)
+		}
+		if result.StopProofDigest == "" || result.EngineResourceID != command.EngineResourceID || result.EngineIdentityDigest != command.EngineIdentityDigest {
+			return wrap(ErrConsistency, "cleanup identity or stop proof differs", nil)
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='CLEANED', version=version+1, cleanup_evidence_digest=?, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND resource_id=? AND version=?`,
+			string(command.EvidenceDigest), "clean_"+string(command.ResourceID), string(digest), formatTime(command.At), string(command.ExecutionID), string(command.ResourceID), command.ExpectedVersion)
+		if err != nil {
+			return err
+		}
+		return readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result)
+	})
+	return result, err
+}
+
+// RecordResourceInterrupted settles a planned resource for which no external
+// create crossed the boundary. The reason is persisted as its stop proof.
+func (s *Store) RecordResourceInterrupted(ctx context.Context, command domain.RecordResourceInterruptedCommand) (domain.SandboxResource, error) {
+	if err := command.Validate(); err != nil {
+		return domain.SandboxResource{}, err
+	}
+	digest, _, err := digestJSON(command)
+	if err != nil {
+		return domain.SandboxResource{}, err
+	}
+	var result domain.SandboxResource
+	err = s.immediate(ctx, func(tx *immediateTx) error {
+		if err := readSandboxResource(ctx, tx, command.ExecutionID, command.ResourceID, &result); err != nil {
+			return err
+		}
+		if result.Version != command.ExpectedVersion {
+			var last string
+			_ = tx.QueryRowContext(ctx, `SELECT last_command_digest FROM sandbox_resources WHERE resource_id=?`, string(command.ResourceID)).Scan(&last)
+			if result.Phase == domain.SandboxResourceInterrupted && last == string(digest) {
+				return nil
+			}
+			return wrap(ErrVersionConflict, "sandbox resource version changed", nil)
+		}
+		if result.Phase != domain.SandboxResourcePlanned {
+			return wrap(ErrInvalidTransition, "only an uncreated planned resource may be interrupted", nil)
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE sandbox_resources SET phase='INTERRUPTED', version=version+1, stop_proof_digest=?, stop_proof_kind='NO_CREATE', stop_proof_at=?, last_idempotency_key=?, last_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND resource_id=? AND version=?`,
+			string(command.ReasonDigest), formatTime(command.At), "interrupt_"+string(command.ResourceID), string(digest), formatTime(command.At), string(command.ExecutionID), string(command.ResourceID), command.ExpectedVersion)
 		if err != nil {
 			return err
 		}
@@ -342,13 +498,13 @@ func (s *Store) FinishCleanup(ctx context.Context, command domain.FinishCleanupC
 			return wrap(ErrInvalidTransition, "sandbox execution is not pending cleanup", nil)
 		}
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_resources WHERE sandbox_execution_id=? AND phase NOT IN ('STOPPED','CLEANED','INTERRUPTED')`, string(command.ExecutionID)).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sandbox_resources WHERE sandbox_execution_id=? AND (phase NOT IN ('CLEANED','INTERRUPTED') OR (phase='CLEANED' AND (stop_proof_digest IS NULL OR cleanup_evidence_digest IS NULL)) OR (phase='INTERRUPTED' AND stop_proof_digest IS NULL))`, string(command.ExecutionID)).Scan(&count); err != nil {
 			return err
 		}
 		if count != 0 {
 			return wrap(ErrInvalidTransition, "sandbox resources are not proven stopped", nil)
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE sandbox_executions SET state='CLEANED', lifecycle_version=lifecycle_version+1, cleanup_version=cleanup_version+1, last_cleanup_idempotency_key=?, last_cleanup_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND lifecycle_version=?`, command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ExecutionID), command.ExpectedVersion)
+		_, err = tx.ExecContext(ctx, `UPDATE sandbox_executions SET state='CLEANED', lifecycle_version=lifecycle_version+1, cleanup_version=cleanup_version+1, reconciliation_evidence_digest=?, last_cleanup_idempotency_key=?, last_cleanup_command_digest=?, updated_at=? WHERE sandbox_execution_id=? AND lifecycle_version=?`, string(command.ReconciliationDigest), command.IdempotencyKey, string(digest), formatTime(command.At), string(command.ExecutionID), command.ExpectedVersion)
 		if err != nil {
 			return err
 		}
@@ -475,7 +631,8 @@ type sandboxQueryer interface {
 func readSandboxExecution(ctx context.Context, queryer sandboxQueryer, id domain.SandboxExecutionID) (domain.SandboxExecution, error) {
 	var e domain.SandboxExecution
 	var rawID, runID, stage, attempt, state, scope, plan, engine, control, token, safety, cleanup, created, updated string
-	err := queryer.QueryRowContext(ctx, `SELECT sandbox_execution_id, run_id, stage_name, attempt_id, logical_operation_id, scope_digest, plan_digest, engine_identity_digest, watchdog_control_ref, watchdog_token_digest, state, lifecycle_version, cleanup_version, safety_deadline_utc, cleanup_deadline_utc, created_at, updated_at FROM sandbox_executions WHERE sandbox_execution_id=?`, string(id)).Scan(&rawID, &runID, &stage, &attempt, &e.LogicalOperationID, &scope, &plan, &engine, &control, &token, &state, &e.LifecycleVersion, &e.CleanupVersion, &safety, &cleanup, &created, &updated)
+	var reconciliation sql.NullString
+	err := queryer.QueryRowContext(ctx, `SELECT sandbox_execution_id, run_id, stage_name, attempt_id, logical_operation_id, scope_digest, plan_digest, engine_identity_digest, watchdog_control_ref, watchdog_token_digest, state, lifecycle_version, cleanup_version, safety_deadline_utc, cleanup_deadline_utc, created_at, updated_at, reconciliation_evidence_digest FROM sandbox_executions WHERE sandbox_execution_id=?`, string(id)).Scan(&rawID, &runID, &stage, &attempt, &e.LogicalOperationID, &scope, &plan, &engine, &control, &token, &state, &e.LifecycleVersion, &e.CleanupVersion, &safety, &cleanup, &created, &updated, &reconciliation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SandboxExecution{}, wrap(ErrNotFound, "sandbox execution does not exist", err)
 	}
@@ -484,6 +641,9 @@ func readSandboxExecution(ctx context.Context, queryer sandboxQueryer, id domain
 	}
 	e.ID, e.RunID, e.StageName, e.AttemptID = domain.SandboxExecutionID(rawID), domain.RunID(runID), domain.StageName(stage), domain.AttemptID(attempt)
 	e.ScopeDigest, e.PlanDigest, e.EngineIdentityDigest, e.WatchdogControlRef, e.WatchdogTokenDigest, e.State = domain.Digest(scope), domain.Digest(plan), domain.Digest(engine), control, domain.Digest(token), domain.SandboxExecutionState(state)
+	if reconciliation.Valid {
+		e.ReconciliationEvidenceDigest = domain.Digest(reconciliation.String)
+	}
 	var parseErr error
 	if e.SafetyDeadlineUTC, parseErr = parseTime(safety); parseErr != nil {
 		return e, parseErr
@@ -554,8 +714,8 @@ func sandboxResourcesTx(ctx context.Context, queryer sandboxQueryer, executionID
 func readSandboxResource(ctx context.Context, queryer sandboxQueryer, executionID domain.SandboxExecutionID, resourceID domain.SandboxResourceID, out *domain.SandboxResource) error {
 	var r domain.SandboxResource
 	var id, execID, kind, role, name, expected, engineDigest, phase, created, updated string
-	var physicalNull, labelsNull, engineIDNull, cgroupNull, nonceNull sql.NullString
-	err := queryer.QueryRowContext(ctx, `SELECT resource_id, sandbox_execution_id, plan_ordinal, resource_kind, resource_role, physical_call_id, deterministic_name, expected_labels_digest, labels_digest, engine_resource_id, engine_identity_digest, cgroup_identity_digest, creation_nonce, phase, version, created_at, updated_at FROM sandbox_resources WHERE sandbox_execution_id=? AND resource_id=?`, string(executionID), string(resourceID)).Scan(&id, &execID, &r.PlanOrdinal, &kind, &role, &physicalNull, &name, &expected, &labelsNull, &engineIDNull, &engineDigest, &cgroupNull, &nonceNull, &phase, &r.Version, &created, &updated)
+	var physicalNull, labelsNull, engineIDNull, cgroupNull, nonceNull, stopDigestNull, stopKindNull, stopAtNull, cleanupEvidenceNull sql.NullString
+	err := queryer.QueryRowContext(ctx, `SELECT resource_id, sandbox_execution_id, plan_ordinal, resource_kind, resource_role, physical_call_id, deterministic_name, expected_labels_digest, labels_digest, engine_resource_id, engine_identity_digest, cgroup_identity_digest, creation_nonce, phase, version, created_at, updated_at, stop_proof_digest, stop_proof_kind, stop_proof_at, cleanup_evidence_digest FROM sandbox_resources WHERE sandbox_execution_id=? AND resource_id=?`, string(executionID), string(resourceID)).Scan(&id, &execID, &r.PlanOrdinal, &kind, &role, &physicalNull, &name, &expected, &labelsNull, &engineIDNull, &engineDigest, &cgroupNull, &nonceNull, &phase, &r.Version, &created, &updated, &stopDigestNull, &stopKindNull, &stopAtNull, &cleanupEvidenceNull)
 	if errors.Is(err, sql.ErrNoRows) {
 		return wrap(ErrNotFound, "sandbox resource does not exist", err)
 	}
@@ -579,6 +739,19 @@ func readSandboxResource(ctx context.Context, queryer sandboxQueryer, executionI
 	}
 	if nonceNull.Valid {
 		r.CreationNonce = nonceNull.String
+	}
+	if stopDigestNull.Valid {
+		r.StopProofDigest = domain.Digest(stopDigestNull.String)
+	}
+	if stopKindNull.Valid {
+		r.StopProofKind = stopKindNull.String
+	}
+	if stopAtNull.Valid {
+		// The proof timestamp is retained in the domain as part of its digest;
+		// the SQL value is validated by the migration constraint.
+	}
+	if cleanupEvidenceNull.Valid {
+		r.CleanupEvidenceDigest = domain.Digest(cleanupEvidenceNull.String)
 	}
 	var parseErr error
 	if r.CreatedAt, parseErr = parseTime(created); parseErr != nil {
@@ -625,6 +798,19 @@ func sandboxRunCancelGuard(ctx context.Context, tx *immediateTx, executionID dom
 		return err
 	}
 	return sandboxCancelGuard(ctx, tx, domain.RunID(runID))
+}
+
+func sandboxExecutionRunGuard(ctx context.Context, tx *immediateTx, executionID domain.SandboxExecutionID, rejectCancel bool) error {
+	var runID string
+	var stage domain.StageName
+	var attempt domain.AttemptID
+	if err := tx.QueryRowContext(ctx, `SELECT run_id, stage_name, attempt_id FROM sandbox_executions WHERE sandbox_execution_id=?`, string(executionID)).Scan(&runID, &stage, &attempt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return wrap(ErrNotFound, "sandbox execution does not exist", err)
+		}
+		return err
+	}
+	return sandboxRunGuard(ctx, tx, domain.RunID(runID), stage, attempt, rejectCancel)
 }
 func sandboxCancelGuard(ctx context.Context, tx *immediateTx, runID domain.RunID) error {
 	return ValidateNoPendingCancel(ctx, tx, runID)

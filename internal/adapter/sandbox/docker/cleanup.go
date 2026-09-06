@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
+	"cpgen/internal/domain"
 	"github.com/containerd/errdefs"
 	moby "github.com/moby/moby/client"
 )
@@ -18,10 +20,14 @@ type StopProof struct {
 }
 
 func (p StopProof) Validate() error {
-	if !p.WaitObserved && !p.InspectStopped {
+	if !p.NotFound && !p.WaitObserved && !p.InspectStopped {
 		return fmt.Errorf("target stop is unproven")
 	}
 	return nil
+}
+
+func (p StopProof) Digest() domain.Digest {
+	return domain.SumBytes([]byte("cpgen.stop-proof/v1\n" + strconv.FormatBool(p.WaitObserved) + "\n" + strconv.FormatBool(p.InspectStopped) + "\n" + strconv.FormatBool(p.NotFound)))
 }
 
 func portableStop(ctx context.Context, engine Engine, id string, verify func(moby.ContainerInspectResult) error) (StopProof, error) {

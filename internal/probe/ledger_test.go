@@ -168,13 +168,13 @@ func TestEnginePingAndContainerClaimsAreMutuallyExclusive(t *testing.T) {
 
 func probeIdentity(planDigest domain.Digest) port.ProbeAuthorizationIdentity {
 	return port.ProbeAuthorizationIdentity{
-		LogicalOperationID: "slice0-probe-operation",
-		RunID:              "run_00000000000000000000000000000001",
-		AttemptID:          "attempt_00000000000000000000000000000001",
-		OwnerID:            "owner_00000000000000000000000000000001",
-		LeaseEpoch:         7,
-		ScopeDigest:        domain.SumBytes([]byte("scope")),
-		PlanDigest:         planDigest,
+		LogicalOperationID:   "slice0-probe-operation",
+		RunID:                "run_00000000000000000000000000000001",
+		AttemptID:            "attempt_00000000000000000000000000000001",
+		SandboxExecutionID:   "sandbox_00000000000000000000000000000001",
+		ScopeDigest:          domain.SumBytes([]byte("scope")),
+		EngineIdentityDigest: domain.SumBytes([]byte("engine")),
+		PlanDigest:           planDigest,
 	}
 }
 

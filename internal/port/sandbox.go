@@ -404,8 +404,6 @@ type DispatchAuthorization interface {
 	CallID() domain.AttemptCallID
 	RunID() domain.RunID
 	AttemptID() domain.AttemptID
-	OwnerID() domain.OwnerID
-	LeaseEpoch() int64
 	ScopeDigest() domain.Digest
 	sealDispatchAuthorization()
 }
@@ -429,14 +427,17 @@ func (v *ContainerRole) UnmarshalJSON(data []byte) error {
 type ContainerDispatchGrant struct {
 	Role ContainerRole
 	Auth DispatchAuthorization
+	// CallRecordID and ExpectedRunVersion bind the physical grant to the
+	// already-prepared Task 4 call ledger. They are not part of the sealed
+	// sandbox identity and are never emitted as Docker ownership labels.
+	CallRecordID       domain.CallRecordID
+	ExpectedRunVersion int64
 }
 
 type SandboxDispatchAuthorization interface {
 	LogicalOperationID() string
 	RunID() domain.RunID
 	AttemptID() domain.AttemptID
-	OwnerID() domain.OwnerID
-	LeaseEpoch() int64
 	ScopeDigest() domain.Digest
 	PlanDigest() domain.Digest
 	ContainerPlan() ContainerPlan

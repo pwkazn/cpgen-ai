@@ -147,11 +147,12 @@ func TestSandboxExecutionLifecyclePersistsBeforeCreateAndSettlesWithCAS(t *testi
 	if err != nil {
 		t.Fatalf("resource cleanup pending: %v", err)
 	}
-	stopped, err = store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: stopped.Version, Phase: domain.SandboxResourceStopped, EngineResourceID: stopped.EngineResourceID, EngineIdentityDigest: engineIdentity, IdempotencyKey: "stopped_00000000000000000000000000000001", At: armAt.Add(8 * time.Second)})
+	proofDigest := domain.SumBytes([]byte("stop proof"))
+	stopped, err = store.RecordResourceStopProof(ctx, domain.RecordResourceStopProofCommand{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: stopped.Version, EngineResourceID: stopped.EngineResourceID, EngineIdentityDigest: engineIdentity, LabelsDigest: labelsDigest, ProofDigest: proofDigest, ProofKind: "STOP_KILL_WAIT_INSPECT", At: armAt.Add(8 * time.Second)})
 	if err != nil {
 		t.Fatalf("resource stopped: %v", err)
 	}
-	cleaned, err := store.AdvanceResource(ctx, domain.AdvanceResourceRequest{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: stopped.Version, Phase: domain.SandboxResourceCleaned, EngineResourceID: stopped.EngineResourceID, EngineIdentityDigest: engineIdentity, IdempotencyKey: "cleaned_00000000000000000000000000000001", At: armAt.Add(9 * time.Second)})
+	cleaned, err := store.RecordResourceCleaned(ctx, domain.RecordResourceCleanedCommand{ExecutionID: executionID, ResourceID: resourceID, ExpectedVersion: stopped.Version, EngineResourceID: stopped.EngineResourceID, EngineIdentityDigest: engineIdentity, EvidenceDigest: domain.SumBytes([]byte("remove evidence")), At: armAt.Add(9 * time.Second)})
 	if err != nil {
 		t.Fatalf("resource cleaned: %v", err)
 	}

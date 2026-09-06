@@ -413,8 +413,6 @@ type ProbeAuthorizationIdentity struct {
 	AttemptID            domain.AttemptID
 	SandboxExecutionID   domain.SandboxExecutionID
 	EngineIdentityDigest domain.Digest
-	OwnerID              domain.OwnerID
-	LeaseEpoch           int64
 	ScopeDigest          domain.Digest
 	PlanDigest           domain.Digest
 }
@@ -429,20 +427,11 @@ func (i ProbeAuthorizationIdentity) Validate() error {
 	if err := i.AttemptID.Validate(); err != nil {
 		return err
 	}
-	if i.SandboxExecutionID != "" {
-		if err := i.SandboxExecutionID.Validate(); err != nil {
-			return err
-		}
-		if err := i.EngineIdentityDigest.Validate(); err != nil {
-			return fmt.Errorf("engine identity digest: %w", err)
-		}
-	} else {
-		if err := i.OwnerID.Validate(); err != nil {
-			return err
-		}
-		if i.LeaseEpoch <= 0 {
-			return fmt.Errorf("lease epoch must be positive")
-		}
+	if err := i.SandboxExecutionID.Validate(); err != nil {
+		return err
+	}
+	if err := i.EngineIdentityDigest.Validate(); err != nil {
+		return fmt.Errorf("engine identity digest: %w", err)
 	}
 	if err := i.ScopeDigest.Validate(); err != nil {
 		return fmt.Errorf("scope digest: %w", err)

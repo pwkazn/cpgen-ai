@@ -4,11 +4,10 @@ package probe
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,16 +25,15 @@ type Dependencies struct {
 }
 
 type Harness struct {
-	mu                 sync.Mutex
-	runner             port.DockerSandbox
-	lock               toolchain.Lock
-	artifacts          *MemoryArtifactStore
-	engine             domain.Digest
-	runID              domain.RunID
-	attemptID          domain.AttemptID
-	sandboxExecutionID domain.SandboxExecutionID
-	scope              domain.Digest
-	ordinal            uint64
+	mu        sync.Mutex
+	runner    port.DockerSandbox
+	lock      toolchain.Lock
+	artifacts *MemoryArtifactStore
+	engine    domain.Digest
+	runID     domain.RunID
+	attemptID domain.AttemptID
+	scope     domain.Digest
+	ordinal   uint64
 }
 
 func NewSlice0ProbeHarness(dependencies Dependencies) (*Harness, error) {
@@ -56,14 +54,10 @@ func NewSlice0ProbeHarness(dependencies Dependencies) (*Harness, error) {
 	if err != nil {
 		return nil, err
 	}
-	sandboxID, err := domain.NewID("sandbox")
-	if err != nil {
-		return nil, err
-	}
 	return &Harness{
 		runner: dependencies.Runner, lock: dependencies.Lock, artifacts: dependencies.Artifacts,
 		engine: dependencies.EngineIdentityDigest, runID: domain.RunID(runID), attemptID: domain.AttemptID(attemptID),
-		sandboxExecutionID: domain.SandboxExecutionID(sandboxID), scope: domain.SumBytes([]byte(runID + ":slice0-probe")),
+		scope: domain.SumBytes([]byte(runID + ":slice0-probe")),
 	}, nil
 }
 
@@ -276,21 +270,25 @@ func (h *Harness) containerAuthorization(logical string, plan port.ContainerPlan
 }
 
 func (h *Harness) planIdentity(logical string) (docker.PlanIdentity, error) {
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return docker.PlanIdentity{}, err
-	}
+	suffix := stableLogicalSuffix(h.runID, h.attemptID, logical)
+	sandboxID := domain.SandboxExecutionID("sandbox_" + suffix)
 	return docker.PlanIdentity{
-		RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: h.sandboxExecutionID, LogicalOperationID: logical,
-		OperationNonce: hex.EncodeToString(nonce[:]), EngineIdentityDigest: h.engine,
+		RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: sandboxID, LogicalOperationID: logical,
+		OperationNonce: suffix, EngineIdentityDigest: h.engine,
 	}, nil
 }
 
 func (h *Harness) probeIdentity(logical string, plan domain.Digest) port.ProbeAuthorizationIdentity {
 	return port.ProbeAuthorizationIdentity{
-		LogicalOperationID: logical, RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: h.sandboxExecutionID,
+		LogicalOperationID: logical, RunID: h.runID, AttemptID: h.attemptID, SandboxExecutionID: domain.SandboxExecutionID("sandbox_" + stableLogicalSuffix(h.runID, h.attemptID, logical)),
 		EngineIdentityDigest: h.engine, ScopeDigest: h.scope, PlanDigest: plan,
 	}
+}
+
+func stableLogicalSuffix(runID domain.RunID, attemptID domain.AttemptID, logical string) string {
+	value := string(domain.SumBytes([]byte(string(runID) + "\x00" + string(attemptID) + "\x00" + logical)))
+	value = strings.TrimPrefix(value, "sha256:")
+	return value[:32]
 }
 
 func (h *Harness) nextLogical(kind string) string {

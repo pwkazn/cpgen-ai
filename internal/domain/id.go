@@ -11,7 +11,6 @@ import (
 type RunID string
 type AttemptID string
 type AttemptCallID string
-type OwnerID string
 type ReservationID string
 type ArtifactWriterTokenID string
 type BlobPinID string
@@ -60,7 +59,6 @@ func unmarshalID(data []byte, typeName string, dst *string) error {
 func (id RunID) Validate() error         { return validateID("run id", string(id)) }
 func (id AttemptID) Validate() error     { return validateID("attempt id", string(id)) }
 func (id AttemptCallID) Validate() error { return validateID("attempt call id", string(id)) }
-func (id OwnerID) Validate() error       { return validateID("owner id", string(id)) }
 func (id ReservationID) Validate() error { return validateID("reservation id", string(id)) }
 func (id ArtifactWriterTokenID) Validate() error {
 	return validateID("artifact writer token id", string(id))
@@ -87,9 +85,6 @@ func (id *AttemptID) UnmarshalJSON(data []byte) error {
 }
 func (id *AttemptCallID) UnmarshalJSON(data []byte) error {
 	return unmarshalID(data, "attempt call id", (*string)(id))
-}
-func (id *OwnerID) UnmarshalJSON(data []byte) error {
-	return unmarshalID(data, "owner id", (*string)(id))
 }
 func (id *ReservationID) UnmarshalJSON(data []byte) error {
 	return unmarshalID(data, "reservation id", (*string)(id))

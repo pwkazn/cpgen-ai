@@ -384,7 +384,7 @@ func watchdogBaseLabels(engine domain.Digest, logicalOperation string, resource 
 	return map[string]string{
 		"org.cpgen.attempt": "attempt", "org.cpgen.engine-digest": string(engine),
 		"org.cpgen.execution-protocol": ExecutionProtocolDockerDirectV2, "org.cpgen.kind": string(resource.Kind),
-		"org.cpgen.lease-epoch": "1", "org.cpgen.logical-operation": logicalOperation,
+		"org.cpgen.sandbox-execution": "sandbox", "org.cpgen.logical-operation": logicalOperation,
 		"org.cpgen.name": resource.DeterministicName, "org.cpgen.ordinal": "0",
 		"org.cpgen.role": string(resource.Role), "org.cpgen.run": "run", "org.cpgen.slice": "0",
 	}

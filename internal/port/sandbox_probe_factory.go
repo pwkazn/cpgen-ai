@@ -44,8 +44,6 @@ func (a *probeSandboxDispatchAuthorization) AttemptID() domain.AttemptID { retur
 func (a *probeSandboxDispatchAuthorization) SandboxExecutionID() domain.SandboxExecutionID {
 	return a.identity.SandboxExecutionID
 }
-func (a *probeSandboxDispatchAuthorization) OwnerID() domain.OwnerID { return a.identity.OwnerID }
-func (a *probeSandboxDispatchAuthorization) LeaseEpoch() int64       { return a.identity.LeaseEpoch }
 func (a *probeSandboxDispatchAuthorization) ScopeDigest() domain.Digest {
 	return a.identity.ScopeDigest
 }
@@ -104,8 +102,9 @@ func (a *probeSandboxDispatchAuthorization) ClaimNextContainer(ctx context.Conte
 	}
 	a.nextResourceIndex++
 	return ContainerDispatchGrant{
-		Role: role,
-		Auth: probeDispatchGrant{callID: callID, identity: a.identity},
+		Role:         role,
+		Auth:         probeDispatchGrant{callID: callID, identity: a.identity},
+		CallRecordID: callRecordForAttempt(callID), ExpectedRunVersion: 1,
 	}, nil
 }
 
@@ -133,7 +132,13 @@ func (g probeDispatchGrant) AttemptID() domain.AttemptID  { return g.identity.At
 func (g probeDispatchGrant) SandboxExecutionID() domain.SandboxExecutionID {
 	return g.identity.SandboxExecutionID
 }
-func (g probeDispatchGrant) OwnerID() domain.OwnerID    { return g.identity.OwnerID }
-func (g probeDispatchGrant) LeaseEpoch() int64          { return g.identity.LeaseEpoch }
 func (g probeDispatchGrant) ScopeDigest() domain.Digest { return g.identity.ScopeDigest }
 func (g probeDispatchGrant) sealDispatchAuthorization() {}
+
+func callRecordForAttempt(id domain.AttemptCallID) domain.CallRecordID {
+	raw := string(id)
+	if len(raw) > len("call_") && raw[:len("call_")] == "call_" {
+		raw = raw[len("call_"):]
+	}
+	return domain.CallRecordID("callrec_" + raw)
+}

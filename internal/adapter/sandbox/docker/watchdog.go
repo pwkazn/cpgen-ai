@@ -23,7 +23,17 @@ import (
 	moby "github.com/moby/moby/client"
 )
 
-type watchdogSession struct{ client *watchdogprotocol.Client }
+type watchdogSession struct {
+	client        *watchdogprotocol.Client
+	controlRef    string
+	controlDigest domain.Digest
+	cleanup       func() error
+	closeOnce     sync.Once
+	closeErr      error
+}
+
+func (s *watchdogSession) ControlRecordRef() string         { return s.controlRef }
+func (s *watchdogSession) ControlFileDigest() domain.Digest { return s.controlDigest }
 
 func (s *watchdogSession) PreCreate(ctx context.Context, resource port.PlannedResource, labels map[string]string) error {
 	return s.client.PreCreate(ctx, resource, labels)
@@ -38,7 +48,15 @@ func (s *watchdogSession) Stopped(ctx context.Context, resource port.PlannedReso
 	return s.client.Stopped(ctx, resource, id)
 }
 func (s *watchdogSession) Cleaned(ctx context.Context) error { return s.client.Cleaned(ctx) }
-func (s *watchdogSession) Close() error                      { return s.client.Close() }
+func (s *watchdogSession) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.client.Close()
+		if s.cleanup != nil {
+			s.closeErr = errors.Join(s.closeErr, s.cleanup())
+		}
+	})
+	return s.closeErr
+}
 
 type dockerWatchdogReconciler struct {
 	engine      Engine
@@ -217,7 +235,12 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 		_ = owner.Close()
 		return nil, err
 	}
-	return &watchdogSession{client: client}, nil
+	encoded, err := jsonMarshalEnvelope(envelope)
+	if err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	return &watchdogSession{client: client, controlRef: "in-process:" + string(envelope.RecordDigest), controlDigest: domain.SumBytes(encoded)}, nil
 }
 
 type DetachedWatchdogOptions struct {
@@ -266,10 +289,7 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 	if record.TokenDigest != c.tokenHash || record.EngineEndpoint != c.options.Config.EngineEndpoint || record.EngineIdentityDigest != c.options.EngineIdentity {
 		return nil, fmt.Errorf("watchdog control record does not match the configured controller")
 	}
-	nonce, err := randomControlNonce()
-	if err != nil {
-		return nil, err
-	}
+	nonce := stableControlNonce(record)
 	listener, address, controlDir, err := prepareWatchdogControl(c.options.ControlDirectory, nonce)
 	if err != nil {
 		return nil, err
@@ -343,11 +363,8 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
-	if err := cleanupWatchdogControl(controlDir, controlPath); err != nil {
-		_ = client.Close()
-		return nil, err
-	}
-	return &watchdogSession{client: client}, nil
+	controlDigest := domain.SumBytes(encoded)
+	return &watchdogSession{client: client, controlRef: controlPath, controlDigest: controlDigest, cleanup: func() error { return cleanupWatchdogControl(controlDir, controlPath) }}, nil
 }
 
 func RunWatchdogService(ctx context.Context, controlPath string) error {
