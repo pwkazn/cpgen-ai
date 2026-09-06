@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -608,15 +609,41 @@ func (s *LocalRunService) reconcileForTerminal(ctx context.Context, runID domain
 	}
 	report, err := s.reconciler.ReconcileRun(ctx, runID)
 	if err != nil {
-		if report.Pending != 0 || len(report.ManualCleanup) != 0 || !report.Completed {
+		if cleanupEvidenceMatchesRun(runID, report) {
 			return fmt.Errorf("%w: %v", ErrCleanupPending, err)
 		}
 		return fmt.Errorf("reconcile sandbox resources: %w", err)
 	}
-	if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
+	if cleanupEvidenceMatchesRun(runID, report) {
 		return fmt.Errorf("%w: sandbox cleanup is not settled", ErrCleanupPending)
 	}
+	if !report.Completed {
+		return errors.New("reconcile sandbox resources: incomplete report without cleanup evidence")
+	}
 	return nil
+}
+
+// cleanupEvidenceMatchesRun is deliberately conservative. Exit code 10 is
+// reserved for a report that names this run and contains durable unresolved
+// sandbox evidence. A zero-value report is commonly returned alongside an
+// inspection/engine error; treating its Completed bit as cleanup evidence
+// would hide the original failure behind a misleading cleanup-pending state.
+func cleanupEvidenceMatchesRun(runID domain.RunID, report domain.SandboxReconcileReport) bool {
+	if runID == "" || report.RunID != runID {
+		return false
+	}
+	if report.Pending > 0 && len(report.Executions) == 0 && len(report.Resources) == 0 && len(report.ManualCleanup) == 0 {
+		return false
+	}
+	if report.Pending <= 0 && len(report.ManualCleanup) == 0 {
+		return false
+	}
+	for _, blocker := range report.ManualCleanup {
+		if !blocker.Manual || blocker.ExecutionID == "" || strings.TrimSpace(blocker.Reason) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func causePointer(cause domain.ExecutionCause) *domain.ExecutionCause { return &cause }
@@ -648,13 +675,16 @@ func (s *LocalRunService) recoverRunning(ctx context.Context, snapshot domain.Ru
 	if s.reconciler != nil {
 		report, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID)
 		if err != nil {
-			if report.Pending != 0 || len(report.ManualCleanup) != 0 || !report.Completed {
+			if cleanupEvidenceMatchesRun(snapshot.RunID, report) {
 				return snapshot, fmt.Errorf("%w: %v", ErrCleanupPending, err)
 			}
 			return snapshot, err
 		}
-		if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
+		if cleanupEvidenceMatchesRun(snapshot.RunID, report) {
 			return snapshot, fmt.Errorf("%w: sandbox recovery cleanup is not settled", ErrCleanupPending)
+		}
+		if !report.Completed {
+			return snapshot, errors.New("sandbox recovery reconciliation incomplete without cleanup evidence")
 		}
 	}
 	if snapshot.ActiveStartedAt != nil {
