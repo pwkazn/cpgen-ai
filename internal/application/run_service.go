@@ -26,6 +26,11 @@ type SandboxReconciler interface {
 	ReconcileRun(context.Context, domain.RunID) (domain.SandboxReconcileReport, error)
 }
 
+// ErrCleanupPending means the exact external sandbox resources are still
+// unresolved. It is deliberately separate from a generic host failure so the
+// CLI can report exit code 10 while preserving the RUNNING projection.
+var ErrCleanupPending = errors.New("sandbox cleanup is pending")
+
 type CurrentStageAttemptReader interface {
 	CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
 }
@@ -48,18 +53,28 @@ type RunServiceConfig struct {
 	Clock              clock.Clock
 	ActiveTimeInterval time.Duration
 	Reconciler         SandboxReconciler
+	// EffectiveConfigJSON and EffectiveConfigDigest bind every newly created
+	// run to the validated, redacted configuration that composed this service.
+	// They are optional for direct unit-test composition; in that case Generate
+	// retains its historical request-bound fallback.
+	EffectiveConfigJSON   []byte
+	EffectiveConfigDigest domain.Digest
+	Scenario              string
 }
 
 type LocalRunService struct {
-	runtime    port.RuntimeStore
-	reviews    port.ReviewStore
-	locks      *runlock.Manager
-	pipeline   workflow.Slice1Pipeline
-	clock      clock.Clock
-	active     *ActiveTime
-	reconciler SandboxReconciler
-	mu         sync.Mutex
-	attempts   map[domain.RunID]domain.AttemptID
+	runtime               port.RuntimeStore
+	reviews               port.ReviewStore
+	locks                 *runlock.Manager
+	pipeline              workflow.Slice1Pipeline
+	clock                 clock.Clock
+	active                *ActiveTime
+	reconciler            SandboxReconciler
+	effectiveConfigJSON   []byte
+	effectiveConfigDigest domain.Digest
+	scenario              string
+	mu                    sync.Mutex
+	attempts              map[domain.RunID]domain.AttemptID
 }
 
 func NewRunService(config RunServiceConfig) (*LocalRunService, error) {
@@ -76,7 +91,21 @@ func NewRunService(config RunServiceConfig) (*LocalRunService, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LocalRunService{runtime: config.Runtime, reviews: config.Reviews, locks: config.Locks, pipeline: config.Pipeline, clock: config.Clock, active: active, reconciler: config.Reconciler, attempts: make(map[domain.RunID]domain.AttemptID)}, nil
+	service := &LocalRunService{runtime: config.Runtime, reviews: config.Reviews, locks: config.Locks, pipeline: config.Pipeline, clock: config.Clock, active: active, reconciler: config.Reconciler, attempts: make(map[domain.RunID]domain.AttemptID), scenario: config.Scenario}
+	if len(config.EffectiveConfigJSON) != 0 || config.EffectiveConfigDigest != "" {
+		if len(config.EffectiveConfigJSON) == 0 || config.EffectiveConfigDigest == "" {
+			return nil, errors.New("effective config JSON and digest must be supplied together")
+		}
+		if err := config.EffectiveConfigDigest.Validate(); err != nil {
+			return nil, fmt.Errorf("effective config digest: %w", err)
+		}
+		if domain.SumBytes(config.EffectiveConfigJSON) != config.EffectiveConfigDigest {
+			return nil, errors.New("effective config digest does not match JSON")
+		}
+		service.effectiveConfigJSON = append([]byte(nil), config.EffectiveConfigJSON...)
+		service.effectiveConfigDigest = config.EffectiveConfigDigest
+	}
+	return service, nil
 }
 
 func NewLocalRunService(config RunServiceConfig) (*LocalRunService, error) {
@@ -98,6 +127,11 @@ func (s *LocalRunService) Generate(ctx context.Context, request domain.RunReques
 	requestDigest := domain.SumBytes(requestJSON)
 	workflowDigest := domain.SumBytes([]byte(workflow.Slice1WorkflowRevision))
 	configJSON := append([]byte(nil), requestJSON...)
+	configDigest := domain.SumBytes(configJSON)
+	if len(s.effectiveConfigJSON) != 0 {
+		configJSON = append([]byte(nil), s.effectiveConfigJSON...)
+		configDigest = s.effectiveConfigDigest
+	}
 	seed := int64(0)
 	if request.Seed != nil {
 		seed = *request.Seed
@@ -105,11 +139,15 @@ func (s *LocalRunService) Generate(ctx context.Context, request domain.RunReques
 		seed = int64(len(request.Brief))
 	}
 	now := s.clock.Now().UTC()
-	create := domain.CreateRunRequest{RunID: domain.RunID(runIDRaw), SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: requestDigest, EffectiveSeed: seed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: domain.SumBytes(configJSON), WorkflowRevision: workflow.Slice1WorkflowRevision, SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: workflowDigest, BudgetLimits: request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: now, IdempotencyKey: stableServiceID("create", domain.RunID(runIDRaw), 1)}
+	create := domain.CreateRunRequest{RunID: domain.RunID(runIDRaw), SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: requestDigest, EffectiveSeed: seed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: configDigest, WorkflowRevision: workflow.Slice1WorkflowRevision, SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: workflowDigest, BudgetLimits: request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: now, IdempotencyKey: stableServiceID("create", domain.RunID(runIDRaw), 1)}
 	if err := create.Validate(); err != nil {
 		return domain.RunSnapshot{}, err
 	}
-	return s.execute(ctx, create.RunID, &create, domain.Slice1Input{Brief: request.Brief, RequestDigest: requestDigest, ConfigDigest: create.RedactedEffectiveConfigDigest, Scenario: request.Mode})
+	scenario := request.Mode
+	if s.scenario != "" {
+		scenario = s.scenario
+	}
+	return s.execute(ctx, create.RunID, &create, domain.Slice1Input{Brief: request.Brief, RequestDigest: requestDigest, ConfigDigest: create.RedactedEffectiveConfigDigest, Scenario: scenario})
 }
 
 func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
@@ -570,10 +608,13 @@ func (s *LocalRunService) reconcileForTerminal(ctx context.Context, runID domain
 	}
 	report, err := s.reconciler.ReconcileRun(ctx, runID)
 	if err != nil {
+		if report.Pending != 0 || len(report.ManualCleanup) != 0 || !report.Completed {
+			return fmt.Errorf("%w: %v", ErrCleanupPending, err)
+		}
 		return fmt.Errorf("reconcile sandbox resources: %w", err)
 	}
 	if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
-		return errors.New("sandbox cleanup is not settled")
+		return fmt.Errorf("%w: sandbox cleanup is not settled", ErrCleanupPending)
 	}
 	return nil
 }
@@ -607,10 +648,13 @@ func (s *LocalRunService) recoverRunning(ctx context.Context, snapshot domain.Ru
 	if s.reconciler != nil {
 		report, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID)
 		if err != nil {
+			if report.Pending != 0 || len(report.ManualCleanup) != 0 || !report.Completed {
+				return snapshot, fmt.Errorf("%w: %v", ErrCleanupPending, err)
+			}
 			return snapshot, err
 		}
 		if !report.Completed || report.Pending != 0 || len(report.ManualCleanup) != 0 {
-			return snapshot, errors.New("sandbox recovery cleanup is not settled")
+			return snapshot, fmt.Errorf("%w: sandbox recovery cleanup is not settled", ErrCleanupPending)
 		}
 	}
 	if snapshot.ActiveStartedAt != nil {
@@ -652,7 +696,11 @@ func (s *LocalRunService) applyReview(ctx context.Context, snapshot domain.RunSn
 }
 
 func (s *LocalRunService) replayInput(snapshot domain.RunSnapshot) domain.Slice1Input {
-	return domain.Slice1Input{Brief: "resume", RequestDigest: snapshot.RequestDigest, ConfigDigest: snapshot.ConfigDigest}
+	input := domain.Slice1Input{Brief: "resume", RequestDigest: snapshot.RequestDigest, ConfigDigest: snapshot.ConfigDigest}
+	if s.scenario != "" {
+		input.Scenario = s.scenario
+	}
+	return input
 }
 func (s *LocalRunService) replayPrepared(snapshot domain.RunSnapshot) domain.Slice1Prepared {
 	digest := domain.SumBytes([]byte(fmt.Sprintf("slice1.prepare/v1\x00%s\x00%s\x00%s", snapshot.RequestDigest, snapshot.ConfigDigest, snapshot.WorkflowDigest)))

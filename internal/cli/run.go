@@ -16,7 +16,6 @@ import (
 	"time"
 
 	dockersandbox "cpgen/internal/adapter/sandbox/docker"
-	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/application"
 	"cpgen/internal/config"
@@ -39,32 +38,6 @@ type Dependencies struct {
 	CheckDocker func(context.Context, dockersandbox.Config) (dockersandbox.StaticReport, error)
 	RunWatchdog func(context.Context, string) error
 	Bootstrap   func(context.Context, config.Config) (*application.Application, error)
-}
-
-func init() {
-	// The CLI is the process composition root. Registering the SQLite adapter
-	// here keeps application bootstrap storage-agnostic and prevents the
-	// storage package's in-package integration tests from forming an import
-	// cycle through application.
-	application.RegisterStorageFactory(func(ctx context.Context, cfg config.Config) (application.StorageResources, error) {
-		effective, err := cfg.EffectiveConfig()
-		if err != nil {
-			return application.StorageResources{}, err
-		}
-		store, err := sqlite.Open(ctx, sqlite.Config{Path: effective.Paths.Database, BusyTimeout: cfg.SQLite.BusyTimeout, MaxReaders: cfg.SQLite.MaxReaders})
-		if err != nil {
-			return application.StorageResources{}, err
-		}
-		blobs, err := blob.NewStore(effective.Paths.Artifacts)
-		if err != nil {
-			_ = store.Close()
-			return application.StorageResources{}, err
-		}
-		return application.StorageResources{
-			Runtime: store, Reviews: store, Metadata: store, Ledger: store, BlobStore: blobs,
-			SandboxRuntime: store, Close: store.Close,
-		}, nil
-	})
 }
 
 type doctorOutput struct {
@@ -218,9 +191,9 @@ func runGenerate(args []string, app *application.Application, stdout, stderr io.
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
 	status := string(snapshot.State)
-	code := 0
+	code := exitForSnapshot(snapshot.State)
 	if snapshot.State == domain.RunNeedsReview {
-		code, status = 6, "NEEDS_REVIEW"
+		status = "NEEDS_REVIEW"
 	}
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: status, Data: snapshot, RunVersion: snapshot.Version}, code)
 }
@@ -239,6 +212,9 @@ func runRunCommand(args []string, app *application.Application, stdout, stderr i
 			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run list [--state STATE]"))
 		}
 		filter := domain.RunFilter{Limit: *limit}
+		if *limit < 0 || *limit > 1000 {
+			return writeStateError(stdout, stderr, 2, "invalid_argument", errors.New("run list limit must be between zero and 1000"))
+		}
 		if *state != "" {
 			parsed := domain.RunState(*state)
 			if !parsed.Valid() {
@@ -279,10 +255,7 @@ func runRunCommand(args []string, app *application.Application, stdout, stderr i
 		if err != nil {
 			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 		}
-		code := 0
-		if snapshot.State == domain.RunNeedsReview {
-			code = 6
-		}
+		code := exitForSnapshot(snapshot.State)
 		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, code)
 	case "cancel":
 		return runCancel(args[1:], app, stdout, stderr)
@@ -584,6 +557,8 @@ func writeStateError(stdout, stderr io.Writer, code int, errorCode string, err e
 
 func codeForError(err error) string {
 	switch {
+	case errors.Is(err, application.ErrCleanupPending):
+		return "cleanup_pending"
 	case errors.Is(err, runlock.ErrBusy):
 		return "lock_busy"
 	case errors.Is(err, sqlite.ErrNotFound):
@@ -601,6 +576,8 @@ func codeForError(err error) string {
 
 func exitForError(err error) int {
 	switch {
+	case errors.Is(err, application.ErrCleanupPending):
+		return 10
 	case errors.Is(err, runlock.ErrBusy):
 		return 4
 	case errors.Is(err, sqlite.ErrNotFound):
@@ -611,6 +588,25 @@ func exitForError(err error) int {
 		return 7
 	default:
 		return 9
+	}
+}
+
+// exitForSnapshot preserves the CLI's stable review fixture code (6) and
+// gives every other non-terminal or terminal workflow outcome its own
+// non-zero result. These values are intentionally distinct from malformed
+// input (2), missing IDs (3), lock conflicts (4), and cleanup timeout (10).
+func exitForSnapshot(state domain.RunState) int {
+	switch state {
+	case domain.RunBlocked:
+		return 5
+	case domain.RunNeedsReview:
+		return 6
+	case domain.RunFailed:
+		return 7
+	case domain.RunCancelled:
+		return 8
+	default:
+		return 0
 	}
 }
 

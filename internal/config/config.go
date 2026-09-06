@@ -165,17 +165,17 @@ func Decode(data []byte) (Config, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var root yaml.Node
 	if err := decoder.Decode(&root); err != nil {
-		return Config{}, fmt.Errorf("decode YAML: %w", err)
+		return Config{}, field("config", fmt.Errorf("decode YAML: %w", err))
 	}
 	if root.Kind == 0 {
-		return Config{}, errors.New("config document is empty")
+		return Config{}, field("config", errors.New("config document is empty"))
 	}
 	var extra yaml.Node
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return Config{}, errors.New("config contains trailing YAML document")
+			return Config{}, field("config", errors.New("config contains trailing YAML document"))
 		}
-		return Config{}, fmt.Errorf("decode trailing YAML document: %w", err)
+		return Config{}, field("config", fmt.Errorf("decode trailing YAML document: %w", err))
 	}
 	if err := inspectNode(&root, "", map[string]map[string]struct{}{
 		"":              {"storage": {}, "sqlite": {}, "runtime": {}, "fake_workflow": {}},
@@ -188,7 +188,7 @@ func Decode(data []byte) (Config, error) {
 	}
 	var raw rawConfig
 	if err := root.Decode(&raw); err != nil {
-		return Config{}, fmt.Errorf("decode config fields: %w", err)
+		return Config{}, field("config", fmt.Errorf("decode config fields: %w", err))
 	}
 	result := Config{Storage: StorageConfig{StateRoot: raw.Storage.StateRoot}, SQLite: SQLiteConfig{MaxReaders: raw.SQLite.MaxReaders}, FakeWorkflow: FakeWorkflowConfig{Scenario: raw.FakeWorkflow.Scenario}}
 	result.Runtime = RuntimeConfig{}
@@ -303,7 +303,17 @@ func (c Config) Effective() ([]byte, error) {
 		SQLite:       EffectiveSQLite{BusyTimeout: c.SQLite.BusyTimeout.String(), MaxReaders: c.SQLite.MaxReaders},
 		Runtime:      EffectiveRuntime{LockPollInterval: c.Runtime.LockPollInterval.String(), ControlPollInterval: c.Runtime.ControlPollInterval.String(), AccountingHeartbeat: c.Runtime.AccountingHeartbeat.String(), CleanupWait: c.Runtime.CleanupWait.String()},
 		FakeWorkflow: c.FakeWorkflow, Paths: c.Paths}
-	return json.Marshal(effective)
+	encoded, err := json.Marshal(effective)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	return json.Marshal(decoded)
 }
 
 func (c Config) EffectiveConfig() (EffectiveConfig, error) {
@@ -408,30 +418,30 @@ func isFilesystemRoot(path string) bool {
 func inspectNode(node *yaml.Node, path string, allowed map[string]map[string]struct{}) error {
 	if node.Kind == yaml.DocumentNode {
 		if len(node.Content) != 1 {
-			return errors.New("config document is malformed")
+			return field(pathOrRoot(path), errors.New("config document is malformed"))
 		}
 		return inspectNode(node.Content[0], path, allowed)
 	}
 	if node.Kind == yaml.AliasNode {
-		return fmt.Errorf("%s: YAML aliases are not permitted", pathOrRoot(path))
+		return field(pathOrRoot(path), errors.New("YAML aliases are not permitted"))
 	}
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("%s: YAML document must be a mapping", pathOrRoot(path))
+		return field(pathOrRoot(path), errors.New("YAML document must be a mapping"))
 	}
 	keys := allowed[path]
 	seen := make(map[string]struct{}, len(node.Content)/2)
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		key, value := node.Content[i], node.Content[i+1]
 		if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
-			return fmt.Errorf("%s: mapping keys must be strings", pathOrRoot(path))
+			return field(pathOrRoot(path), errors.New("mapping keys must be strings"))
 		}
 		name := key.Value
 		if _, ok := seen[name]; ok {
-			return fmt.Errorf("%s.%s: duplicate key", pathOrRoot(path), name)
+			return field(joinField(path, name), errors.New("duplicate key"))
 		}
 		seen[name] = struct{}{}
 		if _, ok := keys[name]; !ok {
-			return fmt.Errorf("%s.%s: unknown field", pathOrRoot(path), name)
+			return field(joinField(path, name), errors.New("unknown field"))
 		}
 		childPath := name
 		if path != "" {
@@ -442,7 +452,7 @@ func inspectNode(node *yaml.Node, path string, allowed map[string]map[string]str
 				return err
 			}
 		} else if value.Kind == yaml.AliasNode {
-			return fmt.Errorf("%s: YAML aliases are not permitted", childPath)
+			return field(childPath, errors.New("YAML aliases are not permitted"))
 		}
 	}
 	return nil
@@ -453,4 +463,11 @@ func pathOrRoot(path string) string {
 		return "config"
 	}
 	return path
+}
+
+func joinField(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
 }

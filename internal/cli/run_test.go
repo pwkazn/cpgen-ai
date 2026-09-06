@@ -64,6 +64,24 @@ func TestStatefulConfigAndGenerateCommandsUseExplicitConfig(t *testing.T) {
 	}
 }
 
+func TestRunListRejectsInvalidLimitWithArgumentExitCode(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "cpgen.yaml")
+	if err := os.WriteFile(configPath, []byte("storage:\n  state_root: "+filepath.Join(root, "state")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []string{"-1", "1001"} {
+		var stdout, stderr bytes.Buffer
+		code := cli.Run([]string{"--config", configPath, "run", "list", "--limit", limit}, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("limit %s exit code = %d, stdout=%q stderr=%q", limit, code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "invalid_argument") {
+			t.Fatalf("limit %s missing invalid_argument: %q", limit, stdout.String())
+		}
+	}
+}
+
 func TestDoctorJSONUsesExplicitFlagsAndReportsHealthy(t *testing.T) {
 	t.Parallel()
 	digest := domain.SumBytes([]byte("image"))

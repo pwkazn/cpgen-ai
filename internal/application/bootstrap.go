@@ -9,6 +9,7 @@ import (
 
 	"cpgen/internal/adapter/fake"
 	"cpgen/internal/adapter/storage/blob"
+	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/clock"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
@@ -31,10 +32,10 @@ type Application struct {
 	closeStorage func() error
 }
 
-// StorageResources is the narrow adapter bundle needed by the local
-// composition. Keeping its factory outside this package avoids a dependency
-// cycle with storage's in-package tests while allowing the CLI (the process
-// composition root) to select SQLite explicitly.
+// StorageResources is retained as a compatibility type for callers that used
+// the old test composition hook. Bootstrap no longer consumes a process
+// global factory: the local application always composes its own SQLite and
+// blob stores from the validated effective paths below.
 type StorageResources struct {
 	Runtime        port.RuntimeStore
 	Reviews        port.ReviewStore
@@ -49,14 +50,11 @@ type StorageResources struct {
 
 type StorageFactory func(context.Context, config.Config) (StorageResources, error)
 
-var storageFactory StorageFactory
-
-// RegisterStorageFactory installs the process composition's durable storage
-// adapter. It is called by the CLI composition root; tests can register a
-// fake or SQLite factory without introducing an application/storage cycle.
-func RegisterStorageFactory(factory StorageFactory) {
-	storageFactory = factory
-}
+// RegisterStorageFactory is kept source-compatible for older tests and
+// embedders. It is deliberately ignored by Bootstrap; relying on mutable
+// process-global registration would make the required application contract
+// depend on import order and CLI initialization.
+func RegisterStorageFactory(StorageFactory) {}
 
 // Bootstrap creates the private local application from a validated config.
 // The pipeline is deliberately Fake-only until Task 10's explicit Docker
@@ -72,18 +70,32 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	effectiveJSON, err := cfg.Effective()
+	if err != nil {
+		return nil, err
+	}
 	paths := effective.Paths
 	for _, directory := range []string{paths.StateRoot, paths.Runtime, paths.Locks, paths.Work} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return nil, fmt.Errorf("create private state directory %q: %w", directory, err)
 		}
 	}
-	if storageFactory == nil {
-		return nil, errors.New("no local storage factory is registered")
-	}
-	resources, err := storageFactory(ctx, cfg)
+	store, err := sqlite.Open(ctx, sqlite.Config{Path: paths.Database, BusyTimeout: cfg.SQLite.BusyTimeout, MaxReaders: cfg.SQLite.MaxReaders})
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap storage: %w", err)
+		return nil, fmt.Errorf("bootstrap sqlite: %w", err)
+	}
+	blobs, err := blob.NewStore(paths.Artifacts)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("bootstrap artifacts: %w", err)
+	}
+	if err := blobs.AttachCorruptionLedger(store); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("bootstrap artifact ledger: %w", err)
+	}
+	resources := StorageResources{
+		Runtime: store, Reviews: store, Metadata: store, Ledger: store,
+		BlobStore: blobs, SandboxRuntime: store, Close: store.Close,
 	}
 	closeStore := true
 	defer func() {
@@ -122,7 +134,8 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 	runs, err := NewRunService(RunServiceConfig{
 		Runtime: resources.Runtime, Reviews: resources.Reviews, Locks: locks, Pipeline: pipeline,
 		Clock: clock.Real{}, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat,
-		Reconciler: reconciler,
+		Reconciler: reconciler, EffectiveConfigJSON: effectiveJSON,
+		EffectiveConfigDigest: cfg.EffectiveDigest(), Scenario: cfg.FakeWorkflow.Scenario,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap run service: %w", err)

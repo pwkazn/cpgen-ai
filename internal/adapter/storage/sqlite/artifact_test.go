@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/application"
+	artifactsession "cpgen/internal/artifact"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -58,7 +58,7 @@ func TestCorruptVerifiedBlobQuarantinesSQLiteRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := application.NewPreparedArtifactSession(fixture.store, blobs, prepared)
+	session, err := artifactsession.NewPreparedArtifactSession(fixture.store, blobs, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestArtifactWriterSessionFinalizesAndFinishAttachesOccurrence(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := application.NewPreparedArtifactSession(fixture.store, blobs, prepared)
+	session, err := artifactsession.NewPreparedArtifactSession(fixture.store, blobs, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,20 +199,20 @@ func TestPreparedArtifactSessionDoesNotDoubleOpenDeterministicWriter(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := application.NewPreparedArtifactSession(fixture.store, blobs, prepared)
+	first, err := artifactsession.NewPreparedArtifactSession(fixture.store, blobs, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := application.NewPreparedArtifactSession(fixture.store, blobs, prepared)
+	second, err := artifactsession.NewPreparedArtifactSession(fixture.store, blobs, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
 	results := make(chan error, 2)
 	writers := make(chan port.ArtifactWriter, 2)
 	var wg sync.WaitGroup
-	for _, session := range []application.PreparedArtifactSession{first, second} {
+	for _, session := range []artifactsession.PreparedArtifactSession{first, second} {
 		wg.Add(1)
-		go func(session application.PreparedArtifactSession) {
+		go func(session artifactsession.PreparedArtifactSession) {
 			defer wg.Done()
 			writer, prepareErr := session.Prepare(context.Background(), declarationID)
 			if prepareErr == nil {

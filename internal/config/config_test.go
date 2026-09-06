@@ -53,6 +53,11 @@ func TestDecodeRejectsDuplicateUnknownAndTrailingDocuments(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := config.Decode([]byte(data)); err == nil {
 				t.Fatal("invalid config was accepted")
+			} else {
+				var fieldErr *config.FieldError
+				if !errors.As(err, &fieldErr) || fieldErr.Field == "" {
+					t.Fatalf("error is not field-qualified: %v", err)
+				}
 			}
 		})
 	}
