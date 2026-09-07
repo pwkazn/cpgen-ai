@@ -137,16 +137,13 @@ func (p Slice2Pipeline) Policy() similarity.DecisionPolicy { return p.policy }
 // DependencyRevalidator to perform a fresh provider/cache check; historical
 // health data is never consulted by this method.
 func (p Slice2Pipeline) Revalidate(ctx context.Context, view domain.RunView, stage domain.StageName, binding domain.BlockedCheckpoint) (bool, error) {
+	if err := p.Validate(); err != nil {
+		return false, err
+	}
 	if err := validateSlice2RevalidationView(view, stage); err != nil {
 		return false, err
 	}
-	if binding.RunID != view.RunID() || binding.StageName != stage || binding.PolicyDigest != p.policy.PolicyDigest || (stage == "similarity" && binding.DependencyID != "similarity-provider") {
-		return false, errors.New("slice2 blocked checkpoint is not bound to this run, stage, or policy")
-	}
-	if err := binding.StageInputDigest.Validate(); err != nil {
-		return false, err
-	}
-	if err := binding.DependencyDigest.Validate(); err != nil {
+	if err := validateSlice2CheckpointBinding(view, stage, p.policy.PolicyDigest, binding); err != nil {
 		return false, err
 	}
 	var candidate any
@@ -162,9 +159,34 @@ func (p Slice2Pipeline) Revalidate(ctx context.Context, view domain.RunView, sta
 	}
 	revalidator, ok := candidate.(DependencyRevalidator)
 	if !ok {
-		return true, nil
+		return false, errors.New("slice2 blocked stage does not expose a dependency revalidator")
 	}
 	return revalidator.Revalidate(ctx, view, binding)
+}
+
+func validateSlice2CheckpointBinding(view domain.RunView, stage domain.StageName, policyDigest domain.Digest, binding domain.BlockedCheckpoint) error {
+	if err := binding.Validate(); err != nil {
+		return fmt.Errorf("slice2 blocked checkpoint: %w", err)
+	}
+	if binding.RunID != view.RunID() || binding.StageName != stage || binding.PolicyDigest != policyDigest {
+		return errors.New("slice2 blocked checkpoint is not bound to this run, stage, or policy")
+	}
+	return nil
+}
+
+func validateSlice2StageResult[I any](view domain.RunView, stage domain.StageName, policyDigest domain.Digest, inputDigest domain.Digest, result domain.AgentResult[I]) error {
+	if err := result.Validate(); err != nil {
+		return err
+	}
+	if result.Blocked != nil {
+		if err := validateSlice2CheckpointBinding(view, stage, policyDigest, *result.Blocked); err != nil {
+			return err
+		}
+		if result.Blocked.StageInputDigest != inputDigest {
+			return errors.New("slice2 blocked checkpoint is not bound to stage input")
+		}
+	}
+	return nil
 }
 
 // Run executes Idea -> Statement -> Similarity in the fixed order. It returns
@@ -192,7 +214,11 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
-	if err := ideaResult.Validate(); err != nil {
+	ideaInputDigest, err := snapshot.Digest()
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "idea", p.policy.PolicyDigest, ideaInputDigest, ideaResult); err != nil {
 		return empty, err
 	}
 	if control := controlResult[domain.IdeaBatch, Slice2Output](ideaResult); control != nil {
@@ -224,7 +250,11 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
-	if err := statementResult.Validate(); err != nil {
+	statementInputDigest, err := statementInput.Digest()
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "statement", p.policy.PolicyDigest, statementInputDigest, statementResult); err != nil {
 		return empty, err
 	}
 	if control := controlResult[domain.ProblemSpec, Slice2Output](statementResult); control != nil {
@@ -242,11 +272,15 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return empty, err
+	}
 	similarityResult, err := p.similarity.Run(ctx, view, request)
 	if err != nil {
 		return empty, err
 	}
-	if err := similarityResult.Validate(); err != nil {
+	if err := validateSlice2StageResult(view, "similarity", p.policy.PolicyDigest, requestDigest, similarityResult); err != nil {
 		return empty, err
 	}
 	if control := controlResult[similarity.Evidence, Slice2Output](similarityResult); control != nil {
@@ -254,10 +288,6 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	}
 	evidence := *similarityResult.Value
 	if err := evidence.Validate(); err != nil {
-		return empty, err
-	}
-	requestDigest, err := request.Digest()
-	if err != nil {
 		return empty, err
 	}
 	if evidence.RequestDigest != requestDigest || evidence.PolicyDigest != p.policy.PolicyDigest {
@@ -279,15 +309,16 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	case similarity.DecisionReject:
 		return domain.Failure[Slice2Output](domain.PermanentFailure{Code: domain.FailurePolicyRejected, Evidence: evidence.EvidenceDigest}), nil
 	case similarity.DecisionBlocked:
-		return domain.Blocked[Slice2Output](blockedSimilarityCheckpoint(view, requestDigest, p.policy.PolicyDigest, evidence.EvidenceDigest)), nil
+		return domain.Blocked[Slice2Output](blockedSimilarityCheckpoint(view, requestDigest, p.policy.PolicyDigest, evidence.ProviderIdentity, evidence.EvidenceDigest)), nil
 	default:
 		return empty, errors.New("unknown similarity decision")
 	}
 }
 
-func blockedSimilarityCheckpoint(view domain.RunView, inputDigest, policyDigest, errorDigest domain.Digest) domain.BlockedCheckpoint {
+func blockedSimilarityCheckpoint(view domain.RunView, inputDigest domain.Digest, policyDigest domain.Digest, dependencyID string, errorDigest domain.Digest) domain.BlockedCheckpoint {
 	now := time.Unix(0, 0).UTC()
-	return domain.BlockedCheckpoint{RunID: view.RunID(), StageName: "similarity", StageInputDigest: inputDigest, DependencyID: "similarity-provider", DependencyDigest: errorDigest, PolicyDigest: policyDigest, ErrorDigest: errorDigest, RetryAfter: now, CreatedAt: now}
+	dependencyDigest := domain.SumBytes([]byte("similarity-provider/v1\x00" + dependencyID))
+	return domain.BlockedCheckpoint{RunID: view.RunID(), StageName: "similarity", StageInputDigest: inputDigest, DependencyID: dependencyID, DependencyDigest: dependencyDigest, PolicyDigest: policyDigest, ErrorDigest: errorDigest, RetryAfter: now, CreatedAt: now}
 }
 
 func logicalSimilarityID(view domain.RunView, problem domain.ProblemSpec) string {
@@ -344,12 +375,28 @@ func (p Slice2Pipeline) RunIdea(ctx context.Context, view domain.RunView, input 
 	if input.RequestDigest != view.RequestDigest() || input.SchemaVersion != string(view.SchemaVersion()) {
 		return empty, errors.New("idea input is not bound to RunView")
 	}
+	if input.Request.BudgetLimits != view.Budget().Limits {
+		return empty, errors.New("idea input budget differs from RunView")
+	}
 	result, err := p.idea.Run(ctx, view, input)
 	if err != nil {
 		return empty, err
 	}
-	if err := result.Validate(); err != nil {
+	inputDigest, err := input.Digest()
+	if err != nil {
 		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "idea", p.policy.PolicyDigest, inputDigest, result); err != nil {
+		return empty, err
+	}
+	if result.Value != nil {
+		batch := *result.Value
+		if err := batch.Validate(); err != nil {
+			return empty, fmt.Errorf("idea result: %w", err)
+		}
+		if batch.RequestDigest != input.RequestDigest || batch.EffectiveSeed != input.EffectiveSeed || batch.CallBudget != input.Request.BudgetLimits {
+			return empty, errors.New("idea result is not bound to its snapshot input")
+		}
 	}
 	return result, nil
 }
@@ -369,8 +416,21 @@ func (p Slice2Pipeline) RunStatement(ctx context.Context, view domain.RunView, i
 	if err != nil {
 		return empty, err
 	}
-	if err := result.Validate(); err != nil {
+	inputDigest, err := input.Digest()
+	if err != nil {
 		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "statement", p.policy.PolicyDigest, inputDigest, result); err != nil {
+		return empty, err
+	}
+	if result.Value != nil {
+		problem := *result.Value
+		if err := problem.Validate(); err != nil {
+			return empty, fmt.Errorf("statement result: %w", err)
+		}
+		if problem.RequestDigest != view.RequestDigest() || problem.RequestSnapshotDigest != input.RequestSnapshotDigest || problem.IdeaBatchDigest != input.IdeaBatchDigest || problem.IdeaSelectionDigest != input.IdeaSelectionDigest || problem.SelectedIdeaID != input.SelectedIdeaID {
+			return empty, errors.New("statement result is not bound to its statement input or RunView")
+		}
 	}
 	return result, nil
 }
@@ -389,12 +449,28 @@ func (p Slice2Pipeline) RunSimilarity(ctx context.Context, view domain.RunView, 
 	if input.PolicyDigest != p.policy.PolicyDigest {
 		return empty, errors.New("similarity request policy differs from pipeline policy")
 	}
+	if input.PolicyRef != p.policy.PolicyRef {
+		return empty, errors.New("similarity request policy reference differs from pipeline policy")
+	}
 	result, err := p.similarity.Run(ctx, view, input)
 	if err != nil {
 		return empty, err
 	}
-	if err := result.Validate(); err != nil {
+	inputDigest, err := input.Digest()
+	if err != nil {
 		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "similarity", p.policy.PolicyDigest, inputDigest, result); err != nil {
+		return empty, err
+	}
+	if result.Value != nil {
+		evidence := *result.Value
+		if err := evidence.Validate(); err != nil {
+			return empty, fmt.Errorf("similarity result: %w", err)
+		}
+		if evidence.RequestDigest != inputDigest || evidence.PolicyDigest != p.policy.PolicyDigest {
+			return empty, errors.New("similarity result is not bound to its request or pipeline policy")
+		}
 	}
 	return result, nil
 }

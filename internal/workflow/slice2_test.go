@@ -82,7 +82,7 @@ type revalidatingSimilarityStep struct {
 
 func (s *revalidatingSimilarityStep) Revalidate(_ context.Context, _ domain.RunView, binding domain.BlockedCheckpoint) (bool, error) {
 	s.calls.Add(1)
-	if binding.StageName != "similarity" || binding.DependencyID != "similarity-provider" {
+	if binding.StageName != "similarity" || binding.DependencyID != "fixture-similarity" || binding.DependencyDigest != domain.SumBytes([]byte("similarity-provider/v1\x00fixture-similarity")) {
 		return false, nil
 	}
 	return s.healthy.Load(), nil
