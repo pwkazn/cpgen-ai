@@ -10,16 +10,37 @@ import (
 )
 
 type PromptRef struct {
-	Step    string        `json:"step"`
-	Version string        `json:"version"`
-	Digest  domain.Digest `json:"digest"`
+	Step           string               `json:"step"`
+	Version        string               `json:"version"`
+	Digest         domain.Digest        `json:"digest"` // legacy alias for TemplateDigest
+	TemplateDigest domain.Digest        `json:"template_digest,omitempty"`
+	SchemaVersion  domain.SchemaVersion `json:"schema_version,omitempty"`
+	SchemaDigest   domain.Digest        `json:"schema_digest,omitempty"`
 }
 
 func (r PromptRef) Validate() error {
 	if r.Step == "" || r.Version == "" {
 		return fmt.Errorf("prompt step and version are required")
 	}
-	return r.Digest.Validate()
+	if r.Digest != "" && r.TemplateDigest != "" && r.Digest != r.TemplateDigest {
+		return fmt.Errorf("prompt template digests differ")
+	}
+	templateDigest := r.TemplateDigest
+	if templateDigest == "" {
+		templateDigest = r.Digest
+	}
+	if err := templateDigest.Validate(); err != nil {
+		return err
+	}
+	if r.SchemaVersion != "" {
+		if err := r.SchemaVersion.Validate(); err != nil {
+			return err
+		}
+		if err := r.SchemaDigest.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type OutputSchemaRef struct {
