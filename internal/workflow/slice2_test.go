@@ -19,6 +19,10 @@ type slice2IdeaStep struct {
 
 func (slice2IdeaStep) Name() domain.StageName { return "idea" }
 
+func (slice2IdeaStep) PolicyDigest() domain.Digest {
+	return domain.SumBytes([]byte("fixture-idea-policy"))
+}
+
 func (s slice2IdeaStep) Run(_ context.Context, _ domain.RunView, input domain.GenerationRequestSnapshotV1) (domain.AgentResult[domain.IdeaBatch], error) {
 	if input.RequestDigest != s.batch.RequestDigest {
 		return domain.AgentResult[domain.IdeaBatch]{}, errors.New("fixture request digest mismatch")
@@ -32,6 +36,10 @@ type slice2StatementStep struct {
 }
 
 func (slice2StatementStep) Name() domain.StageName { return "statement" }
+
+func (slice2StatementStep) PolicyDigest() domain.Digest {
+	return domain.SumBytes([]byte("fixture-statement-policy"))
+}
 
 func (s slice2StatementStep) Run(_ context.Context, _ domain.RunView, input domain.StatementInput) (domain.AgentResult[domain.ProblemSpec], error) {
 	selection, err := domain.NewIdeaSelection(s.snapshot.RequestDigest, s.batch, input.SelectedIdeaID, domain.SelectionOrdinalPolicyV1, []string{"deterministic_selection"}, []domain.Digest{s.batch.BatchDigest})

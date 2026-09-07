@@ -128,7 +128,13 @@ func NewSlice2PipelineWithPolicy(
 			return Slice2Pipeline{}, fmt.Errorf("%s step has name %q, want %q", name, pair.got, pair.want)
 		}
 	}
-	return Slice2Pipeline{idea: idea, statement: statement, similarity: similarityStep, policy: policy, selectionPolicy: selectionPolicy}, nil
+	pipeline := Slice2Pipeline{idea: idea, statement: statement, similarity: similarityStep, policy: policy, selectionPolicy: selectionPolicy}
+	for _, stage := range []domain.StageName{"idea", "statement"} {
+		if _, err := pipeline.stagePolicyDigest(stage); err != nil {
+			return Slice2Pipeline{}, err
+		}
+	}
+	return pipeline, nil
 }
 
 func (p Slice2Pipeline) Validate() error {
@@ -171,12 +177,7 @@ func (p Slice2Pipeline) stagePolicyDigest(stage domain.StageName) (domain.Digest
 		}
 		return digest, nil
 	}
-	// Generic Steps predating StagePolicyProvider still carry their own
-	// checkpoint policy digest.  Returning an empty expected value makes the
-	// pipeline validate that durable digest without confusing it with the
-	// Similarity policy; provider-backed stages should implement the interface
-	// so the digest can be checked against their live configuration.
-	return "", nil
+	return "", fmt.Errorf("%s stage must expose its policy digest", stage)
 }
 
 // Revalidate delegates to the exact current compiled stage. A step may expose
@@ -290,14 +291,7 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 		return empty, err
 	}
 	if len(feasible) == 0 {
-		reviewPolicy := ideaPolicy
-		if reviewPolicy == "" {
-			// Legacy generic steps do not expose a stage policy.  The immutable
-			// run configuration digest is the only safe durable fallback; it is
-			// deliberately not confused with the Similarity decision policy.
-			reviewPolicy = view.ConfigDigest()
-		}
-		return domain.Review[Slice2Output](domain.ReviewRequest{EvidenceDigest: batch.BatchDigest, PolicyDigest: reviewPolicy, Reason: "no feasible idea candidates"}), nil
+		return domain.Review[Slice2Output](domain.ReviewRequest{EvidenceDigest: batch.BatchDigest, PolicyDigest: ideaPolicy, Reason: "no feasible idea candidates"}), nil
 	}
 	selection, err := domain.NewIdeaSelection(snapshot.RequestDigest, batch, feasible[0], p.selectionPolicy, []string{"deterministic_selection"}, []domain.Digest{batch.BatchDigest})
 	if err != nil {
