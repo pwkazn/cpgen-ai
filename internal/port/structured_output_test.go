@@ -221,3 +221,30 @@ func TestBoundedRepairInputIsCanonicalAndBounded(t *testing.T) {
 		t.Fatal("unknown repair code was accepted")
 	}
 }
+
+type nestedValidatedValue struct {
+	SchemaVersion string               `json:"schema_version"`
+	Child         nestedValidatedChild `json:"child"`
+}
+
+type nestedValidatedChild struct {
+	Label string `json:"label" maxLength:"1"`
+}
+
+func (v *nestedValidatedChild) ValidateStructuredOutput() error {
+	if v.Label != "é" {
+		return errors.New("nested label invariant failed")
+	}
+	return nil
+}
+
+func TestDecodeStructuredOutputNormalizesUnicodeAndValidatesNestedTypes(t *testing.T) {
+	raw := []byte("{\"schema_version\":\"cpgen.idea/v1\",\"child\":{\"label\":\"e\\u0301\"}}")
+	var value nestedValidatedValue
+	if err := DecodeStructuredOutput(raw, testStructuredSchema, 1024, &value); err != nil {
+		t.Fatalf("nested normalized value rejected: %v", err)
+	}
+	if value.Child.Label != "é" {
+		t.Fatalf("nested label was not NFC-normalized: %q", value.Child.Label)
+	}
+}

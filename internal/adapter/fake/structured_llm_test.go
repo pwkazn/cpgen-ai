@@ -75,3 +75,21 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 		t.Fatalf("typed validator error = %T %v", err, err)
 	}
 }
+
+func TestStructuredLLMValidatorCannotOptOutOfGenericBoundary(t *testing.T) {
+	request := port.GenerateRequest{
+		Prompt:    port.PromptRef{Step: "idea", Version: "v1", Digest: domain.SumBytes([]byte("prompt"))},
+		Schema:    port.OutputSchemaRef{SchemaVersion: "cpgen.idea/v1", Digest: domain.SumBytes([]byte("schema"))},
+		Variables: []byte(`{"brief":"fixture"}`),
+		Sampling:  port.SamplingPolicy{TopP: 1},
+		MaxOutput: port.OutputLimit{Tokens: 10, Bytes: 1024},
+	}
+	model := NewStructuredLLMWithValidator(func([]byte, port.OutputSchemaRef, int64) error {
+		return nil
+	}, []byte(`{"schema_version":"cpgen.idea/v1","title":"safe","title":"secret"}`))
+	_, err := model.Generate(context.Background(), request)
+	var typed *port.StructuredOutputError
+	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputDuplicateField {
+		t.Fatalf("callback bypassed generic boundary: %T %v", err, err)
+	}
+}
