@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"cpgen/internal/domain"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -634,6 +635,126 @@ func validateTypedValue(value reflect.Value) error {
 	if !value.IsValid() {
 		return nil
 	}
+	// Normalize every decoded string before applying semantic validators. This
+	// gives typed consumers one canonical Unicode representation while keeping
+	// the raw provider bytes available for audit/debug boundaries.
+	if err := normalizeStructuredValue(value); err != nil {
+		return err
+	}
+	return validateTypedValueDeep(value)
+}
+
+func normalizeStructuredValue(value reflect.Value) error {
+	if !value.IsValid() {
+		return nil
+	}
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.String:
+		raw := value.String()
+		if !utf8.ValidString(raw) {
+			return errors.New("structured field is not valid UTF-8")
+		}
+		if value.CanSet() {
+			value.SetString(norm.NFC.String(raw))
+		}
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			field := value.Type().Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			if err := normalizeStructuredValue(value.Field(index)); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			if err := normalizeStructuredValue(value.Index(index)); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return nil
+		}
+		iter := value.MapRange()
+		for iter.Next() {
+			item := iter.Value()
+			if item.Kind() == reflect.String {
+				normalized := norm.NFC.String(item.String())
+				if normalized != item.String() {
+					value.SetMapIndex(iter.Key(), reflect.ValueOf(normalized).Convert(item.Type()))
+				}
+				continue
+			}
+			if err := normalizeStructuredValue(item); err != nil {
+				return err
+			}
+		}
+	case reflect.Interface:
+		if !value.IsNil() {
+			return normalizeStructuredValue(value.Elem())
+		}
+	}
+	return nil
+}
+
+// validateTypedValueDeep invokes custom validators at every nested typed
+// boundary, not only on the root response. This prevents a valid outer object
+// from bypassing invariants on an embedded candidate/metadata value.
+func validateTypedValueDeep(value reflect.Value) error {
+	if !value.IsValid() {
+		return nil
+	}
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.Struct:
+		for index := 0; index < value.NumField(); index++ {
+			field := value.Type().Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			current := value.Field(index)
+			if err := validateTypedValueDeep(current); err != nil {
+				return err
+			}
+		}
+		if err := validateStructInvariants(value); err != nil {
+			return err
+		}
+	case reflect.Slice, reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			if err := validateTypedValueDeep(value.Index(index)); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		iter := value.MapRange()
+		for iter.Next() {
+			if err := validateTypedValueDeep(iter.Value()); err != nil {
+				return err
+			}
+		}
+	case reflect.Interface:
+		if !value.IsNil() {
+			return validateTypedValueDeep(value.Elem())
+		}
+	}
+	return nil
+}
+
+func validateStructInvariants(value reflect.Value) error {
 	validated := false
 	if value.CanAddr() && value.Addr().CanInterface() {
 		if validator, ok := value.Addr().Interface().(StructuredValidator); ok {
@@ -799,7 +920,9 @@ func lengthOf(value reflect.Value) int {
 		value = value.Elem()
 	}
 	switch value.Kind() {
-	case reflect.String, reflect.Array, reflect.Slice, reflect.Map:
+	case reflect.String:
+		return utf8.RuneCountInString(value.String())
+	case reflect.Array, reflect.Slice, reflect.Map:
 		return value.Len()
 	default:
 		return 0

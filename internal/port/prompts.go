@@ -16,10 +16,12 @@ import (
 // template digest is over the UTF-8 template bytes and the schema digest is
 // the digest of the provider-neutral output schema document.
 type PromptVersionRef struct {
-	Step           string          `json:"step"`
-	Version        string          `json:"version"`
-	TemplateDigest domain.Digest   `json:"template_digest"`
-	OutputSchema   OutputSchemaRef `json:"output_schema"`
+	Step               string               `json:"step"`
+	Version            string               `json:"version"`
+	TemplateDigest     domain.Digest        `json:"template_digest"`
+	InputSchemaVersion domain.SchemaVersion `json:"input_schema_version,omitempty"`
+	OutputSchema       OutputSchemaRef      `json:"output_schema"`
+	MigrationPolicy    string               `json:"migration_policy,omitempty"`
 }
 
 // TypedPromptRef is retained as a descriptive alias for callers that want to
@@ -36,8 +38,16 @@ func (r PromptVersionRef) Validate() error {
 	if err := r.TemplateDigest.Validate(); err != nil {
 		return fmt.Errorf("template digest: %w", err)
 	}
+	if r.InputSchemaVersion != "" {
+		if err := r.InputSchemaVersion.Validate(); err != nil {
+			return fmt.Errorf("input schema version: %w", err)
+		}
+	}
 	if err := r.OutputSchema.Validate(); err != nil {
 		return fmt.Errorf("output schema: %w", err)
+	}
+	if r.MigrationPolicy != "" && !validPolicy(r.MigrationPolicy) {
+		return errors.New("invalid prompt migration policy")
 	}
 	return nil
 }
@@ -61,7 +71,7 @@ type PromptDefinition = PromptVersion
 type RegisteredPrompt = PromptVersion
 
 func (p PromptVersion) Ref() PromptVersionRef {
-	return PromptVersionRef{Step: p.Step, Version: p.Version, TemplateDigest: p.TemplateDigest, OutputSchema: p.OutputSchema}
+	return PromptVersionRef{Step: p.Step, Version: p.Version, TemplateDigest: p.TemplateDigest, InputSchemaVersion: p.InputSchemaVersion, OutputSchema: p.OutputSchema, MigrationPolicy: p.MigrationPolicy}
 }
 
 func (p PromptVersion) Validate() error {
@@ -186,7 +196,15 @@ func (r *PromptRegistry) Lookup(ref PromptVersionRef) (PromptVersion, error) {
 	if !exists {
 		return PromptVersion{}, &PromptRegistryError{Code: PromptUnknownVersion, Step: ref.Step, Version: ref.Version}
 	}
-	if definition.TemplateDigest != ref.TemplateDigest || definition.OutputSchema != ref.OutputSchema {
+	definitionPolicy := definition.MigrationPolicy
+	if definitionPolicy == "" {
+		definitionPolicy = "NONE"
+	}
+	refPolicy := ref.MigrationPolicy
+	if refPolicy == "" {
+		refPolicy = "NONE"
+	}
+	if definition.TemplateDigest != ref.TemplateDigest || definition.InputSchemaVersion != ref.InputSchemaVersion || definition.OutputSchema != ref.OutputSchema || definitionPolicy != refPolicy {
 		return PromptVersion{}, &PromptRegistryError{Code: PromptUnknownVersion, Step: ref.Step, Version: ref.Version}
 	}
 	return definition, nil
@@ -203,7 +221,7 @@ func (r *PromptRegistry) Resolve(ref PromptRef) (PromptVersion, error) {
 	if digest == "" {
 		digest = ref.Digest
 	}
-	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, OutputSchema: OutputSchemaRef{SchemaVersion: ref.SchemaVersion, Digest: ref.SchemaDigest}})
+	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, InputSchemaVersion: ref.InputSchemaVersion, OutputSchema: OutputSchemaRef{SchemaVersion: ref.SchemaVersion, Digest: ref.SchemaDigest}, MigrationPolicy: ref.MigrationPolicy})
 }
 
 // ResolveLegacy binds the pre-schema PromptRef shape (Step, Version, Digest)
@@ -219,7 +237,7 @@ func (r *PromptRegistry) ResolveLegacy(ref PromptRef, schema OutputSchemaRef) (P
 	if digest == "" {
 		digest = ref.Digest
 	}
-	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, OutputSchema: schema})
+	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, InputSchemaVersion: ref.InputSchemaVersion, OutputSchema: schema, MigrationPolicy: ref.MigrationPolicy})
 }
 
 // ResolveRequest binds the legacy PromptRef (whose Digest is the template

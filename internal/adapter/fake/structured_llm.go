@@ -68,7 +68,13 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 	f.mu.Unlock()
 	var validationErr error
 	if f.validator != nil {
-		validationErr = f.validator(raw, request.Schema, request.MaxOutput.Bytes)
+		// Even compatibility callbacks must pass the same generic provider
+		// boundary first; a callback returning nil cannot opt out of strict
+		// JSON/schema/duplicate-field checks.
+		validationErr = port.ValidateStructuredOutput(raw, request.Schema.SchemaVersion, request.MaxOutput.Bytes)
+		if validationErr == nil {
+			validationErr = f.validator(raw, request.Schema, request.MaxOutput.Bytes)
+		}
 	} else if f.registry != nil {
 		validationErr = f.registry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
 	} else {

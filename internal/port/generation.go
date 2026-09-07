@@ -12,12 +12,14 @@ import (
 )
 
 type PromptRef struct {
-	Step           string               `json:"step"`
-	Version        string               `json:"version"`
-	Digest         domain.Digest        `json:"digest"` // legacy alias for TemplateDigest
-	TemplateDigest domain.Digest        `json:"template_digest,omitempty"`
-	SchemaVersion  domain.SchemaVersion `json:"schema_version,omitempty"`
-	SchemaDigest   domain.Digest        `json:"schema_digest,omitempty"`
+	Step               string               `json:"step"`
+	Version            string               `json:"version"`
+	Digest             domain.Digest        `json:"digest"` // legacy alias for TemplateDigest
+	TemplateDigest     domain.Digest        `json:"template_digest,omitempty"`
+	InputSchemaVersion domain.SchemaVersion `json:"input_schema_version,omitempty"`
+	SchemaVersion      domain.SchemaVersion `json:"schema_version,omitempty"`
+	SchemaDigest       domain.Digest        `json:"schema_digest,omitempty"`
+	MigrationPolicy    string               `json:"migration_policy,omitempty"`
 }
 
 func (r PromptRef) Validate() error {
@@ -43,6 +45,14 @@ func (r PromptRef) Validate() error {
 		}
 	} else if r.SchemaDigest != "" {
 		return fmt.Errorf("prompt schema digest requires schema version")
+	}
+	if r.InputSchemaVersion != "" {
+		if err := r.InputSchemaVersion.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.MigrationPolicy != "" && !validPolicy(r.MigrationPolicy) {
+		return fmt.Errorf("invalid prompt migration policy")
 	}
 	return nil
 }
