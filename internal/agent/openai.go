@@ -260,6 +260,15 @@ func New(c Config) (*OpenAICompatible, error) {
 			baseTransport = normalized.HTTPClient.Transport
 		}
 	}
+	// An arbitrary RoundTripper can choose a proxy or a different dial target
+	// after the pre-flight policy check. Only the standard transport, whose
+	// dial path we wrap below, is trusted for public endpoints. Custom
+	// transports remain available for explicit loopback tests.
+	if !isLoopbackHost(endpoint.Hostname()) {
+		if _, ok := baseTransport.(*http.Transport); !ok {
+			return nil, &Error{Code: ErrorPolicy}
+		}
+	}
 	client.Transport = newPolicyTransport(baseTransport, normalized.AllowInsecureHTTP || normalized.AllowLoopbackForTesting)
 	return &OpenAICompatible{config: normalized, endpoint: endpoint, client: client}, nil
 }
@@ -451,6 +460,20 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 			resolveErr = definition.Validate()
 			if resolveErr == nil && (definition.Step != request.Prompt.Step || definition.Version != request.Prompt.Version) {
 				resolveErr = errors.New("prompt definition differs")
+			}
+			if resolveErr == nil && definition.InputSchemaVersion != request.Prompt.InputSchemaVersion {
+				resolveErr = errors.New("prompt input schema differs")
+			}
+			definitionPolicy := definition.MigrationPolicy
+			if definitionPolicy == "" {
+				definitionPolicy = "NONE"
+			}
+			requestPolicy := request.Prompt.MigrationPolicy
+			if requestPolicy == "" {
+				requestPolicy = "NONE"
+			}
+			if resolveErr == nil && definitionPolicy != requestPolicy {
+				resolveErr = errors.New("prompt migration policy differs")
 			}
 			if resolveErr == nil && definition.OutputSchema != request.Schema {
 				resolveErr = errors.New("prompt output schema differs")
@@ -744,6 +767,7 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 		"model":                   safeMetadata(a.config.Model),
 		"request_digest":          string(requestDigest),
 		"logical_identity_digest": string(logicalDigest),
+		"cache_provenance":        "live",
 		"response_digest":         string(responseDigest),
 		"usage_source":            usageSource,
 		"usage_settlement":        usageSource,
