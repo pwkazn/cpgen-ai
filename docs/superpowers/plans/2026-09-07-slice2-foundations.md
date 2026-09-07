@@ -9,12 +9,13 @@ and foreground-only; do not add a hosted workflow service or daemon.
 Evidence: Tasks 1–5 are implemented in the commits on this branch. The
 deterministic Slice 2 pipeline now exposes resume-safe typed Idea, Statement,
 and Similarity stage boundaries; stage policies are explicit, dependency
-checkpoints bind run/stage/input/policy/service identity, and resume requires a
-fresh adapter revalidator. `go test ./... -count=1`, focused race tests for
-`port`, `adapter/fake`, `agent`, `similarity`, and `workflow`, `go vet ./...`,
-`go build ./cmd/cpgen`, the Slice 1 architecture check, and `git diff --check`
-pass. The repository has no `cmd/diffcheck` package, so the plan's illustrative
-`go build ./cmd/diffcheck` command is not applicable.
+checkpoints bind run/stage/input/policy/service identity, resume requires a
+fresh adapter revalidator, and model responses require a digest-bound typed
+schema registry. `go test ./... -count=1`, focused race tests for `port`,
+`adapter/fake`, `agent`, `similarity`, and `workflow`, `go vet ./...`, `go build
+./cmd/cpgen`, the Slice 1 architecture check, and `git diff --check` pass. The
+repository has no `cmd/diffcheck` package, so the plan's illustrative `go build
+./cmd/diffcheck` command is not applicable.
 
 ## Tasks
 
