@@ -185,7 +185,9 @@ func (c Config) normalized() (Config, *url.URL, error) {
 		c.ProviderIdentity = hostname
 	}
 	if c.ServiceIdentity == "" {
-		c.ServiceIdentity = endpoint.Host
+		// Include scheme, host/port, and any configured path so two allowed
+		// services on the same host cannot share a checkpoint identity.
+		c.ServiceIdentity = endpoint.String()
 	}
 	if err := validateSafeIdentity(c.ProviderIdentity); err != nil {
 		return Config{}, nil, &Error{Code: ErrorConfiguration}
