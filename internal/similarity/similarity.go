@@ -430,10 +430,6 @@ func newEvidence(request Request, providerIdentity string, hits []Hit, observedA
 	if err != nil {
 		return Evidence{}, err
 	}
-	if trace.LogicalOperationID == "" {
-		reqDigest, _ := request.Digest()
-		trace = domain.CallTrace{LogicalOperationID: "similarity:" + strings.TrimPrefix(string(reqDigest), "sha256:"), DispatchKind: domain.DispatchNone}
-	}
 	e := Evidence{
 		SchemaVersion:    EvidenceSchemaVersion,
 		RequestDigest:    mustDigest(request),
@@ -614,6 +610,8 @@ type Decision struct {
 	ObservedScore       float64              `json:"observed_score,omitempty"`
 	AcceptanceThreshold float64              `json:"acceptance_threshold,omitempty"`
 	RejectionThreshold  float64              `json:"rejection_threshold,omitempty"`
+	ReviewBandLower     float64              `json:"review_band_lower,omitempty"`
+	ReviewBandUpper     float64              `json:"review_band_upper,omitempty"`
 }
 
 func (d Decision) Validate() error {
@@ -636,6 +634,45 @@ func (d Decision) Validate() error {
 	}
 	if math.IsNaN(d.ObservedScore) || math.IsInf(d.ObservedScore, 0) || d.ObservedScore < 0 || d.ObservedScore > 1 {
 		return errors.New("decision observed score is invalid")
+	}
+	for name, value := range map[string]float64{
+		"acceptance threshold": d.AcceptanceThreshold, "rejection threshold": d.RejectionThreshold,
+		"review band lower": d.ReviewBandLower, "review band upper": d.ReviewBandUpper,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+			return fmt.Errorf("%s is outside 0..1", name)
+		}
+	}
+	if !(d.AcceptanceThreshold <= d.ReviewBandLower && d.ReviewBandLower <= d.ReviewBandUpper && d.ReviewBandUpper <= d.RejectionThreshold) {
+		return errors.New("decision thresholds are not ordered")
+	}
+	switch d.Kind {
+	case DecisionAccept:
+		if d.ExplanationCode != ExplanationBelowAcceptance || !(d.ObservedScore < d.AcceptanceThreshold) {
+			return errors.New("accept decision does not match its explanation or threshold")
+		}
+	case DecisionReject:
+		if d.ExplanationCode != ExplanationAtRejection || d.ObservedScore < d.RejectionThreshold {
+			return errors.New("reject decision does not match its explanation or threshold")
+		}
+	case DecisionNeedsReview:
+		if d.ExplanationCode == ExplanationDesignatedSource {
+			break
+		}
+		if d.ExplanationCode != ExplanationReviewBand || d.ObservedScore < d.ReviewBandLower || d.ObservedScore > d.ReviewBandUpper {
+			return errors.New("review decision does not match its explanation or band")
+		}
+	case DecisionBlocked:
+		switch d.ExplanationCode {
+		case ExplanationInvalidEvidence:
+			// Invalid policy/evidence may not have a usable evidence digest.
+		case ExplanationPolicyMismatch, ExplanationInsufficient:
+			if err := d.EvidenceDigest.Validate(); err != nil {
+				return fmt.Errorf("blocked decision evidence digest: %w", err)
+			}
+		default:
+			return errors.New("blocked decision has an invalid explanation")
+		}
 	}
 	return nil
 }
@@ -769,6 +806,8 @@ func Evaluate(policy DecisionPolicy, evidence Evidence) Decision {
 	decision.ObservedScore = evidence.ScoreSummary.MaxScore
 	decision.AcceptanceThreshold = policy.AcceptanceThreshold
 	decision.RejectionThreshold = policy.RejectionThreshold
+	decision.ReviewBandLower = policy.ReviewBandLower
+	decision.ReviewBandUpper = policy.ReviewBandUpper
 	if evidence.PolicyDigest != policyDigest {
 		decision.ExplanationCode = ExplanationPolicyMismatch
 		return decision

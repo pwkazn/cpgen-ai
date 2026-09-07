@@ -23,6 +23,14 @@ type Slice2Pipeline struct {
 	selectionPolicy string
 }
 
+// StagePolicyProvider is implemented by provider-backed stages that can
+// expose the exact policy digest used for their calls.  Idea and Statement
+// policies are owned by their LLM stages; they must not be replaced by the
+// Similarity decision policy merely because the pipeline also has one.
+type StagePolicyProvider interface {
+	PolicyDigest() domain.Digest
+}
+
 // Slice2Output is the typed chain handed to the next slice. Every field is
 // validated against the preceding content contract before the value leaves
 // the pipeline.
@@ -54,6 +62,17 @@ func (o Slice2Output) Validate() error {
 	}
 	if err := o.SimilarityRequest.Validate(); err != nil {
 		return fmt.Errorf("similarity request: %w", err)
+	}
+	projection, err := similarity.NewPackageSafeProjection(o.Problem.Title, o.Problem.Description, o.Problem.RequiredConstraints, o.Problem.Language)
+	if err != nil {
+		return fmt.Errorf("similarity projection: %w", err)
+	}
+	projectionDigest, err := projection.Digest()
+	if err != nil {
+		return fmt.Errorf("similarity projection digest: %w", err)
+	}
+	if o.SimilarityRequest.CandidateProjectionDigest != projectionDigest {
+		return errors.New("similarity request projection is not bound to problem spec")
 	}
 	requestDigest, err := o.SimilarityRequest.Digest()
 	if err != nil {
@@ -133,6 +152,33 @@ func (p Slice2Pipeline) Similarity() Step[similarity.Request, similarity.Evidenc
 }
 func (p Slice2Pipeline) Policy() similarity.DecisionPolicy { return p.policy }
 
+func (p Slice2Pipeline) stagePolicyDigest(stage domain.StageName) (domain.Digest, error) {
+	var candidate any
+	switch stage {
+	case "idea":
+		candidate = p.idea
+	case "statement":
+		candidate = p.statement
+	case "similarity":
+		return p.policy.PolicyDigest, nil
+	default:
+		return "", fmt.Errorf("unsupported slice2 stage %q", stage)
+	}
+	if provider, ok := candidate.(StagePolicyProvider); ok {
+		digest := provider.PolicyDigest()
+		if err := digest.Validate(); err != nil {
+			return "", fmt.Errorf("%s stage policy digest: %w", stage, err)
+		}
+		return digest, nil
+	}
+	// Generic Steps predating StagePolicyProvider still carry their own
+	// checkpoint policy digest.  Returning an empty expected value makes the
+	// pipeline validate that durable digest without confusing it with the
+	// Similarity policy; provider-backed stages should implement the interface
+	// so the digest can be checked against their live configuration.
+	return "", nil
+}
+
 // Revalidate delegates to the exact current compiled stage. A step may expose
 // DependencyRevalidator to perform a fresh provider/cache check; historical
 // health data is never consulted by this method.
@@ -143,7 +189,11 @@ func (p Slice2Pipeline) Revalidate(ctx context.Context, view domain.RunView, sta
 	if err := validateSlice2RevalidationView(view, stage); err != nil {
 		return false, err
 	}
-	if err := validateSlice2CheckpointBinding(view, stage, p.policy.PolicyDigest, binding); err != nil {
+	stagePolicy, err := p.stagePolicyDigest(stage)
+	if err != nil {
+		return false, err
+	}
+	if err := validateSlice2CheckpointBinding(view, stage, stagePolicy, binding); err != nil {
 		return false, err
 	}
 	var candidate any
@@ -168,7 +218,7 @@ func validateSlice2CheckpointBinding(view domain.RunView, stage domain.StageName
 	if err := binding.Validate(); err != nil {
 		return fmt.Errorf("slice2 blocked checkpoint: %w", err)
 	}
-	if binding.RunID != view.RunID() || binding.StageName != stage || binding.PolicyDigest != policyDigest {
+	if binding.RunID != view.RunID() || binding.StageName != stage || (policyDigest != "" && binding.PolicyDigest != policyDigest) {
 		return errors.New("slice2 blocked checkpoint is not bound to this run, stage, or policy")
 	}
 	return nil
@@ -218,7 +268,11 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
-	if err := validateSlice2StageResult(view, "idea", p.policy.PolicyDigest, ideaInputDigest, ideaResult); err != nil {
+	ideaPolicy, err := p.stagePolicyDigest("idea")
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "idea", ideaPolicy, ideaInputDigest, ideaResult); err != nil {
 		return empty, err
 	}
 	if control := controlResult[domain.IdeaBatch, Slice2Output](ideaResult); control != nil {
@@ -254,7 +308,11 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
-	if err := validateSlice2StageResult(view, "statement", p.policy.PolicyDigest, statementInputDigest, statementResult); err != nil {
+	statementPolicy, err := p.stagePolicyDigest("statement")
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "statement", statementPolicy, statementInputDigest, statementResult); err != nil {
 		return empty, err
 	}
 	if control := controlResult[domain.ProblemSpec, Slice2Output](statementResult); control != nil {
@@ -386,7 +444,11 @@ func (p Slice2Pipeline) RunIdea(ctx context.Context, view domain.RunView, input 
 	if err != nil {
 		return empty, err
 	}
-	if err := validateSlice2StageResult(view, "idea", p.policy.PolicyDigest, inputDigest, result); err != nil {
+	stagePolicy, err := p.stagePolicyDigest("idea")
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "idea", stagePolicy, inputDigest, result); err != nil {
 		return empty, err
 	}
 	if result.Value != nil {
@@ -420,7 +482,11 @@ func (p Slice2Pipeline) RunStatement(ctx context.Context, view domain.RunView, i
 	if err != nil {
 		return empty, err
 	}
-	if err := validateSlice2StageResult(view, "statement", p.policy.PolicyDigest, inputDigest, result); err != nil {
+	stagePolicy, err := p.stagePolicyDigest("statement")
+	if err != nil {
+		return empty, err
+	}
+	if err := validateSlice2StageResult(view, "statement", stagePolicy, inputDigest, result); err != nil {
 		return empty, err
 	}
 	if result.Value != nil {

@@ -284,7 +284,7 @@ func (a *HTTPAdapter) SearchEvidence(ctx context.Context, request Request) (Evid
 	if a == nil {
 		return EvidenceOutcome{}, &Error{Code: ErrorConfiguration}
 	}
-	return a.searchEvidence(ctx, request, a.config.MaxHits)
+	return a.searchEvidence(ctx, request, request.Limit)
 }
 
 func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHits int) (EvidenceOutcome, error) {
@@ -923,7 +923,8 @@ var similarityNonRoutablePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("224.0.0.0/4"), netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:2::/48"), netip.MustParsePrefix("2001:10::/28"),
+	netip.MustParsePrefix("2001:20::/28"), netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("fec0::/10"),
 }
 
 func validateSafeIdentity(value string) error {
