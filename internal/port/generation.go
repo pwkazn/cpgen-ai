@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"cpgen/internal/domain"
@@ -83,11 +84,14 @@ func (l OutputLimit) Validate() error {
 }
 
 type GenerateRequest struct {
-	Prompt    PromptRef       `json:"prompt"`
-	Schema    OutputSchemaRef `json:"schema"`
-	Variables json.RawMessage `json:"variables"`
-	Sampling  SamplingPolicy  `json:"sampling"`
-	MaxOutput OutputLimit     `json:"max_output"`
+	Prompt                PromptRef       `json:"prompt"`
+	Schema                OutputSchemaRef `json:"schema"`
+	Variables             json.RawMessage `json:"variables"`
+	Sampling              SamplingPolicy  `json:"sampling"`
+	MaxOutput             OutputLimit     `json:"max_output"`
+	LogicalIdempotencyKey string          `json:"logical_idempotency_key,omitempty"`
+	ProviderPolicyDigest  domain.Digest   `json:"provider_policy_digest,omitempty"`
+	PrivacyClassification string          `json:"privacy_classification,omitempty"`
 }
 
 func (r GenerateRequest) Validate() error {
@@ -102,6 +106,17 @@ func (r GenerateRequest) Validate() error {
 	}
 	if r.Prompt.SchemaDigest != "" && r.Prompt.SchemaDigest != r.Schema.Digest {
 		return fmt.Errorf("prompt and output schema digests differ")
+	}
+	if r.ProviderPolicyDigest != "" {
+		if err := r.ProviderPolicyDigest.Validate(); err != nil {
+			return fmt.Errorf("provider policy digest: %w", err)
+		}
+	}
+	if r.LogicalIdempotencyKey != "" && (len(r.LogicalIdempotencyKey) > 256 || r.LogicalIdempotencyKey != strings.TrimSpace(r.LogicalIdempotencyKey)) {
+		return fmt.Errorf("logical idempotency key is invalid")
+	}
+	if r.PrivacyClassification != "" && (len(r.PrivacyClassification) > 64 || r.PrivacyClassification != strings.TrimSpace(r.PrivacyClassification)) {
+		return fmt.Errorf("privacy classification is invalid")
 	}
 	if len(r.Variables) == 0 || !json.Valid(r.Variables) {
 		return fmt.Errorf("variables must be valid JSON")

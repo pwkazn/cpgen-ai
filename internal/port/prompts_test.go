@@ -99,6 +99,9 @@ func TestPromptRegistryBindsLegacyPromptToGenerateRequestSchema(t *testing.T) {
 	if _, err := registry.ResolveRequest(request); err != nil {
 		t.Fatalf("legacy request did not resolve: %v", err)
 	}
+	if _, err := registry.ResolveLegacy(request.Prompt, request.Schema); err != nil {
+		t.Fatalf("legacy prompt did not resolve with explicit schema: %v", err)
+	}
 	request.Schema.Digest = domain.SumBytes([]byte("other-schema"))
 	if _, err := registry.ResolveRequest(request); err == nil {
 		t.Fatal("request with stale schema identity resolved")

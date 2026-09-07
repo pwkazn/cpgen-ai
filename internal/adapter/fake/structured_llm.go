@@ -19,10 +19,11 @@ type StructuredLLM struct {
 	responses [][]byte
 	requests  []port.GenerateRequest
 	validator StructuredResponseValidator
+	registry  *port.SchemaValidatorRegistry
 }
 
 func NewStructuredLLM(responses ...[]byte) *StructuredLLM {
-	return NewStructuredLLMWithValidator(nil, responses...)
+	return NewStructuredLLMWithRegistry(port.DefaultSchemaValidatorRegistry(), responses...)
 }
 
 // StructuredResponseValidator lets a test install the typed schema validator
@@ -31,11 +32,22 @@ func NewStructuredLLM(responses ...[]byte) *StructuredLLM {
 type StructuredResponseValidator func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error
 
 func NewStructuredLLMWithValidator(validator StructuredResponseValidator, responses ...[]byte) *StructuredLLM {
+	return newStructuredLLM(validator, nil, responses...)
+}
+
+// NewStructuredLLMWithRegistry requires each response schema digest to have
+// a registered typed validator. This is the safe default for fixtures that
+// model a complete provider boundary.
+func NewStructuredLLMWithRegistry(registry *port.SchemaValidatorRegistry, responses ...[]byte) *StructuredLLM {
+	return newStructuredLLM(nil, registry, responses...)
+}
+
+func newStructuredLLM(validator StructuredResponseValidator, registry *port.SchemaValidatorRegistry, responses ...[]byte) *StructuredLLM {
 	queued := make([][]byte, 0, len(responses))
 	for _, response := range responses {
 		queued = append(queued, append([]byte(nil), response...))
 	}
-	return &StructuredLLM{responses: queued, validator: validator}
+	return &StructuredLLM{responses: queued, validator: validator, registry: registry}
 }
 
 func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateRequest) (domain.MeteredOutcome[port.GenerateResponse], error) {
@@ -57,8 +69,10 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 	var validationErr error
 	if f.validator != nil {
 		validationErr = f.validator(raw, request.Schema, request.MaxOutput.Bytes)
+	} else if f.registry != nil {
+		validationErr = f.registry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
 	} else {
-		validationErr = port.DecodeStructuredOutput(raw, request.Schema.SchemaVersion, request.MaxOutput.Bytes, nil)
+		validationErr = &port.StructuredOutputError{Code: port.StructuredOutputSchemaUnbound}
 	}
 	if validationErr != nil {
 		var typed *port.StructuredOutputError

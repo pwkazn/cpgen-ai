@@ -99,6 +99,9 @@ type constrainedStructuredValue struct {
 
 func TestDecodeStructuredOutputAppliesTypedRequiredEnumAndRangeRules(t *testing.T) {
 	schema := OutputSchemaRef{SchemaVersion: testStructuredSchema, Digest: domain.SumBytes([]byte("schema"))}
+	if err := RegisterDefaultTypedSchema[constrainedStructuredValue](schema, nil); err != nil {
+		t.Fatal(err)
+	}
 	valid := []byte(`{"schema_version":"cpgen.idea/v1","kind":"IDEA","score":7}`)
 	value, err := DecodeStructuredWithSchema[constrainedStructuredValue](valid, schema, 1024)
 	if err != nil || value.Kind != "IDEA" || value.Score != 7 {
@@ -118,6 +121,54 @@ func TestDecodeStructuredOutputAppliesTypedRequiredEnumAndRangeRules(t *testing.
 				t.Fatalf("error = %T %v", err, err)
 			}
 		})
+	}
+}
+
+func TestRequiredStructuredFieldsCheckPresenceNotZeroValue(t *testing.T) {
+	type presenceValue struct {
+		SchemaVersion string `json:"schema_version" required:"true"`
+		Title         string `json:"title" required:"true"`
+		Enabled       bool   `json:"enabled" required:"true"`
+		Count         int    `json:"count" required:"true"`
+	}
+	raw := []byte(`{"schema_version":"cpgen.idea/v1","title":"","enabled":false,"count":0}`)
+	var value presenceValue
+	if err := DecodeStructuredOutput(raw, testStructuredSchema, 1024, &value); err != nil {
+		t.Fatalf("explicit zero values rejected: %v", err)
+	}
+}
+
+func TestSchemaValidatorRegistryBindsDigestAndFakeCanUseIt(t *testing.T) {
+	type response struct {
+		SchemaVersion string `json:"schema_version"`
+		Title         string `json:"title" required:"true"`
+	}
+	firstSchema := OutputSchemaRef{SchemaVersion: testStructuredSchema, Digest: domain.SumBytes([]byte("first-schema"))}
+	secondSchema := OutputSchemaRef{SchemaVersion: testStructuredSchema, Digest: domain.SumBytes([]byte("second-schema"))}
+	registry, err := NewSchemaValidatorRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterTypedSchema[response](registry, firstSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"schema_version":"cpgen.idea/v1","title":"ok"}`)
+	if _, err := DecodeStructuredWithSchemaRegistry[response](registry, raw, firstSchema, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterDefaultTypedSchema[response](firstSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeStructuredWithSchemaRegistry[response](registry, raw, secondSchema, 1024); err == nil {
+		t.Fatal("unregistered schema digest was accepted")
+	} else {
+		var typed *StructuredOutputError
+		if !errors.As(err, &typed) || typed.Code != StructuredOutputSchemaUnbound {
+			t.Fatalf("wrong digest error = %T %v", err, err)
+		}
+	}
+	if _, err := DecodeStructuredWithSchema[response](raw, firstSchema, 1024); err != nil {
+		t.Fatal(err)
 	}
 }
 

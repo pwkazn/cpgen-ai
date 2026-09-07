@@ -36,6 +36,7 @@ const (
 	StructuredOutputTypeMismatch           StructuredOutputErrorCode = "type_mismatch"
 	StructuredOutputRepairTooLarge         StructuredOutputErrorCode = "repair_input_too_large"
 	StructuredOutputRepairFragmentRejected StructuredOutputErrorCode = "repair_fragment_rejected"
+	StructuredOutputSchemaUnbound          StructuredOutputErrorCode = "schema_validator_unbound"
 )
 
 func (c StructuredOutputErrorCode) Valid() bool {
@@ -45,6 +46,8 @@ func (c StructuredOutputErrorCode) Valid() bool {
 		StructuredOutputSchemaMissing, StructuredOutputTypeMismatch, StructuredOutputRepairTooLarge:
 		return true
 	case StructuredOutputRepairFragmentRejected:
+		return true
+	case StructuredOutputSchemaUnbound:
 		return true
 	default:
 		return false
@@ -87,6 +90,8 @@ func (e *StructuredOutputError) Error() string {
 		message = "structured repair input exceeds configured size limit"
 	case StructuredOutputRepairFragmentRejected:
 		message = "structured repair fragment was not explicitly trusted"
+	case StructuredOutputSchemaUnbound:
+		message = "structured output schema has no trusted validator"
 	}
 	if e.Path != "" && safeFieldPath(e.Path) {
 		return message + " at field " + e.Path
@@ -186,20 +191,6 @@ func DecodeStructuredOutput(raw []byte, expected domain.SchemaVersion, maxBytes 
 func DecodeStructured[T any](raw []byte, expected domain.SchemaVersion, maxBytes int64) (T, error) {
 	var value T
 	if err := DecodeStructuredOutput(raw, expected, maxBytes, &value); err != nil {
-		return value, err
-	}
-	return value, nil
-}
-
-// DecodeStructuredWithSchema is the OutputSchemaRef variant used by model
-// adapters. The schema digest is checked as a typed reference, while the
-// response itself carries and proves the schema version.
-func DecodeStructuredWithSchema[T any](raw []byte, schema OutputSchemaRef, maxBytes int64) (T, error) {
-	var value T
-	if err := schema.Validate(); err != nil {
-		return value, structuredError(StructuredOutputSchemaMismatch, "schema_version")
-	}
-	if err := DecodeStructuredOutput(raw, schema.SchemaVersion, maxBytes, &value); err != nil {
 		return value, err
 	}
 	return value, nil
@@ -530,13 +521,22 @@ func validateExactJSONAgainstType(raw []byte, target reflect.Type, path string) 
 			return structuredError(StructuredOutputTypeMismatch, path)
 		}
 		fields := exactJSONFields(target)
+		present := make(map[string]struct{}, len(object))
 		for name, value := range object {
 			field, ok := fields[name]
 			if !ok {
 				return structuredError(StructuredOutputUnknownField, joinFieldPath(path, name))
 			}
+			present[name] = struct{}{}
 			if err := validateExactJSONAgainstType(value, field.Type, joinFieldPath(path, name)); err != nil {
 				return err
+			}
+		}
+		for name, field := range fields {
+			if isRequiredField(field) {
+				if _, ok := present[name]; !ok {
+					return structuredError(StructuredOutputTypeMismatch, joinFieldPath(path, name))
+				}
 			}
 		}
 	case reflect.Slice, reflect.Array:
@@ -683,10 +683,6 @@ func validateTaggedValue(value reflect.Value) error {
 		}
 		current := value.Field(index)
 		tag := field.Tag.Get("validate")
-		required := field.Tag.Get("required") == "true" || strings.Contains(tag, "required")
-		if required && isZeroValue(current) {
-			return errors.New("required structured field is missing")
-		}
 		if enum := field.Tag.Get("enum"); enum != "" && !isAllowedEnum(current, strings.Split(enum, ",")) {
 			return errors.New("structured field has an invalid enum value")
 		}
@@ -714,6 +710,11 @@ func validateTaggedValue(value reflect.Value) error {
 		}
 	}
 	return nil
+}
+
+func isRequiredField(field reflect.StructField) bool {
+	tag := field.Tag.Get("validate")
+	return field.Tag.Get("required") == "true" || strings.Contains(tag, "required")
 }
 
 func validationOption(tag, option string) string {

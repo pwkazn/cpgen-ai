@@ -192,15 +192,34 @@ func (r *PromptRegistry) Lookup(ref PromptVersionRef) (PromptVersion, error) {
 	return definition, nil
 }
 
-// Resolve accepts a legacy PromptRef and checks its digest against the
-// registered immutable template. It preserves GenerateRequest compatibility
-// while giving new code a strict typed lookup.
+// Resolve accepts a PromptRef that already carries its schema identity. A
+// legacy PromptRef containing only Digest must use ResolveLegacy or
+// ResolveRequest, because the output schema is supplied separately there.
 func (r *PromptRegistry) Resolve(ref PromptRef) (PromptVersion, error) {
+	if ref.SchemaVersion == "" || ref.SchemaDigest == "" {
+		return PromptVersion{}, &PromptRegistryError{Code: PromptInvalidDefinition, Step: ref.Step, Version: ref.Version}
+	}
 	digest := ref.TemplateDigest
 	if digest == "" {
 		digest = ref.Digest
 	}
 	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, OutputSchema: OutputSchemaRef{SchemaVersion: ref.SchemaVersion, Digest: ref.SchemaDigest}})
+}
+
+// ResolveLegacy binds the pre-schema PromptRef shape (Step, Version, Digest)
+// to the caller's complete output schema and verifies both identities.
+func (r *PromptRegistry) ResolveLegacy(ref PromptRef, schema OutputSchemaRef) (PromptVersion, error) {
+	if ref.TemplateDigest != "" && ref.Digest != "" && ref.TemplateDigest != ref.Digest {
+		return PromptVersion{}, &PromptRegistryError{Code: PromptInvalidDefinition, Step: ref.Step, Version: ref.Version}
+	}
+	if ref.SchemaVersion != "" && ref.SchemaVersion != schema.SchemaVersion || ref.SchemaDigest != "" && ref.SchemaDigest != schema.Digest {
+		return PromptVersion{}, &PromptRegistryError{Code: PromptInvalidDefinition, Step: ref.Step, Version: ref.Version}
+	}
+	digest := ref.TemplateDigest
+	if digest == "" {
+		digest = ref.Digest
+	}
+	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, OutputSchema: schema})
 }
 
 // ResolveRequest binds the legacy PromptRef (whose Digest is the template
@@ -214,11 +233,7 @@ func (r *PromptRegistry) ResolveRequest(request GenerateRequest) (PromptVersion,
 	if err := request.Validate(); err != nil {
 		return PromptVersion{}, &PromptRegistryError{Code: PromptInvalidDefinition, Step: request.Prompt.Step, Version: request.Prompt.Version}
 	}
-	digest := request.Prompt.TemplateDigest
-	if digest == "" {
-		digest = request.Prompt.Digest
-	}
-	return r.Lookup(PromptVersionRef{Step: request.Prompt.Step, Version: request.Prompt.Version, TemplateDigest: digest, OutputSchema: request.Schema})
+	return r.ResolveLegacy(request.Prompt, request.Schema)
 }
 
 // ResolveGenerateRequest is an explicit spelling for callers that use the

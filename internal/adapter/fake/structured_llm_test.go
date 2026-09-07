@@ -19,7 +19,14 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 		MaxOutput: port.OutputLimit{Tokens: 10, Bytes: 1024},
 	}
 	fixture := []byte(`{"schema_version":"cpgen.idea/v1","title":"fixture"}`)
-	model := NewStructuredLLM(fixture)
+	strictFixtureValidator := func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error {
+		var value struct {
+			SchemaVersion string `json:"schema_version"`
+			Title         string `json:"title" required:"true"`
+		}
+		return port.DecodeStructuredOutput(raw, schema.SchemaVersion, maxBytes, &value)
+	}
+	model := NewStructuredLLMWithValidator(strictFixtureValidator, fixture)
 	first, err := model.Generate(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -39,12 +46,18 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 	if string(model.Requests()[0].Variables) != `{"brief":"fixture"}` {
 		t.Fatal("Requests returned an aliased variables buffer")
 	}
+	unbound := NewStructuredLLM(fixture)
+	_, err = unbound.Generate(context.Background(), request)
+	var unboundErr *port.StructuredOutputError
+	if !errors.As(err, &unboundErr) || unboundErr.Code != port.StructuredOutputSchemaUnbound {
+		t.Fatalf("unbound default validator error = %T %v", err, err)
+	}
 	second, err := model.Generate(context.Background(), request)
 	if err == nil || second.Value != nil {
 		t.Fatalf("depleted fixture = %#v, err = %v", second, err)
 	}
 
-	invalid := NewStructuredLLM([]byte(`{"schema_version":"cpgen.idea/v1","title":"fixture","title":"secret"}`))
+	invalid := NewStructuredLLMWithValidator(strictFixtureValidator, []byte(`{"schema_version":"cpgen.idea/v1","title":"fixture","title":"secret"}`))
 	_, err = invalid.Generate(context.Background(), request)
 	var typed *port.StructuredOutputError
 	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputDuplicateField {
