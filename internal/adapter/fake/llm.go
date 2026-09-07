@@ -28,7 +28,7 @@ func (f *LLM) Generate(ctx context.Context, request port.GenerateRequest) (domai
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests = append(f.requests, request)
+	f.requests = append(f.requests, cloneGenerateRequest(request))
 	if len(f.outcomes) == 0 {
 		return domain.MeteredOutcome[port.GenerateResponse]{}, fmt.Errorf("fake LLM has no queued outcome")
 	}
@@ -51,7 +51,11 @@ func (f *LLM) Generate(ctx context.Context, request port.GenerateRequest) (domai
 func (f *LLM) Requests() []port.GenerateRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]port.GenerateRequest(nil), f.requests...)
+	requests := make([]port.GenerateRequest, len(f.requests))
+	for index, request := range f.requests {
+		requests[index] = cloneGenerateRequest(request)
+	}
+	return requests
 }
 
 var _ port.MeteredLLM = (*LLM)(nil)

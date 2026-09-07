@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -24,15 +26,16 @@ const (
 type StructuredOutputErrorCode string
 
 const (
-	StructuredOutputTooLarge       StructuredOutputErrorCode = "response_too_large"
-	StructuredOutputInvalidUTF8    StructuredOutputErrorCode = "invalid_utf8"
-	StructuredOutputInvalidJSON    StructuredOutputErrorCode = "invalid_json"
-	StructuredOutputDuplicateField StructuredOutputErrorCode = "duplicate_field"
-	StructuredOutputUnknownField   StructuredOutputErrorCode = "unknown_field"
-	StructuredOutputSchemaMismatch StructuredOutputErrorCode = "schema_version_mismatch"
-	StructuredOutputSchemaMissing  StructuredOutputErrorCode = "schema_version_missing"
-	StructuredOutputTypeMismatch   StructuredOutputErrorCode = "type_mismatch"
-	StructuredOutputRepairTooLarge StructuredOutputErrorCode = "repair_input_too_large"
+	StructuredOutputTooLarge               StructuredOutputErrorCode = "response_too_large"
+	StructuredOutputInvalidUTF8            StructuredOutputErrorCode = "invalid_utf8"
+	StructuredOutputInvalidJSON            StructuredOutputErrorCode = "invalid_json"
+	StructuredOutputDuplicateField         StructuredOutputErrorCode = "duplicate_field"
+	StructuredOutputUnknownField           StructuredOutputErrorCode = "unknown_field"
+	StructuredOutputSchemaMismatch         StructuredOutputErrorCode = "schema_version_mismatch"
+	StructuredOutputSchemaMissing          StructuredOutputErrorCode = "schema_version_missing"
+	StructuredOutputTypeMismatch           StructuredOutputErrorCode = "type_mismatch"
+	StructuredOutputRepairTooLarge         StructuredOutputErrorCode = "repair_input_too_large"
+	StructuredOutputRepairFragmentRejected StructuredOutputErrorCode = "repair_fragment_rejected"
 )
 
 func (c StructuredOutputErrorCode) Valid() bool {
@@ -40,6 +43,8 @@ func (c StructuredOutputErrorCode) Valid() bool {
 	case StructuredOutputTooLarge, StructuredOutputInvalidUTF8, StructuredOutputInvalidJSON,
 		StructuredOutputDuplicateField, StructuredOutputUnknownField, StructuredOutputSchemaMismatch,
 		StructuredOutputSchemaMissing, StructuredOutputTypeMismatch, StructuredOutputRepairTooLarge:
+		return true
+	case StructuredOutputRepairFragmentRejected:
 		return true
 	default:
 		return false
@@ -80,6 +85,8 @@ func (e *StructuredOutputError) Error() string {
 		message = "structured output has an invalid field type"
 	case StructuredOutputRepairTooLarge:
 		message = "structured repair input exceeds configured size limit"
+	case StructuredOutputRepairFragmentRejected:
+		message = "structured repair fragment was not explicitly trusted"
 	}
 	if e.Path != "" && safeFieldPath(e.Path) {
 		return message + " at field " + e.Path
@@ -152,6 +159,9 @@ func DecodeStructuredOutput(raw []byte, expected domain.SchemaVersion, maxBytes 
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return structuredError(StructuredOutputTypeMismatch, "")
 	}
+	if err := validateExactJSONAgainstType(raw, v.Elem().Type(), ""); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -163,6 +173,9 @@ func DecodeStructuredOutput(raw []byte, expected domain.SchemaVersion, maxBytes 
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return structuredError(StructuredOutputInvalidJSON, "")
+	}
+	if err := validateTypedValue(v.Elem()); err != nil {
+		return structuredError(StructuredOutputTypeMismatch, "")
 	}
 	return nil
 }
@@ -202,7 +215,58 @@ type RepairInput struct {
 	InvalidFragment json.RawMessage             `json:"invalid_fragment,omitempty"`
 }
 
+// NewBoundedRepairInput intentionally drops all provider field paths and
+// rejects raw fragments. Callers that have a schema-owned allow-list may use
+// NewBoundedRepairInputWithPaths; callers that have a separately trusted
+// scalar may use NewBoundedRepairInputWithTrustedFragment.
 func NewBoundedRepairInput(schema domain.SchemaVersion, failures []*StructuredOutputError, fragment []byte, maxBytes int64) (RepairInput, error) {
+	if len(fragment) > 0 {
+		return RepairInput{}, structuredError(StructuredOutputRepairFragmentRejected, "invalid_fragment")
+	}
+	return newBoundedRepairInput(schema, failures, map[string]struct{}{}, nil, maxBytes)
+}
+
+// NewBoundedRepairInputWithPaths includes only paths explicitly supplied by
+// the trusted schema owner. Provider-controlled keys are never copied merely
+// because they happen to look like identifiers.
+func NewBoundedRepairInputWithPaths(schema domain.SchemaVersion, failures []*StructuredOutputError, allowedPaths []string, maxBytes int64) (RepairInput, error) {
+	allowed := make(map[string]struct{}, len(allowedPaths))
+	for _, path := range allowedPaths {
+		if !safeFieldPath(path) {
+			return RepairInput{}, structuredError(StructuredOutputInvalidJSON, "field_paths")
+		}
+		allowed[path] = struct{}{}
+	}
+	return newBoundedRepairInput(schema, failures, allowed, nil, maxBytes)
+}
+
+// TrustedRepairFragment is constructed only from a single scalar JSON value
+// selected by schema-aware code. Objects and arrays are rejected to prevent a
+// complete model response from becoming a repair prompt.
+type TrustedRepairFragment struct {
+	raw json.RawMessage
+}
+
+func NewTrustedRepairFragment(raw []byte) (TrustedRepairFragment, error) {
+	if len(raw) == 0 || len(raw) > 256 || !utf8.Valid(raw) || !json.Valid(raw) {
+		return TrustedRepairFragment{}, structuredError(StructuredOutputRepairFragmentRejected, "invalid_fragment")
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] == '{' || trimmed[0] == '[' {
+		return TrustedRepairFragment{}, structuredError(StructuredOutputRepairFragmentRejected, "invalid_fragment")
+	}
+	return TrustedRepairFragment{raw: append(json.RawMessage(nil), trimmed...)}, nil
+}
+
+func (f TrustedRepairFragment) Bytes() []byte {
+	return append([]byte(nil), f.raw...)
+}
+
+func NewBoundedRepairInputWithTrustedFragment(schema domain.SchemaVersion, failures []*StructuredOutputError, fragment TrustedRepairFragment, maxBytes int64) (RepairInput, error) {
+	return newBoundedRepairInput(schema, failures, map[string]struct{}{}, fragment.raw, maxBytes)
+}
+
+func newBoundedRepairInput(schema domain.SchemaVersion, failures []*StructuredOutputError, allowedPaths map[string]struct{}, fragment []byte, maxBytes int64) (RepairInput, error) {
 	var input RepairInput
 	if err := schema.Validate(); err != nil {
 		return input, structuredError(StructuredOutputSchemaMismatch, "schema_version")
@@ -223,6 +287,11 @@ func NewBoundedRepairInput(schema domain.SchemaVersion, failures []*StructuredOu
 		if _, ok := seenCodes[failure.Code]; !ok {
 			input.ErrorCodes = append(input.ErrorCodes, failure.Code)
 			seenCodes[failure.Code] = struct{}{}
+		}
+		if allowedPaths != nil {
+			if _, allowed := allowedPaths[failure.Path]; !allowed {
+				continue
+			}
 		}
 		if safeFieldPath(failure.Path) {
 			if _, ok := seenPaths[failure.Path]; !ok {
@@ -283,10 +352,17 @@ func (r RepairInput) Validate(maxBytes int64) error {
 		}
 	}
 	if len(r.InvalidFragment) > 0 {
-		if !utf8.Valid(r.InvalidFragment) {
+		trimmed := bytes.TrimSpace(r.InvalidFragment)
+		if len(trimmed) > 256 {
+			return &StructuredOutputError{Code: StructuredOutputRepairTooLarge, ExpectedBytes: 256, ActualBytes: int64(len(trimmed))}
+		}
+		if !utf8.Valid(trimmed) {
 			return structuredError(StructuredOutputInvalidUTF8, "invalid_fragment")
 		}
-		if !json.Valid(r.InvalidFragment) {
+		if len(trimmed) == 0 || trimmed[0] == '{' || trimmed[0] == '[' {
+			return structuredError(StructuredOutputRepairFragmentRejected, "invalid_fragment")
+		}
+		if !json.Valid(trimmed) {
 			return structuredError(StructuredOutputInvalidJSON, "invalid_fragment")
 		}
 	}
@@ -312,7 +388,22 @@ func safeFieldPath(value string) bool {
 		return false
 	}
 	for _, part := range strings.Split(value, ".") {
-		if part == "" || strings.ContainsAny(part, "[]{}\"'") {
+		if part == "" || !safeIdentifierPart(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func safeIdentifierPart(value string) bool {
+	for index, r := range value {
+		if index == 0 {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+			continue
+		}
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
 			return false
 		}
 	}
@@ -410,4 +501,306 @@ func joinFieldPath(parent, field string) string {
 		return field
 	}
 	return parent + "." + field
+}
+
+// validateExactJSONAgainstType closes encoding/json's case-insensitive field
+// matching. It walks the JSON object tree against the target struct's exact
+// JSON names before decoding, so "Title" cannot satisfy `json:"title"` and
+// an unknown nested field cannot hide behind a valid outer object.
+func validateExactJSONAgainstType(raw []byte, target reflect.Type, path string) error {
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	if target == nil || target == reflect.TypeOf(json.RawMessage{}) || target == reflect.TypeOf(domain.Digest("")) {
+		return nil
+	}
+	if target == reflect.TypeOf((*json.Unmarshaler)(nil)).Elem() || reflect.PointerTo(target).Implements(reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()) {
+		return nil
+	}
+	if target.Kind() == reflect.Interface {
+		return nil
+	}
+	switch target.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return structuredError(StructuredOutputTypeMismatch, path)
+		}
+		if object == nil {
+			return structuredError(StructuredOutputTypeMismatch, path)
+		}
+		fields := exactJSONFields(target)
+		for name, value := range object {
+			field, ok := fields[name]
+			if !ok {
+				return structuredError(StructuredOutputUnknownField, joinFieldPath(path, name))
+			}
+			if err := validateExactJSONAgainstType(value, field.Type, joinFieldPath(path, name)); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		var values []json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return structuredError(StructuredOutputTypeMismatch, path)
+		}
+		for index, value := range values {
+			if target.Kind() == reflect.Array && index >= target.Len() {
+				return structuredError(StructuredOutputTypeMismatch, path)
+			}
+			if err := validateExactJSONAgainstType(value, target.Elem(), fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		// Map keys are data rather than schema field names. If the map has a
+		// structured value, recurse into each value while preserving strict
+		// checking for that value's struct fields.
+		if target.Key().Kind() != reflect.String || target.Elem().Kind() == reflect.Interface {
+			return nil
+		}
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return structuredError(StructuredOutputTypeMismatch, path)
+		}
+		for name, value := range values {
+			if err := validateExactJSONAgainstType(value, target.Elem(), joinFieldPath(path, name)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func exactJSONFields(target reflect.Type) map[string]reflect.StructField {
+	fields := make(map[string]reflect.StructField)
+	target = derefType(target)
+	if target == nil || target.Kind() != reflect.Struct {
+		return fields
+	}
+	for index := 0; index < target.NumField(); index++ {
+		field := target.Field(index)
+		if field.PkgPath != "" { // unexported
+			continue
+		}
+		rawTag, hasJSONTag := field.Tag.Lookup("json")
+		tag, options, hasOptions := strings.Cut(rawTag, ",")
+		if hasJSONTag && tag == "" {
+			tag = field.Name
+		}
+		if !hasJSONTag {
+			tag = field.Name
+		}
+		if tag == "-" {
+			continue
+		}
+		if field.Anonymous && !hasJSONTag {
+			for name, promoted := range exactJSONFields(derefType(field.Type)) {
+				fields[name] = promoted
+			}
+			continue
+		}
+		// Encoding/json ignores all options except known ones. Keeping this
+		// assignment makes it explicit that `omitempty` is not a field name.
+		_ = options
+		_ = hasOptions
+		if _, exists := fields[tag]; !exists {
+			fields[tag] = field
+		}
+	}
+	return fields
+}
+
+func derefType(target reflect.Type) reflect.Type {
+	for target != nil && target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	return target
+}
+
+// StructuredValidator is an optional typed invariant hook. Domain values
+// that already expose Validate() can be used directly; schema-specific
+// output structs may implement ValidateStructuredOutput for cross-field,
+// enum, and range checks.
+type StructuredValidator interface {
+	ValidateStructuredOutput() error
+}
+
+type ordinaryValidator interface {
+	Validate() error
+}
+
+func validateTypedValue(value reflect.Value) error {
+	if !value.IsValid() {
+		return nil
+	}
+	validated := false
+	if value.CanAddr() && value.Addr().CanInterface() {
+		if validator, ok := value.Addr().Interface().(StructuredValidator); ok {
+			validated = true
+			if err := validator.ValidateStructuredOutput(); err != nil {
+				return err
+			}
+		} else if validator, ok := value.Addr().Interface().(ordinaryValidator); ok {
+			validated = true
+			if err := validator.Validate(); err != nil {
+				return err
+			}
+		}
+	}
+	if !validated && value.CanInterface() {
+		if validator, ok := value.Interface().(StructuredValidator); ok {
+			if err := validator.ValidateStructuredOutput(); err != nil {
+				return err
+			}
+		} else if validator, ok := value.Interface().(ordinaryValidator); ok {
+			if err := validator.Validate(); err != nil {
+				return err
+			}
+		}
+	}
+	return validateTaggedValue(value)
+}
+
+// Tags are deliberately explicit: required:"true", enum:"a,b", min/max,
+// and minLength/maxLength make the schema's semantic constraints executable
+// without guessing whether an ordinary zero value is optional.
+func validateTaggedValue(value reflect.Value) error {
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		return validateTaggedValue(value.Elem())
+	}
+	if value.Kind() != reflect.Struct {
+		return nil
+	}
+	target := value.Type()
+	for index := 0; index < target.NumField(); index++ {
+		field := target.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		current := value.Field(index)
+		tag := field.Tag.Get("validate")
+		required := field.Tag.Get("required") == "true" || strings.Contains(tag, "required")
+		if required && isZeroValue(current) {
+			return errors.New("required structured field is missing")
+		}
+		if enum := field.Tag.Get("enum"); enum != "" && !isAllowedEnum(current, strings.Split(enum, ",")) {
+			return errors.New("structured field has an invalid enum value")
+		}
+		oneof := field.Tag.Get("oneof")
+		if oneof == "" {
+			oneof = validationOption(tag, "oneof")
+		}
+		if oneof != "" && !isAllowedEnum(current, strings.Fields(oneof)) {
+			return errors.New("structured field has an invalid enum value")
+		}
+		if min, ok := numericTag(field, "min"); ok && !meetsMinimum(current, min) {
+			return errors.New("structured field is below its minimum")
+		}
+		if max, ok := numericTag(field, "max"); ok && !meetsMaximum(current, max) {
+			return errors.New("structured field exceeds its maximum")
+		}
+		if min, ok := numericTag(field, "minLength"); ok && lengthOf(current) < int(min) {
+			return errors.New("structured field is shorter than its minimum")
+		}
+		if max, ok := numericTag(field, "maxLength"); ok && lengthOf(current) > int(max) {
+			return errors.New("structured field exceeds its maximum length")
+		}
+		if err := validateTaggedValue(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validationOption(tag, option string) string {
+	for _, part := range strings.Split(tag, ",") {
+		key, value, ok := strings.Cut(part, "=")
+		if ok && strings.TrimSpace(key) == option {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func isZeroValue(value reflect.Value) bool {
+	if !value.IsValid() {
+		return true
+	}
+	return value.IsZero()
+}
+
+func isAllowedEnum(value reflect.Value, allowed []string) bool {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return false
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.String {
+		return false
+	}
+	for _, candidate := range allowed {
+		if value.String() == strings.TrimSpace(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func numericTag(field reflect.StructField, name string) (float64, bool) {
+	raw := field.Tag.Get(name)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	return value, err == nil && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func numericValue(value reflect.Value) (float64, bool) {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0, false
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(value.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(value.Uint()), true
+	case reflect.Float32, reflect.Float64:
+		v := value.Float()
+		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
+	default:
+		return 0, false
+	}
+}
+
+func meetsMinimum(value reflect.Value, minimum float64) bool {
+	actual, ok := numericValue(value)
+	return ok && actual >= minimum
+}
+
+func meetsMaximum(value reflect.Value, maximum float64) bool {
+	actual, ok := numericValue(value)
+	return ok && actual <= maximum
+}
+
+func lengthOf(value reflect.Value) int {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.String, reflect.Array, reflect.Slice, reflect.Map:
+		return value.Len()
+	default:
+		return 0
+	}
 }

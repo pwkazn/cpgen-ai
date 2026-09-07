@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"cpgen/internal/domain"
@@ -39,6 +40,8 @@ func (r PromptRef) Validate() error {
 		if err := r.SchemaDigest.Validate(); err != nil {
 			return err
 		}
+	} else if r.SchemaDigest != "" {
+		return fmt.Errorf("prompt schema digest requires schema version")
 	}
 	return nil
 }
@@ -61,7 +64,7 @@ type SamplingPolicy struct {
 }
 
 func (p SamplingPolicy) Validate() error {
-	if p.Temperature < 0 || p.Temperature > 2 || p.TopP <= 0 || p.TopP > 1 {
+	if math.IsNaN(p.Temperature) || math.IsInf(p.Temperature, 0) || math.IsNaN(p.TopP) || math.IsInf(p.TopP, 0) || p.Temperature < 0 || p.Temperature > 2 || p.TopP <= 0 || p.TopP > 1 {
 		return fmt.Errorf("sampling policy is outside the allowed range")
 	}
 	return nil
@@ -93,6 +96,12 @@ func (r GenerateRequest) Validate() error {
 	}
 	if err := r.Schema.Validate(); err != nil {
 		return err
+	}
+	if r.Prompt.SchemaVersion != "" && r.Prompt.SchemaVersion != r.Schema.SchemaVersion {
+		return fmt.Errorf("prompt and output schema versions differ")
+	}
+	if r.Prompt.SchemaDigest != "" && r.Prompt.SchemaDigest != r.Schema.Digest {
+		return fmt.Errorf("prompt and output schema digests differ")
 	}
 	if len(r.Variables) == 0 || !json.Valid(r.Variables) {
 		return fmt.Errorf("variables must be valid JSON")

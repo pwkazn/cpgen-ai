@@ -203,6 +203,30 @@ func (r *PromptRegistry) Resolve(ref PromptRef) (PromptVersion, error) {
 	return r.Lookup(PromptVersionRef{Step: ref.Step, Version: ref.Version, TemplateDigest: digest, OutputSchema: OutputSchemaRef{SchemaVersion: ref.SchemaVersion, Digest: ref.SchemaDigest}})
 }
 
+// ResolveRequest binds the legacy PromptRef (whose Digest is the template
+// identity) to the complete GenerateRequest schema. This keeps old callers
+// source-compatible while preventing a prompt from being used with a
+// different output schema.
+func (r *PromptRegistry) ResolveRequest(request GenerateRequest) (PromptVersion, error) {
+	if r == nil {
+		return PromptVersion{}, &PromptRegistryError{Code: PromptUnknownVersion, Step: request.Prompt.Step, Version: request.Prompt.Version}
+	}
+	if err := request.Validate(); err != nil {
+		return PromptVersion{}, &PromptRegistryError{Code: PromptInvalidDefinition, Step: request.Prompt.Step, Version: request.Prompt.Version}
+	}
+	digest := request.Prompt.TemplateDigest
+	if digest == "" {
+		digest = request.Prompt.Digest
+	}
+	return r.Lookup(PromptVersionRef{Step: request.Prompt.Step, Version: request.Prompt.Version, TemplateDigest: digest, OutputSchema: request.Schema})
+}
+
+// ResolveGenerateRequest is an explicit spelling for callers that use the
+// request type in their application layer.
+func (r *PromptRegistry) ResolveGenerateRequest(request GenerateRequest) (PromptVersion, error) {
+	return r.ResolveRequest(request)
+}
+
 func (r *PromptRegistry) Versions() []PromptVersionRef {
 	if r == nil {
 		return nil

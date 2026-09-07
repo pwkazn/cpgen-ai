@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -17,14 +18,24 @@ type StructuredLLM struct {
 	mu        sync.Mutex
 	responses [][]byte
 	requests  []port.GenerateRequest
+	validator StructuredResponseValidator
 }
 
 func NewStructuredLLM(responses ...[]byte) *StructuredLLM {
+	return NewStructuredLLMWithValidator(nil, responses...)
+}
+
+// StructuredResponseValidator lets a test install the typed schema validator
+// used by its response type. The callback must call port.DecodeStructuredOutput
+// (or DecodeStructuredWithSchema) before applying domain constraints.
+type StructuredResponseValidator func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error
+
+func NewStructuredLLMWithValidator(validator StructuredResponseValidator, responses ...[]byte) *StructuredLLM {
 	queued := make([][]byte, 0, len(responses))
 	for _, response := range responses {
 		queued = append(queued, append([]byte(nil), response...))
 	}
-	return &StructuredLLM{responses: queued}
+	return &StructuredLLM{responses: queued, validator: validator}
 }
 
 func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateRequest) (domain.MeteredOutcome[port.GenerateResponse], error) {
@@ -35,7 +46,7 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 		return domain.MeteredOutcome[port.GenerateResponse]{}, fmt.Errorf("fake structured LLM request: %w", err)
 	}
 	f.mu.Lock()
-	f.requests = append(f.requests, request)
+	f.requests = append(f.requests, cloneGenerateRequest(request))
 	if len(f.responses) == 0 {
 		f.mu.Unlock()
 		return domain.MeteredOutcome[port.GenerateResponse]{}, fmt.Errorf("fake structured LLM has no queued response")
@@ -43,8 +54,18 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 	raw := append([]byte(nil), f.responses[0]...)
 	f.responses = f.responses[1:]
 	f.mu.Unlock()
-	if err := port.ValidateStructuredOutput(raw, request.Schema.SchemaVersion, request.MaxOutput.Bytes); err != nil {
-		return domain.MeteredOutcome[port.GenerateResponse]{}, err
+	var validationErr error
+	if f.validator != nil {
+		validationErr = f.validator(raw, request.Schema, request.MaxOutput.Bytes)
+	} else {
+		validationErr = port.DecodeStructuredOutput(raw, request.Schema.SchemaVersion, request.MaxOutput.Bytes, nil)
+	}
+	if validationErr != nil {
+		var typed *port.StructuredOutputError
+		if !errors.As(validationErr, &typed) {
+			return domain.MeteredOutcome[port.GenerateResponse]{}, &port.StructuredOutputError{Code: port.StructuredOutputTypeMismatch}
+		}
+		return domain.MeteredOutcome[port.GenerateResponse]{}, validationErr
 	}
 	trace := domain.CallTrace{LogicalOperationID: "fake-structured-llm", DispatchKind: domain.DispatchNone}
 	response := port.GenerateResponse{Structured: raw, Usage: port.Usage{}, CallTrace: trace}
@@ -55,7 +76,11 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 func (f *StructuredLLM) Requests() []port.GenerateRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]port.GenerateRequest(nil), f.requests...)
+	requests := make([]port.GenerateRequest, len(f.requests))
+	for index, request := range f.requests {
+		requests[index] = cloneGenerateRequest(request)
+	}
+	return requests
 }
 
 var _ port.MeteredLLM = (*StructuredLLM)(nil)

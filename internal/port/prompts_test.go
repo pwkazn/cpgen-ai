@@ -2,6 +2,7 @@ package port
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"cpgen/internal/domain"
@@ -79,5 +80,62 @@ func TestPromptRegistryValidatesImmutableTemplateDigestAndResolvesLegacyRef(t *t
 	}
 	if got := registry.Versions(); len(got) != 1 || got[0] != definition.Ref() {
 		t.Fatalf("versions = %#v", got)
+	}
+}
+
+func TestPromptRegistryBindsLegacyPromptToGenerateRequestSchema(t *testing.T) {
+	definition := testPromptVersion()
+	registry, err := NewPromptRegistry(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := GenerateRequest{
+		Prompt:    PromptRef{Step: definition.Step, Version: definition.Version, Digest: definition.TemplateDigest},
+		Schema:    definition.OutputSchema,
+		Variables: []byte(`{"brief":"fixture"}`),
+		Sampling:  SamplingPolicy{TopP: 1},
+		MaxOutput: OutputLimit{Tokens: 10, Bytes: 1024},
+	}
+	if _, err := registry.ResolveRequest(request); err != nil {
+		t.Fatalf("legacy request did not resolve: %v", err)
+	}
+	request.Schema.Digest = domain.SumBytes([]byte("other-schema"))
+	if _, err := registry.ResolveRequest(request); err == nil {
+		t.Fatal("request with stale schema identity resolved")
+	}
+	request = GenerateRequest{
+		Prompt:    PromptRef{Step: definition.Step, Version: definition.Version, Digest: definition.TemplateDigest, SchemaDigest: definition.OutputSchema.Digest},
+		Schema:    definition.OutputSchema,
+		Variables: []byte(`{"brief":"fixture"}`),
+		Sampling:  SamplingPolicy{TopP: 1},
+		MaxOutput: OutputLimit{Tokens: 10, Bytes: 1024},
+	}
+	if _, err := registry.ResolveRequest(request); err == nil {
+		t.Fatal("prompt schema digest without schema version was accepted")
+	}
+}
+
+func TestGenerateRequestRejectsSchemaIdentityMismatchAndNonFiniteSampling(t *testing.T) {
+	definition := testPromptVersion()
+	base := GenerateRequest{
+		Prompt:    PromptRef{Step: definition.Step, Version: definition.Version, Digest: definition.TemplateDigest, SchemaVersion: definition.OutputSchema.SchemaVersion, SchemaDigest: definition.OutputSchema.Digest},
+		Schema:    definition.OutputSchema,
+		Variables: []byte(`{"brief":"fixture"}`),
+		Sampling:  SamplingPolicy{TopP: 1},
+		MaxOutput: OutputLimit{Tokens: 10, Bytes: 1024},
+	}
+	for name, mutate := range map[string]func(*GenerateRequest){
+		"schema version":    func(value *GenerateRequest) { value.Prompt.SchemaVersion = "cpgen.idea/v2" },
+		"schema digest":     func(value *GenerateRequest) { value.Prompt.SchemaDigest = domain.SumBytes([]byte("other")) },
+		"nan":               func(value *GenerateRequest) { value.Sampling.Temperature = math.NaN() },
+		"positive infinity": func(value *GenerateRequest) { value.Sampling.TopP = math.Inf(1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid request was accepted")
+			}
+		})
 	}
 }

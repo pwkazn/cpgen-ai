@@ -84,6 +84,41 @@ func TestDecodeStructuredOutputRejectsUnknownFieldsAndProducesTypedValue(t *test
 	if strings.Contains(err.Error(), "do not log") {
 		t.Fatal("nested unknown field error leaked value")
 	}
+	caseAlias := []byte(`{"schema_version":"cpgen.idea/v1","Title":"safe"}`)
+	err = DecodeStructuredOutput(caseAlias, testStructuredSchema, 1024, &testStructuredValue{})
+	if !errors.As(err, &typed) || typed.Code != StructuredOutputUnknownField {
+		t.Fatalf("case alias error = %T %v", err, err)
+	}
+}
+
+type constrainedStructuredValue struct {
+	SchemaVersion string `json:"schema_version" required:"true"`
+	Kind          string `json:"kind" enum:"IDEA,STATEMENT" required:"true"`
+	Score         int    `json:"score" min:"0" max:"10"`
+}
+
+func TestDecodeStructuredOutputAppliesTypedRequiredEnumAndRangeRules(t *testing.T) {
+	schema := OutputSchemaRef{SchemaVersion: testStructuredSchema, Digest: domain.SumBytes([]byte("schema"))}
+	valid := []byte(`{"schema_version":"cpgen.idea/v1","kind":"IDEA","score":7}`)
+	value, err := DecodeStructuredWithSchema[constrainedStructuredValue](valid, schema, 1024)
+	if err != nil || value.Kind != "IDEA" || value.Score != 7 {
+		t.Fatalf("valid constrained value = %#v, err = %v", value, err)
+	}
+	for name, raw := range map[string][]byte{
+		"missing required": []byte(`{"schema_version":"cpgen.idea/v1","score":7}`),
+		"invalid enum":     []byte(`{"schema_version":"cpgen.idea/v1","kind":"OTHER","score":7}`),
+		"below range":      []byte(`{"schema_version":"cpgen.idea/v1","kind":"IDEA","score":-1}`),
+		"above range":      []byte(`{"schema_version":"cpgen.idea/v1","kind":"IDEA","score":11}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got constrainedStructuredValue
+			err := DecodeStructuredOutput(raw, testStructuredSchema, 1024, &got)
+			var typed *StructuredOutputError
+			if !errors.As(err, &typed) || typed.Code != StructuredOutputTypeMismatch {
+				t.Fatalf("error = %T %v", err, err)
+			}
+		})
+	}
 }
 
 func TestBoundedRepairInputIsCanonicalAndBounded(t *testing.T) {
@@ -92,15 +127,19 @@ func TestBoundedRepairInputIsCanonicalAndBounded(t *testing.T) {
 		{Code: StructuredOutputDuplicateField, Path: "candidate.title"},
 		{Code: StructuredOutputUnknownField, Path: "candidate.title"},
 	}
-	input, err := NewBoundedRepairInput(testStructuredSchema, failures, []byte(`{"title":"safe"}`), 1024)
+	input, err := NewBoundedRepairInput(testStructuredSchema, failures, nil, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(input.ErrorCodes) != 2 || input.ErrorCodes[0] != StructuredOutputDuplicateField || input.ErrorCodes[1] != StructuredOutputUnknownField {
 		t.Fatalf("codes = %#v", input.ErrorCodes)
 	}
-	if len(input.FieldPaths) != 1 || input.FieldPaths[0] != "candidate.title" {
+	if len(input.FieldPaths) != 0 {
 		t.Fatalf("paths = %#v", input.FieldPaths)
+	}
+	withPaths, err := NewBoundedRepairInputWithPaths(testStructuredSchema, failures, []string{"candidate.title"}, 1024)
+	if err != nil || len(withPaths.FieldPaths) != 1 || withPaths.FieldPaths[0] != "candidate.title" {
+		t.Fatalf("schema-owned paths = %#v, err = %v", withPaths.FieldPaths, err)
 	}
 	canonical, err := input.CanonicalJSON()
 	if err != nil || len(canonical) > 1024 {
@@ -110,9 +149,22 @@ func TestBoundedRepairInputIsCanonicalAndBounded(t *testing.T) {
 		t.Fatal("oversized repair fragment was accepted")
 	} else {
 		var typed *StructuredOutputError
-		if !errors.As(err, &typed) || typed.Code != StructuredOutputRepairTooLarge {
+		if !errors.As(err, &typed) || typed.Code != StructuredOutputRepairFragmentRejected {
 			t.Fatalf("repair size error = %T %v", err, err)
 		}
+	}
+	trusted, err := NewTrustedRepairFragment([]byte(`"safe"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFragment, err := NewBoundedRepairInputWithTrustedFragment(testStructuredSchema, failures, trusted, 1024)
+	if err != nil || string(withFragment.InvalidFragment) != `"safe"` {
+		t.Fatalf("trusted fragment = %s, err = %v", withFragment.InvalidFragment, err)
+	}
+	if _, err := NewTrustedRepairFragment([]byte(`{"secret":"do not disclose"}`)); err == nil {
+		t.Fatal("object repair fragment was accepted")
+	} else if strings.Contains(err.Error(), "do not disclose") {
+		t.Fatal("repair error leaked fragment content")
 	}
 	if _, err := NewBoundedRepairInput(testStructuredSchema, []*StructuredOutputError{{Code: "provider-secret", Path: "title"}}, nil, 1024); err == nil {
 		t.Fatal("unknown repair code was accepted")

@@ -30,6 +30,15 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 	if got := model.Requests(); len(got) != 1 || got[0].Prompt.Step != "idea" {
 		t.Fatalf("requests = %#v", got)
 	}
+	request.Variables[2] = 'X'
+	stored := model.Requests()
+	if string(stored[0].Variables) != `{"brief":"fixture"}` {
+		t.Fatalf("stored variables aliased caller memory: %s", stored[0].Variables)
+	}
+	stored[0].Variables[2] = 'Y'
+	if string(model.Requests()[0].Variables) != `{"brief":"fixture"}` {
+		t.Fatal("Requests returned an aliased variables buffer")
+	}
 	second, err := model.Generate(context.Background(), request)
 	if err == nil || second.Value != nil {
 		t.Fatalf("depleted fixture = %#v, err = %v", second, err)
@@ -40,5 +49,16 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 	var typed *port.StructuredOutputError
 	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputDuplicateField {
 		t.Fatalf("invalid fixture error = %T %v", err, err)
+	}
+	validatorModel := NewStructuredLLMWithValidator(func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error {
+		var value struct {
+			SchemaVersion string `json:"schema_version"`
+			Title         string `json:"title" required:"true"`
+		}
+		return port.DecodeStructuredOutput(raw, schema.SchemaVersion, maxBytes, &value)
+	}, []byte(`{"schema_version":"cpgen.idea/v1","title":"ok","secret":"not allowed"}`))
+	_, err = validatorModel.Generate(context.Background(), request)
+	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputUnknownField {
+		t.Fatalf("typed validator error = %T %v", err, err)
 	}
 }
