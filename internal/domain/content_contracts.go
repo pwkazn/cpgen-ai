@@ -25,6 +25,10 @@ const (
 	StatementInputSchemaV1   = "cpgen.statement-input/v1"
 	ProblemSpecSchemaV1      = "cpgen.problem-spec/v1"
 	GenerationPolicyV1       = "policy/v1"
+	SeedDerivationPolicyV1   = "seed-axes/v1"
+	RequestTagPolicyV1       = "request-tags/v1"
+	RequestModeManual        = "manual"
+	RequestModeRandom        = "random"
 	SelectionOrdinalPolicyV1 = "selection/v1"
 	SelectionIdeaIDPolicyV1  = "selection.idea-id/v1"
 )
@@ -34,26 +38,24 @@ const (
 type GenerationRequestV1 RunRequest
 
 func GenerationRequestFromRunRequest(r RunRequest) (GenerationRequestV1, error) {
-	n := GenerationRequestV1(r).normalized()
-	return n, n.Validate()
+	// This adapter only checks the source contract. Phase 2 admission is an
+	// explicit Validate call, so existing Slice 1 values can roundtrip unchanged.
+	if err := r.Validate(); err != nil {
+		return GenerationRequestV1{}, err
+	}
+	return GenerationRequestV1(r).clone(), nil
 }
 func (r GenerationRequestV1) ToRunRequest() (RunRequest, error) {
-	n := r.normalized()
-	return RunRequest(n), n.Validate()
+	n := RunRequest(r.clone())
+	return n, n.Validate()
 }
-func (r GenerationRequestV1) normalized() GenerationRequestV1 {
-	r.SchemaVersion = cleanText(r.SchemaVersion)
-	r.Mode = cleanText(r.Mode)
-	r.Brief = cleanText(r.Brief)
-	r.Language = cleanText(r.Language)
-	r.Difficulty = cleanText(r.Difficulty)
-	r.SolutionLanguage = cleanText(r.SolutionLanguage)
-	r.VerificationProfile = cleanText(r.VerificationProfile)
-	r.Tags = cleanSet(r.Tags)
-	r.NormalizedTags = cleanSet(r.NormalizedTags)
-	r.RequiredFeatures = cleanSet(r.RequiredFeatures)
-	r.ForbiddenFeatures = cleanSet(r.ForbiddenFeatures)
-	r.ExportTargets = cleanSet(r.ExportTargets)
+func (r GenerationRequestV1) clone() GenerationRequestV1 {
+	// slices.Clone preserves nil versus non-nil empty slices, unlike append(nil,...).
+	r.Tags = slices.Clone(r.Tags)
+	r.NormalizedTags = slices.Clone(r.NormalizedTags)
+	r.RequiredFeatures = slices.Clone(r.RequiredFeatures)
+	r.ForbiddenFeatures = slices.Clone(r.ForbiddenFeatures)
+	r.ExportTargets = slices.Clone(r.ExportTargets)
 	if r.Seed != nil {
 		seed := *r.Seed
 		r.Seed = &seed
@@ -64,18 +66,79 @@ func (r GenerationRequestV1) Validate() error {
 	if r.SchemaVersion != RequestSchemaV1 {
 		return errors.New("unsupported request schema")
 	}
-	if err := RunRequest(r).Validate(); err != nil {
+	// v1 admission: manual requires a brief; random may omit the brief. An
+	// omitted seed is resolved once by the snapshot creator in either mode.
+	if r.Mode != RequestModeManual && r.Mode != RequestModeRandom {
+		return errors.New("mode must be manual or random")
+	}
+	v := RunRequest(r)
+	if r.Mode == RequestModeRandom && strings.TrimSpace(r.Brief) == "" {
+		v.Brief = "random"
+	}
+	if err := v.Validate(); err != nil {
 		return err
 	}
-	if err := validateText(32768, false, r.Mode, r.Brief, r.Language, r.Difficulty, r.SolutionLanguage, r.VerificationProfile); err != nil {
+	if err := r.validateSourceText(); err != nil {
 		return err
+	}
+	for _, value := range []string{r.Mode, r.Language, r.Difficulty, r.SolutionLanguage, r.VerificationProfile} {
+		if len(value) > 4096 {
+			return errors.New("request metadata exceeds 4096 bytes")
+		}
+	}
+	if len(r.Brief) > 32768 {
+		return errors.New("request brief exceeds 32768 bytes")
 	}
 	for _, set := range [][]string{r.Tags, r.NormalizedTags, r.RequiredFeatures, r.ForbiddenFeatures, r.ExportTargets} {
-		if err := validateSet(set); err != nil {
+		if len(set) > 256 {
+			return errors.New("too many submitted set members")
+		}
+		for _, value := range set {
+			if len(value) > 4096 {
+				return errors.New("request set member exceeds 4096 bytes")
+			}
+		}
+		if err := validateSet(cleanSet(set)); err != nil {
 			return err
 		}
 	}
-	return disjoint(r.RequiredFeatures, r.ForbiddenFeatures)
+	derived := make([]string, len(r.Tags))
+	for i, tag := range r.Tags {
+		derived[i] = strings.ToLower(cleanText(tag))
+		if !allowedRequestTagV1(derived[i]) {
+			return fmt.Errorf("tag is outside %s allowlist: %q", RequestTagPolicyV1, tag)
+		}
+	}
+	sort.Strings(derived)
+	derived = slices.Compact(derived)
+	if !slices.Equal(derived, r.NormalizedTags) {
+		return errors.New("normalized_tags must equal sorted unique lower-case NFC/trimmed tags")
+	}
+	return disjoint(cleanSet(r.RequiredFeatures), cleanSet(r.ForbiddenFeatures))
+}
+
+// RequestTagPolicyV1 is fixed by the request/v1 schema; additions require a new
+// policy/schema revision, never a runtime-configurable expansion of acceptance.
+func allowedRequestTagV1(tag string) bool {
+	switch tag {
+	case "arrays", "binary-search", "bitmasks", "combinatorics", "constructive", "data-structures", "divide-and-conquer", "dp", "dynamic-programming", "flows", "games", "geometry", "graphs", "greedy", "hashing", "implementation", "math", "number-theory", "probability", "shortest-path", "sorting", "strings", "trees", "two-pointers":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r GenerationRequestV1) validateSourceText() error {
+	values := []string{r.SchemaVersion, r.Mode, r.Brief, r.Language, r.Difficulty, r.SolutionLanguage, r.VerificationProfile}
+	for _, set := range [][]string{r.Tags, r.NormalizedTags, r.RequiredFeatures, r.ForbiddenFeatures, r.ExportTargets} {
+		values = append(values, set...)
+	}
+	for _, value := range values {
+		if !utf8.ValidString(value) {
+			return errors.New("request contains invalid UTF-8")
+		}
+	}
+	return nil
 }
 func (r *GenerationRequestV1) UnmarshalJSON(raw []byte) error {
 	type plain GenerationRequestV1
@@ -83,7 +146,7 @@ func (r *GenerationRequestV1) UnmarshalJSON(raw []byte) error {
 	if err := strictJSON(string(raw), &v); err != nil {
 		return err
 	}
-	n := GenerationRequestV1(v).normalized()
+	n := GenerationRequestV1(v)
 	if err := n.Validate(); err != nil {
 		return err
 	}
@@ -91,8 +154,15 @@ func (r *GenerationRequestV1) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 func (r GenerationRequestV1) CanonicalJSON() ([]byte, error) {
-	n := r.normalized()
-	return contentJSON(n, n.Validate())
+	// Identity encoding is separate from Phase 2 admission. A legal legacy
+	// Slice 1 request retains its existing SubmittedRequestDigest even when it
+	// is not admitted to Phase 2. No prose or collection normalization occurs.
+	if err := RunRequest(r).Validate(); err != nil {
+		if admissionErr := r.Validate(); admissionErr != nil {
+			return nil, err
+		}
+	}
+	return contentJSON(r, r.validateSourceText())
 }
 func (r GenerationRequestV1) Digest() (Digest, error) {
 	raw, err := r.CanonicalJSON()
@@ -108,7 +178,10 @@ type GenerationRequestSnapshotV1 struct {
 }
 
 func NewGenerationRequestSnapshotV1(r GenerationRequestV1, seed int64) (GenerationRequestSnapshotV1, error) {
-	r = r.normalized()
+	r = r.clone()
+	if err := r.Validate(); err != nil {
+		return GenerationRequestSnapshotV1{}, err
+	}
 	rd, err := r.Digest()
 	if err != nil {
 		return GenerationRequestSnapshotV1{}, err
@@ -199,6 +272,9 @@ func (c IdeaCandidate) Validate() error {
 	if len(c.SeedAxes) == 0 {
 		return errors.New("candidate seed axes required")
 	}
+	if err := validateSeedAxesV1(c.SeedAxes); err != nil {
+		return err
+	}
 	for _, set := range [][]string{c.SeedAxes, c.FeasibilityReasons, c.NegativeConstraints} {
 		if err := validateSet(set); err != nil {
 			return err
@@ -249,14 +325,18 @@ func (c IdeaCandidate) Digest() (Digest, error) {
 }
 
 type IdeaBatch struct {
-	SchemaVersion           string          `json:"schema_version"`
-	RequestDigest           Digest          `json:"request_digest"`
-	RequestedCount          int             `json:"requested_count"`
-	Candidates              []IdeaCandidate `json:"candidates"`
-	GenerationPolicyVersion string          `json:"generation_policy_version"`
-	EffectiveSeed           int64           `json:"effective_seed"`
-	BatchOrdinal            int             `json:"batch_ordinal"`
-	BatchDigest             Digest          `json:"batch_digest"`
+	SchemaVersion               string          `json:"schema_version"`
+	RequestDigest               Digest          `json:"request_digest"`
+	RequestedCount              int             `json:"requested_count"`
+	Candidates                  []IdeaCandidate `json:"candidates"`
+	GenerationPolicyVersion     string          `json:"generation_policy_version"`
+	SeedDerivationPolicyVersion string          `json:"seed_derivation_policy_version"`
+	// CallBudget freezes the submitted request's call/resource ceilings, not
+	// a mutable remaining-balance estimate or an execution reservation.
+	CallBudget    BudgetLimits `json:"call_budget"`
+	EffectiveSeed int64        `json:"effective_seed"`
+	BatchOrdinal  int          `json:"batch_ordinal"`
+	BatchDigest   Digest       `json:"batch_digest"`
 }
 
 // The optional batch ordinal keeps the initial-batch call concise; at most one is accepted.
@@ -267,7 +347,7 @@ func NewIdeaBatch(s GenerationRequestSnapshotV1, requested int, policy string, c
 	if len(ordinal) > 1 {
 		return IdeaBatch{}, errors.New("at most one batch ordinal")
 	}
-	b := IdeaBatch{SchemaVersion: IdeaBatchSchemaV1, RequestDigest: s.RequestDigest, RequestedCount: requested, GenerationPolicyVersion: cleanText(policy), EffectiveSeed: s.EffectiveSeed, Candidates: make([]IdeaCandidate, len(candidates))}
+	b := IdeaBatch{SchemaVersion: IdeaBatchSchemaV1, RequestDigest: s.RequestDigest, RequestedCount: requested, GenerationPolicyVersion: cleanText(policy), SeedDerivationPolicyVersion: SeedDerivationPolicyV1, CallBudget: s.Request.BudgetLimits, EffectiveSeed: s.EffectiveSeed, Candidates: make([]IdeaCandidate, len(candidates))}
 	if len(ordinal) == 1 {
 		b.BatchOrdinal = ordinal[0]
 	}
@@ -280,6 +360,16 @@ func NewIdeaBatch(s GenerationRequestSnapshotV1, requested int, policy string, c
 	}
 	sort.Slice(b.Candidates, func(i, j int) bool { return b.Candidates[i].CandidateOrdinal < b.Candidates[j].CandidateOrdinal })
 	for i := range b.Candidates {
+		c := &b.Candidates[i]
+		axes, err := DeriveIdeaSeedAxes(b.RequestDigest, b.EffectiveSeed, b.BatchOrdinal, c.CandidateOrdinal, c.MutationOrdinal, b.SeedDerivationPolicyVersion)
+		if err != nil {
+			return IdeaBatch{}, err
+		}
+		if len(c.SeedAxes) == 0 {
+			c.SeedAxes = axes
+		} else if !slices.Equal(c.SeedAxes, axes) {
+			return IdeaBatch{}, errors.New("supplied seed axes differ from the persisted derivation inputs")
+		}
 		b.Candidates[i].IdeaID = ideaID(b, b.Candidates[i])
 	}
 	b.BatchDigest = contentSum(b)
@@ -288,12 +378,69 @@ func NewIdeaBatch(s GenerationRequestSnapshotV1, requested int, policy string, c
 func ideaID(b IdeaBatch, c IdeaCandidate) string {
 	c.IdeaID = ""
 	return "idea:" + string(contentSum(struct {
-		RequestDigest           Digest        `json:"request_digest"`
-		EffectiveSeed           int64         `json:"effective_seed"`
-		BatchOrdinal            int           `json:"batch_ordinal"`
-		GenerationPolicyVersion string        `json:"generation_policy_version"`
-		Candidate               IdeaCandidate `json:"candidate"`
-	}{b.RequestDigest, b.EffectiveSeed, b.BatchOrdinal, b.GenerationPolicyVersion, c}))
+		RequestDigest               Digest        `json:"request_digest"`
+		EffectiveSeed               int64         `json:"effective_seed"`
+		BatchOrdinal                int           `json:"batch_ordinal"`
+		GenerationPolicyVersion     string        `json:"generation_policy_version"`
+		SeedDerivationPolicyVersion string        `json:"seed_derivation_policy_version"`
+		Candidate                   IdeaCandidate `json:"candidate"`
+	}{b.RequestDigest, b.EffectiveSeed, b.BatchOrdinal, b.GenerationPolicyVersion, b.SeedDerivationPolicyVersion, c}))
+}
+
+// DeriveIdeaSeedAxes is the only source of seed axes under seed-axes/v1.
+// The SHA-256 tuple and vocabularies are versioned; no clocks, process state,
+// provider text, or platform PRNG behavior participates in the derivation.
+func DeriveIdeaSeedAxes(rd Digest, seed int64, batchOrdinal, candidateOrdinal, mutationOrdinal int, policy string) ([]string, error) {
+	if policy != SeedDerivationPolicyV1 {
+		return nil, errors.New("unsupported seed derivation policy")
+	}
+	if err := rd.Validate(); err != nil {
+		return nil, err
+	}
+	if batchOrdinal < 0 || candidateOrdinal < 0 || mutationOrdinal < 0 {
+		return nil, errors.New("negative seed derivation ordinal")
+	}
+	input := struct {
+		Policy                                          string
+		RequestDigest                                   Digest
+		EffectiveSeed                                   int64
+		BatchOrdinal, CandidateOrdinal, MutationOrdinal int
+	}{policy, rd, seed, batchOrdinal, candidateOrdinal, mutationOrdinal}
+	digest := contentSum(input)
+	var axes []string
+	for i, choices := range seedAxisVocabularyV1() {
+		value, _ := strconv.ParseUint(string(digest)[len(digestPrefix)+i*2:len(digestPrefix)+i*2+2], 16, 8)
+		axes = append(axes, choices[int(value)%len(choices)])
+	}
+	sort.Strings(axes)
+	return axes, nil
+}
+
+// Return fresh arrays so even package-local callers cannot mutate the policy.
+func seedAxisVocabularyV1() [3][5]string {
+	return [3][5]string{
+		{"structure:array", "structure:tree", "structure:graph", "structure:grid", "structure:string"},
+		{"objective:count", "objective:minimize", "objective:maximize", "objective:construct", "objective:decide"},
+		{"constraint:online", "constraint:offline", "constraint:sparse", "constraint:dense", "constraint:bounded"},
+	}
+}
+
+func validateSeedAxesV1(axes []string) error {
+	if len(axes) != 3 {
+		return errors.New("seed policy requires three axes")
+	}
+	for _, choices := range seedAxisVocabularyV1() {
+		count := 0
+		for _, axis := range axes {
+			if slices.Contains(choices[:], axis) {
+				count++
+			}
+		}
+		if count != 1 {
+			return errors.New("seed axes must contain one allowed value per policy dimension")
+		}
+	}
+	return nil
 }
 func (b IdeaBatch) Validate() error {
 	if b.SchemaVersion != IdeaBatchSchemaV1 || b.RequestDigest.Validate() != nil || b.RequestedCount < 2 || b.RequestedCount > 8 || b.RequestedCount != len(b.Candidates) || b.BatchOrdinal < 0 {
@@ -302,11 +449,24 @@ func (b IdeaBatch) Validate() error {
 	if b.GenerationPolicyVersion != GenerationPolicyV1 {
 		return errors.New("unsupported generation policy")
 	}
+	if err := b.CallBudget.Validate(); err != nil {
+		return err
+	}
+	if b.SeedDerivationPolicyVersion != SeedDerivationPolicyV1 {
+		return errors.New("unsupported seed derivation policy")
+	}
 	ids := map[string]bool{}
 	lineages := map[string]bool{}
 	for i, c := range b.Candidates {
 		if err := c.Validate(); err != nil {
 			return err
+		}
+		axes, err := DeriveIdeaSeedAxes(b.RequestDigest, b.EffectiveSeed, b.BatchOrdinal, c.CandidateOrdinal, c.MutationOrdinal, b.SeedDerivationPolicyVersion)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(axes, c.SeedAxes) {
+			return errors.New("candidate seed axes differ from versioned derivation")
 		}
 		if c.CandidateOrdinal != i || c.IdeaID != ideaID(b, c) {
 			return errors.New("candidate identity or ordinal mismatch")
@@ -502,6 +662,9 @@ func (i StatementInput) ValidateChain(s GenerationRequestSnapshotV1, b IdeaBatch
 	if i.RequestSnapshotDigest != s.SnapshotDigest || i.IdeaBatchDigest != b.BatchDigest || i.IdeaSelectionDigest != sel.SelectionDigest || i.SelectedIdeaID != sel.SelectedIdeaID || b.RequestDigest != s.RequestDigest || b.EffectiveSeed != s.EffectiveSeed {
 		return errors.New("statement input digest chain mismatch")
 	}
+	if b.CallBudget != s.Request.BudgetLimits {
+		return errors.New("batch call budget differs from submitted request")
+	}
 	return nil
 }
 func (i *StatementInput) UnmarshalJSON(raw []byte) error {
@@ -523,8 +686,9 @@ func (i StatementInput) Digest() (Digest, error) {
 	return sumResult(raw, err)
 }
 
-// Field and sample order is semantic and is preserved. Only set-valued fields
-// (tags, reasons, constraints, evidence) are sorted and deduplicated.
+// Field and sample order is semantic and is preserved. Derived set-valued fields
+// (reasons, constraints, evidence) are sorted and deduplicated. Submitted request
+// fields retain their original order and representation for digest compatibility.
 type ProblemIO struct {
 	Description string   `json:"description"`
 	Fields      []string `json:"fields"`
@@ -548,6 +712,7 @@ type ProblemSpec struct {
 	MemoryLimitMB          int64           `json:"memory_limit_mb"`
 	RequiredConstraints    []string        `json:"required_constraints"`
 	ForbiddenConstraints   []string        `json:"forbidden_constraints"`
+	NegativeConstraints    []string        `json:"negative_constraints"`
 	Title                  string          `json:"title"`
 	Description            string          `json:"description"`
 	Input                  ProblemIO       `json:"input"`
@@ -569,7 +734,7 @@ func NewProblemSpec(in StatementInput, s GenerationRequestSnapshotV1, b IdeaBatc
 	p.IdeaSelectionDigest = sel.SelectionDigest
 	p.SelectedIdeaID = sel.SelectedIdeaID
 	p.SelectionPolicyVersion = sel.SelectionPolicyVersion
-	p.Language = s.Request.Language
+	p.Language = cleanText(s.Request.Language)
 	p.TimeLimitMS = s.Request.TimeLimitMilliseconds
 	p.MemoryLimitMB = s.Request.MemoryLimitMegabytes
 	p.RequiredConstraints = cleanSet(s.Request.RequiredFeatures)
@@ -578,6 +743,7 @@ func NewProblemSpec(in StatementInput, s GenerationRequestSnapshotV1, b IdeaBatc
 		if c.IdeaID == sel.SelectedIdeaID {
 			p.IntendedAlgorithm = c.IntendedAlgorithm
 			p.TargetComplexity = c.TargetComplexity
+			p.NegativeConstraints = cleanSet(c.NegativeConstraints)
 		}
 	}
 	p.Title = cleanText(p.Title)
@@ -586,8 +752,8 @@ func NewProblemSpec(in StatementInput, s GenerationRequestSnapshotV1, b IdeaBatc
 	p.Output = cleanIO(p.Output)
 	p.Samples = append([]ProblemSample{}, p.Samples...)
 	for i := range p.Samples {
-		p.Samples[i].Input = cleanText(p.Samples[i].Input)
-		p.Samples[i].Output = cleanText(p.Samples[i].Output)
+		// Sample input/output are opaque program data. Whitespace and Unicode
+		// composition can affect the answer; only explanation is prose.
 		p.Samples[i].Explanation = cleanText(p.Samples[i].Explanation)
 	}
 	p.SpecDigest = ""
@@ -612,12 +778,15 @@ func (p ProblemSpec) Validate() error {
 	if err := validateText(32768, false, p.Language, p.Title, p.Description, p.IntendedAlgorithm, p.TargetComplexity); err != nil {
 		return err
 	}
-	for _, set := range [][]string{p.RequiredConstraints, p.ForbiddenConstraints} {
+	for _, set := range [][]string{p.RequiredConstraints, p.ForbiddenConstraints, p.NegativeConstraints} {
 		if err := validateSet(set); err != nil {
 			return err
 		}
 	}
 	if err := disjoint(p.RequiredConstraints, p.ForbiddenConstraints); err != nil {
+		return err
+	}
+	if err := disjoint(p.RequiredConstraints, p.NegativeConstraints); err != nil {
 		return err
 	}
 	for _, v := range []ProblemIO{p.Input, p.Output} {
@@ -638,7 +807,7 @@ func (p ProblemSpec) Validate() error {
 		return errors.New("problem spec requires 1-32 samples")
 	}
 	for _, sample := range p.Samples {
-		if err := validateText(65536, false, sample.Input, sample.Output); err != nil {
+		if err := validateSampleData(sample.Input, sample.Output); err != nil {
 			return err
 		}
 		if err := validateText(32768, true, sample.Explanation); err != nil {
@@ -657,12 +826,12 @@ func (p ProblemSpec) ValidateChain(s GenerationRequestSnapshotV1, b IdeaBatch, s
 	if err := in.ValidateChain(s, b, sel); err != nil {
 		return err
 	}
-	if p.RequestDigest != s.RequestDigest || p.SelectionPolicyVersion != sel.SelectionPolicyVersion || p.Language != s.Request.Language || p.TimeLimitMS != s.Request.TimeLimitMilliseconds || p.MemoryLimitMB != s.Request.MemoryLimitMegabytes || !slices.Equal(p.RequiredConstraints, s.Request.RequiredFeatures) || !slices.Equal(p.ForbiddenConstraints, s.Request.ForbiddenFeatures) {
+	if p.RequestDigest != s.RequestDigest || p.SelectionPolicyVersion != sel.SelectionPolicyVersion || p.Language != cleanText(s.Request.Language) || p.TimeLimitMS != s.Request.TimeLimitMilliseconds || p.MemoryLimitMB != s.Request.MemoryLimitMegabytes || !slices.Equal(p.RequiredConstraints, cleanSet(s.Request.RequiredFeatures)) || !slices.Equal(p.ForbiddenConstraints, cleanSet(s.Request.ForbiddenFeatures)) {
 		return errors.New("problem spec differs from frozen request or selection")
 	}
 	for _, c := range b.Candidates {
 		if c.IdeaID == p.SelectedIdeaID {
-			if p.IntendedAlgorithm != c.IntendedAlgorithm || p.TargetComplexity != c.TargetComplexity {
+			if p.IntendedAlgorithm != c.IntendedAlgorithm || p.TargetComplexity != c.TargetComplexity || !slices.Equal(p.NegativeConstraints, c.NegativeConstraints) {
 				return errors.New("problem spec differs from selected algorithm")
 			}
 			return nil
@@ -685,6 +854,15 @@ func (p *ProblemSpec) UnmarshalJSON(raw []byte) error {
 }
 func (p ProblemSpec) CanonicalJSON() ([]byte, error) { return contentJSON(p, p.Validate()) }
 func (p ProblemSpec) Digest() (Digest, error)        { return p.SpecDigest, p.Validate() }
+
+func validateSampleData(values ...string) error {
+	for _, value := range values {
+		if !utf8.ValidString(value) || strings.ContainsRune(value, '\r') || len(value) > 65536 {
+			return errors.New("sample data must be valid UTF-8 with LF line endings and at most 65536 bytes")
+		}
+	}
+	return nil
+}
 
 func cleanText(s string) string {
 	// Preserve invalid UTF-8 for validation; normalization must not repair it.

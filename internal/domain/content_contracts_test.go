@@ -3,7 +3,9 @@ package domain
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -19,8 +21,8 @@ func testContentChain(t *testing.T) (GenerationRequestSnapshotV1, IdeaBatch, Ide
 		t.Fatal(err)
 	}
 	candidates := []IdeaCandidate{
-		{CandidateOrdinal: 1, SeedAxes: []string{"graphs"}, AbstractTask: "B", IntendedAlgorithm: "heap", TargetComplexity: "O(n log n)", FeasibilityStatus: "FEASIBLE"},
-		{CandidateOrdinal: 0, SeedAxes: []string{"graphs"}, AbstractTask: "A", IntendedAlgorithm: "bfs", TargetComplexity: "O(n)", FeasibilityStatus: "FEASIBLE"},
+		{CandidateOrdinal: 1, AbstractTask: "B", IntendedAlgorithm: "heap", TargetComplexity: "O(n log n)", FeasibilityStatus: "FEASIBLE"},
+		{CandidateOrdinal: 0, AbstractTask: "A", IntendedAlgorithm: "bfs", TargetComplexity: "O(n)", FeasibilityStatus: "FEASIBLE"},
 	}
 	batch, err := NewIdeaBatch(snap, 2, GenerationPolicyV1, candidates, 3)
 	if err != nil {
@@ -38,7 +40,7 @@ func testContentChain(t *testing.T) (GenerationRequestSnapshotV1, IdeaBatch, Ide
 	return snap, batch, sel, in, spec
 }
 
-func TestGenerationRequestPreservesRunRequestAndNormalizesCopies(t *testing.T) {
+func TestGenerationRequestPreservesRunRequestAndCopies(t *testing.T) {
 	r := testGenerationRequest()
 	original := RunRequest(r)
 	got, err := GenerationRequestFromRunRequest(original)
@@ -54,15 +56,15 @@ func TestGenerationRequestPreservesRunRequestAndNormalizesCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Brief = " Cafe\u0301 "
-	r.Tags = []string{" z ", "e\u0301", "é"}
-	r.NormalizedTags = []string{"z", "é"}
+	r.Tags = []string{" Trees ", "graphs", "Graphs"}
+	r.NormalizedTags = []string{"graphs", "trees"}
 	r.RequiredFeatures = []string{" connected ", "connected"}
 	snap, err := NewGenerationRequestSnapshotV1(r, *r.Seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Request.Brief != "Café" || !reflect.DeepEqual(snap.Request.Tags, []string{"z", "é"}) {
-		t.Fatalf("not normalized: %#v", snap.Request)
+	if !reflect.DeepEqual(snap.Request, r) {
+		t.Fatalf("request changed: %#v", snap.Request)
 	}
 	*r.Seed = 88
 	r.Tags[0] = "changed"
@@ -85,7 +87,7 @@ func TestGenerationRequestPreservesRunRequestAndNormalizesCopies(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := testGenerationRequest()
 			mutate(&r)
-			if _, err := r.CanonicalJSON(); err == nil {
+			if err := r.Validate(); err == nil {
 				t.Fatal("accepted invalid request")
 			}
 		})
@@ -148,21 +150,20 @@ func TestStrictJSONSurrogateEscapes(t *testing.T) {
 
 func TestIdeaBatchNormalizationOrdinalPolicyAndLineage(t *testing.T) {
 	snap, batch, _, _, _ := testContentChain(t)
-	candidates := batch.Candidates
-	candidates[0].SeedAxes = []string{" z ", "a", "a"}
+	candidates := candidateDrafts(batch.Candidates)
 	candidates[0].AbstractTask = " Cafe\u0301 "
 	b, err := NewIdeaBatch(snap, 2, GenerationPolicyV1, candidates, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates[0].SeedAxes[0] = "changed"
+	candidates[0].AbstractTask = "changed"
 	if err := b.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if b.BatchOrdinal != 4 || b.Candidates[0].AbstractTask != "Café" || b.Candidates[0].SeedAxes[0] != "a" {
+	if b.BatchOrdinal != 4 || b.Candidates[0].AbstractTask != "Café" || len(b.Candidates[0].SeedAxes) == 0 {
 		t.Fatal("not normalized")
 	}
-	other, err := NewIdeaBatch(snap, 2, GenerationPolicyV1, b.Candidates, 5)
+	other, err := NewIdeaBatch(snap, 2, GenerationPolicyV1, candidateDrafts(b.Candidates), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestSelectionValidateEnforcesStablePreferenceAndEvidence(t *testing.T) {
 	if _, err := b.OrderedFeasibleCandidateIDs("unknown"); err == nil {
 		t.Fatal("accepted unknown policy")
 	}
-	rejected := append([]IdeaCandidate(nil), b.Candidates...)
+	rejected := candidateDrafts(b.Candidates)
 	rejected[0].FeasibilityStatus = "REJECTED"
 	rejected[0].FeasibilityReasons = []string{"constraint"}
 	rb, err := NewIdeaBatch(snap, 2, GenerationPolicyV1, rejected)
@@ -366,14 +367,14 @@ func TestBatchAndSelectionPoliciesRejectInvalidMatrices(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := original
-			b.Candidates = append([]IdeaCandidate{}, original.Candidates...)
+			b.Candidates = candidateDrafts(original.Candidates)
 			change(&b)
 			if _, err := NewIdeaBatch(s, b.RequestedCount, b.GenerationPolicyVersion, b.Candidates, b.BatchOrdinal); err == nil {
 				t.Fatal("accepted invalid batch")
 			}
 		})
 	}
-	mutated := append([]IdeaCandidate{}, original.Candidates...)
+	mutated := candidateDrafts(original.Candidates)
 	mutated[0].ParentIdeaID = original.Candidates[0].IdeaID
 	mutated[0].MutationOrdinal = 1
 	mutated[0].MutationReason = "more variation"
@@ -393,7 +394,7 @@ func TestBatchAndSelectionPoliciesRejectInvalidMatrices(t *testing.T) {
 	}
 	// Find a deterministic fixture where ID order differs from candidate ordinal.
 	for ordinal := 0; ordinal < 32; ordinal++ {
-		b, err := NewIdeaBatch(s, 2, GenerationPolicyV1, original.Candidates, ordinal)
+		b, err := NewIdeaBatch(s, 2, GenerationPolicyV1, candidateDrafts(original.Candidates), ordinal)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -414,10 +415,10 @@ func TestBatchAndSelectionPoliciesRejectInvalidMatrices(t *testing.T) {
 	t.Fatal("fixture did not exercise differing policy orders")
 }
 
-func TestRequestCanonicalNormalizationIsDeterministic(t *testing.T) {
+func TestRequestCanonicalEncodingPreservesSubmittedIdentity(t *testing.T) {
 	a := testGenerationRequest()
 	a.Brief = "Cafe\u0301"
-	a.RequiredFeatures = []string{" z ", "a", "a"}
+	a.RequiredFeatures = []string{" z ", "a"}
 	b := testGenerationRequest()
 	b.Brief = " Café "
 	b.RequiredFeatures = []string{"a", "z"}
@@ -429,8 +430,241 @@ func TestRequestCanonicalNormalizationIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if da != db {
-		t.Fatal("equivalent normalized requests have different digests")
+	if da == db {
+		t.Fatal("distinct submitted requests lost their byte identity")
+	}
+}
+
+func candidateDrafts(v []IdeaCandidate) []IdeaCandidate {
+	out := append([]IdeaCandidate(nil), v...)
+	for i := range out {
+		out[i].SeedAxes = nil
+	}
+	return out
+}
+
+func TestSlice1RequestConversionPreservesAllLegalValues(t *testing.T) {
+	for _, mode := range []string{"manual", "offline", "generate", " arbitrary "} {
+		for _, empty := range []bool{false, true} {
+			t.Run(mode+fmt.Sprint(empty), func(t *testing.T) {
+				r := RunRequest(testGenerationRequest())
+				r.Mode = mode
+				r.Brief = "  Cafe\u0301\n "
+				r.Tags = []string{"trees", "graphs"}
+				r.NormalizedTags = nil
+				r.RequiredFeatures = []string{" z ", "a"}
+				r.ForbiddenFeatures = nil
+				r.ExportTargets = nil
+				if empty {
+					r.Tags = []string{}
+					r.NormalizedTags = []string{}
+					r.ForbiddenFeatures = []string{}
+					r.ExportTargets = []string{}
+				}
+				if err := r.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				original, err := contentJSON(r, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := GenerationRequestFromRunRequest(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				back, err := got.ToRunRequest()
+				if err != nil || !reflect.DeepEqual(r, back) {
+					t.Fatalf("lossy adapter: %#v %v", back, err)
+				}
+				raw, err := got.CanonicalJSON()
+				if err != nil || !bytes.Equal(raw, original) {
+					t.Fatalf("submitted canonical bytes changed: %s %v", raw, err)
+				}
+				d, err := got.Digest()
+				if err != nil || d != SumBytes(original) {
+					t.Fatal("submitted digest changed")
+				}
+				back.RequiredFeatures[0] = "changed"
+				*back.Seed = 77
+				if reflect.DeepEqual(got.RequiredFeatures, back.RequiredFeatures) || *got.Seed == 77 {
+					t.Fatal("adapter aliases source")
+				}
+			})
+		}
+	}
+}
+
+func TestGenerationRequestModeAndTagPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name, mode, brief string
+		tags, normalized  []string
+		valid             bool
+	}{
+		{"manual", "manual", "brief", []string{"graphs"}, []string{"graphs"}, true},
+		{"random empty", "random", "", nil, nil, true},
+		{"random seeded brief", "random", "hint", []string{" DP ", "graphs"}, []string{"dp", "graphs"}, true},
+		{"manual empty", "manual", " ", nil, nil, false},
+		{"unknown mode", "generate", "brief", nil, nil, false},
+		{"unknown tag", "manual", "brief", []string{"not-a-topic"}, []string{"not-a-topic"}, false},
+		{"mismatch", "manual", "brief", []string{"trees"}, []string{"graphs"}, false},
+		{"missing derived", "manual", "brief", []string{"graphs"}, nil, false},
+		{"sort", "manual", "brief", []string{"trees", "graphs"}, []string{"trees", "graphs"}, false},
+		{"duplicate", "manual", "brief", []string{"graphs"}, []string{"graphs", "graphs"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := testGenerationRequest()
+			r.Mode = tt.mode
+			r.Brief = tt.brief
+			r.Tags = tt.tags
+			r.NormalizedTags = tt.normalized
+			if err := r.Validate(); (err == nil) != tt.valid {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotDigestEqualsUnmodifiedSubmittedRequest(t *testing.T) {
+	r := testGenerationRequest()
+	r.Brief = " Cafe\u0301 "
+	r.Tags = []string{" Trees ", "graphs"}
+	r.NormalizedTags = []string{"graphs", "trees"}
+	r.ForbiddenFeatures = nil
+	r.ExportTargets = []string{}
+	raw, err := contentJSON(RunRequest(r), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewGenerationRequestSnapshotV1(r, *r.Seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.RequestDigest != SumBytes(raw) || !reflect.DeepEqual(r, s.Request) {
+		t.Fatal("snapshot changed submitted request")
+	}
+	encoded, err := s.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded GenerationRequestSnapshotV1
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RequestDigest != SumBytes(raw) || !reflect.DeepEqual(r, decoded.Request) {
+		t.Fatal("snapshot roundtrip changed source")
+	}
+	decoded.Request.Brief = "Café"
+	decoded.SnapshotDigest = ""
+	decoded.SnapshotDigest = contentSum(decoded)
+	if decoded.Validate() == nil {
+		t.Fatal("source request identity no longer bound")
+	}
+}
+
+func TestProblemSamplePreservesOpaqueData(t *testing.T) {
+	s, b, sel, in, p := testContentChain(t)
+	for _, data := range []string{"  a  \n\n", "\te\u0301 \n", "\n", "", "  "} {
+		t.Run(fmt.Sprintf("%q", data), func(t *testing.T) {
+			p.Samples = []ProblemSample{{Input: data, Output: data, Explanation: " Cafe\u0301 "}}
+			spec, err := NewProblemSpec(in, s, b, sel, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.Samples[0].Input != data || spec.Samples[0].Output != data || spec.Samples[0].Explanation != "Café" {
+				t.Fatal("opaque sample bytes changed")
+			}
+			raw, err := spec.CanonicalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded ProblemSpec
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Samples[0].Input != data || decoded.Samples[0].Output != data {
+				t.Fatal("opaque sample bytes changed on decode")
+			}
+		})
+	}
+	for _, data := range []string{"\xff", "a\r\n", strings.Repeat("a", 65537)} {
+		p.Samples = []ProblemSample{{Input: data, Output: "ok"}}
+		if _, err := NewProblemSpec(in, s, b, sel, p); err == nil {
+			t.Fatal("accepted invalid sample data")
+		}
+	}
+}
+
+func TestBatchBindsCallBudgetAndDerivedSeedAxes(t *testing.T) {
+	s, b, sel, in, _ := testContentChain(t)
+	if b.CallBudget != s.Request.BudgetLimits || b.SeedDerivationPolicyVersion != SeedDerivationPolicyV1 {
+		t.Fatal("missing budget or seed policy")
+	}
+	for _, c := range b.Candidates {
+		axes, err := DeriveIdeaSeedAxes(s.RequestDigest, s.EffectiveSeed, b.BatchOrdinal, c.CandidateOrdinal, c.MutationOrdinal, SeedDerivationPolicyV1)
+		if err != nil || !reflect.DeepEqual(c.SeedAxes, axes) {
+			t.Fatal("seed axes not derived")
+		}
+	}
+	for name, change := range map[string]func(*IdeaBatch){
+		"unknown seed policy": func(b *IdeaBatch) { b.SeedDerivationPolicyVersion = "unknown" },
+		"invented axes":       func(b *IdeaBatch) { b.Candidates[0].SeedAxes = []string{"clock:now"} },
+		"negative budget":     func(b *IdeaBatch) { b.CallBudget.MaxLLMCalls = -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := b
+			copy.Candidates = append([]IdeaCandidate{}, b.Candidates...)
+			change(&copy)
+			for i := range copy.Candidates {
+				copy.Candidates[i].IdeaID = ideaID(copy, copy.Candidates[i])
+			}
+			copy.BatchDigest = ""
+			copy.BatchDigest = contentSum(copy)
+			if copy.Validate() == nil {
+				t.Fatal("accepted invalid policy/budget")
+			}
+		})
+	}
+	b.CallBudget.MaxLLMCalls++
+	b.BatchDigest = ""
+	b.BatchDigest = contentSum(b)
+	sel, err := NewIdeaSelection(s.RequestDigest, b, b.Candidates[0].IdeaID, SelectionOrdinalPolicyV1, []string{"reason"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.IdeaBatchDigest = b.BatchDigest
+	in.IdeaSelectionDigest = sel.SelectionDigest
+	if in.ValidateChain(s, b, sel) == nil {
+		t.Fatal("request budget mismatch accepted")
+	}
+}
+
+func TestProblemSpecBindsSelectedNegativeConstraints(t *testing.T) {
+	s, b, _, in, p := testContentChain(t)
+	drafts := candidateDrafts(b.Candidates)
+	drafts[0].NegativeConstraints = []string{"no weights"}
+	b, err := NewIdeaBatch(s, 2, GenerationPolicyV1, drafts, b.BatchOrdinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel, err := NewIdeaSelection(s.RequestDigest, b, b.Candidates[0].IdeaID, SelectionOrdinalPolicyV1, []string{"reason"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.IdeaBatchDigest = b.BatchDigest
+	in.IdeaSelectionDigest = sel.SelectionDigest
+	in.SelectedIdeaID = sel.SelectedIdeaID
+	p, err = NewProblemSpec(in, s, b, sel, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p.NegativeConstraints, []string{"no weights"}) {
+		t.Fatal("candidate negative constraints dropped")
+	}
+	p.NegativeConstraints = []string{}
+	p.SpecDigest = ""
+	p.SpecDigest = contentSum(p)
+	if p.ValidateChain(s, b, sel) == nil {
+		t.Fatal("negative constraints not chain bound")
 	}
 }
 
