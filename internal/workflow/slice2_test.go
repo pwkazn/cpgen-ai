@@ -201,11 +201,20 @@ func TestSlice2PipelineRevalidatesFreshDependencyAfterBlocked(t *testing.T) {
 	if err := result.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := pipeline.Revalidate(context.Background(), view, "similarity", *result.Blocked); err != nil || ok {
+	revalidateView, err := domain.NewRunView(domain.RunViewData{
+		RunID: view.RunID(), AttemptID: view.AttemptID(), WorkflowRevision: view.WorkflowRevision(),
+		SchemaVersion: view.SchemaVersion(), RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest(),
+		WorkflowDigest: view.WorkflowDigest(), State: domain.RunBlocked, CurrentStage: "similarity", Version: view.Version(),
+		Budget: view.Budget(), RequestJSON: view.RequestJSON(), ConfigJSON: view.ConfigJSON(), CommittedArtifacts: view.CommittedArtifacts(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := pipeline.Revalidate(context.Background(), revalidateView, "similarity", *result.Blocked); err != nil || ok {
 		t.Fatalf("unhealthy dependency revalidation = %v, %v", ok, err)
 	}
 	step.healthy.Store(true)
-	if ok, err := pipeline.Revalidate(context.Background(), view, "similarity", *result.Blocked); err != nil || !ok {
+	if ok, err := pipeline.Revalidate(context.Background(), revalidateView, "similarity", *result.Blocked); err != nil || !ok {
 		t.Fatalf("healthy dependency revalidation = %v, %v", ok, err)
 	}
 	if got := step.calls.Load(); got != 2 {

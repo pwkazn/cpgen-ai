@@ -137,6 +137,18 @@ func (p Slice2Pipeline) Policy() similarity.DecisionPolicy { return p.policy }
 // DependencyRevalidator to perform a fresh provider/cache check; historical
 // health data is never consulted by this method.
 func (p Slice2Pipeline) Revalidate(ctx context.Context, view domain.RunView, stage domain.StageName, binding domain.BlockedCheckpoint) (bool, error) {
+	if err := validateSlice2RevalidationView(view, stage); err != nil {
+		return false, err
+	}
+	if binding.RunID != view.RunID() || binding.StageName != stage || binding.DependencyID != "similarity-provider" || binding.PolicyDigest != p.policy.PolicyDigest {
+		return false, errors.New("slice2 blocked checkpoint is not bound to this run, stage, or policy")
+	}
+	if err := binding.StageInputDigest.Validate(); err != nil {
+		return false, err
+	}
+	if err := binding.DependencyDigest.Validate(); err != nil {
+		return false, err
+	}
 	var candidate any
 	switch stage {
 	case "idea":
@@ -164,6 +176,9 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err := p.Validate(); err != nil {
 		return empty, err
 	}
+	if err := validateSlice2View(view, "idea"); err != nil {
+		return empty, err
+	}
 	if err := ctx.Err(); err != nil {
 		return empty, err
 	}
@@ -175,6 +190,9 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	}
 	ideaResult, err := p.idea.Run(ctx, view, snapshot)
 	if err != nil {
+		return empty, err
+	}
+	if err := ideaResult.Validate(); err != nil {
 		return empty, err
 	}
 	if control := controlResult[domain.IdeaBatch, Slice2Output](ideaResult); control != nil {
@@ -206,6 +224,9 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err != nil {
 		return empty, err
 	}
+	if err := statementResult.Validate(); err != nil {
+		return empty, err
+	}
 	if control := controlResult[domain.ProblemSpec, Slice2Output](statementResult); control != nil {
 		return *control, nil
 	}
@@ -223,6 +244,9 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	}
 	similarityResult, err := p.similarity.Run(ctx, view, request)
 	if err != nil {
+		return empty, err
+	}
+	if err := similarityResult.Validate(); err != nil {
 		return empty, err
 	}
 	if control := controlResult[similarity.Evidence, Slice2Output](similarityResult); control != nil {
@@ -263,12 +287,110 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 
 func blockedSimilarityCheckpoint(view domain.RunView, inputDigest, policyDigest, errorDigest domain.Digest) domain.BlockedCheckpoint {
 	now := time.Unix(0, 0).UTC()
-	return domain.BlockedCheckpoint{RunID: view.RunID(), StageName: "similarity", StageInputDigest: inputDigest, DependencyID: "similarity-provider", DependencyDigest: inputDigest, PolicyDigest: policyDigest, ErrorDigest: errorDigest, RetryAfter: now, CreatedAt: now}
+	return domain.BlockedCheckpoint{RunID: view.RunID(), StageName: "similarity", StageInputDigest: inputDigest, DependencyID: "similarity-provider", DependencyDigest: errorDigest, PolicyDigest: policyDigest, ErrorDigest: errorDigest, RetryAfter: now, CreatedAt: now}
 }
 
 func logicalSimilarityID(view domain.RunView, problem domain.ProblemSpec) string {
 	digest, _ := problem.Digest()
-	return "similarity-" + strings.TrimPrefix(string(digest), "sha256:")[:32]
+	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%s", view.RunID(), view.AttemptID(), view.Version(), digest)
+	stable := domain.SumBytes([]byte(identity))
+	return "similarity-" + strings.TrimPrefix(string(stable), "sha256:")[:32]
+}
+
+// validateSlice2View prevents a resumed/terminal run from issuing external
+// work against a stale stage. A full Run call is intentionally only valid at
+// the first stage; resumed callers use the typed stage methods below.
+func validateSlice2View(view domain.RunView, expected domain.StageName) error {
+	if view.WorkflowRevision() != Slice2WorkflowRevision {
+		return errors.New("slice2 run view workflow revision mismatch")
+	}
+	if view.State() != domain.RunRunning {
+		return fmt.Errorf("slice2 external work requires RUNNING state, got %s", view.State())
+	}
+	if view.CurrentStage() != expected {
+		return fmt.Errorf("slice2 stage %q is not current stage %q", expected, view.CurrentStage())
+	}
+	return nil
+}
+
+func validateSlice2RevalidationView(view domain.RunView, expected domain.StageName) error {
+	if view.WorkflowRevision() != Slice2WorkflowRevision {
+		return errors.New("slice2 run view workflow revision mismatch")
+	}
+	if view.State() != domain.RunBlocked && view.State() != domain.RunRunning {
+		return fmt.Errorf("slice2 revalidation requires BLOCKED or RUNNING state, got %s", view.State())
+	}
+	if view.CurrentStage() != expected {
+		return fmt.Errorf("slice2 stage %q is not current stage %q", expected, view.CurrentStage())
+	}
+	return nil
+}
+
+// RunIdea, RunStatement, and RunSimilarity are the resume-safe typed stage
+// boundaries. The coordinator loads the exact persisted input for the current
+// stage and invokes only that method, so a blocked/restarted run never starts
+// again from Idea merely because it re-entered the pipeline.
+func (p Slice2Pipeline) RunIdea(ctx context.Context, view domain.RunView, input domain.GenerationRequestSnapshotV1) (domain.AgentResult[domain.IdeaBatch], error) {
+	var empty domain.AgentResult[domain.IdeaBatch]
+	if err := p.Validate(); err != nil {
+		return empty, err
+	}
+	if err := validateSlice2View(view, "idea"); err != nil {
+		return empty, err
+	}
+	if err := input.Validate(); err != nil {
+		return empty, err
+	}
+	result, err := p.idea.Run(ctx, view, input)
+	if err != nil {
+		return empty, err
+	}
+	if err := result.Validate(); err != nil {
+		return empty, err
+	}
+	return result, nil
+}
+
+func (p Slice2Pipeline) RunStatement(ctx context.Context, view domain.RunView, input domain.StatementInput) (domain.AgentResult[domain.ProblemSpec], error) {
+	var empty domain.AgentResult[domain.ProblemSpec]
+	if err := p.Validate(); err != nil {
+		return empty, err
+	}
+	if err := validateSlice2View(view, "statement"); err != nil {
+		return empty, err
+	}
+	if err := input.Validate(); err != nil {
+		return empty, err
+	}
+	result, err := p.statement.Run(ctx, view, input)
+	if err != nil {
+		return empty, err
+	}
+	if err := result.Validate(); err != nil {
+		return empty, err
+	}
+	return result, nil
+}
+
+func (p Slice2Pipeline) RunSimilarity(ctx context.Context, view domain.RunView, input similarity.Request) (domain.AgentResult[similarity.Evidence], error) {
+	var empty domain.AgentResult[similarity.Evidence]
+	if err := p.Validate(); err != nil {
+		return empty, err
+	}
+	if err := validateSlice2View(view, "similarity"); err != nil {
+		return empty, err
+	}
+	if err := input.Validate(); err != nil {
+		return empty, err
+	}
+	result, err := p.similarity.Run(ctx, view, input)
+	if err != nil {
+		return empty, err
+	}
+	if err := result.Validate(); err != nil {
+		return empty, err
+	}
+	return result, nil
 }
 
 func controlResult[I, O any](result domain.AgentResult[I]) *domain.AgentResult[O] {
