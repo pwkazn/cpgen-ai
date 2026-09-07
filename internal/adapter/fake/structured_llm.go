@@ -26,9 +26,10 @@ func NewStructuredLLM(responses ...[]byte) *StructuredLLM {
 	return NewStructuredLLMWithRegistry(port.DefaultSchemaValidatorRegistry(), responses...)
 }
 
-// StructuredResponseValidator lets a test install the typed schema validator
-// used by its response type. The callback must call port.DecodeStructuredOutput
-// (or DecodeStructuredWithSchema) before applying domain constraints.
+// StructuredResponseValidator is retained as a source-compatible type alias
+// for older fixtures. Callback-only validation is no longer accepted because
+// a no-op callback cannot be distinguished from one that enforces required,
+// nested, and unknown-field rules. Use NewStructuredLLMWithRegistry instead.
 type StructuredResponseValidator func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error
 
 func NewStructuredLLMWithValidator(validator StructuredResponseValidator, responses ...[]byte) *StructuredLLM {
@@ -68,13 +69,9 @@ func (f *StructuredLLM) Generate(ctx context.Context, request port.GenerateReque
 	f.mu.Unlock()
 	var validationErr error
 	if f.validator != nil {
-		// Even compatibility callbacks must pass the same generic provider
-		// boundary first; a callback returning nil cannot opt out of strict
-		// JSON/schema/duplicate-field checks.
-		validationErr = port.ValidateStructuredOutput(raw, request.Schema.SchemaVersion, request.MaxOutput.Bytes)
-		if validationErr == nil {
-			validationErr = f.validator(raw, request.Schema, request.MaxOutput.Bytes)
-		}
+		// Do not execute an unbound callback: it has no trusted schema digest
+		// binding and could return nil for malformed nested content.
+		validationErr = &port.StructuredOutputError{Code: port.StructuredOutputSchemaUnbound}
 	} else if f.registry != nil {
 		validationErr = f.registry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
 	} else {

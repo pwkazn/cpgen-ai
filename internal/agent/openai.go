@@ -118,9 +118,10 @@ type Config struct {
 	PromptRegistry   *port.PromptRegistry
 	PromptResolver   func(port.GenerateRequest) (port.PromptVersion, error)
 	SchemaRegistry   *port.SchemaValidatorRegistry
-	// SchemaValidators is retained as a narrow compatibility escape hatch for
-	// callers that predate port.SchemaValidatorRegistry. New callers should
-	// use SchemaRegistry, which binds validators by the complete schema digest.
+	// SchemaValidators is retained only so older configuration structs continue
+	// to compile. It is rejected by normalized because an unbound callback can
+	// silently skip required, nested, and unknown-field validation. Use the
+	// digest-bound SchemaRegistry instead.
 	SchemaValidators map[port.OutputSchemaRef]SchemaValidator
 
 	// AllowInsecureHTTP is for an explicitly selected local test endpoint. It
@@ -230,17 +231,9 @@ func (c Config) normalized() (Config, *url.URL, error) {
 	if c.PromptRegistry == nil && c.PromptResolver == nil {
 		return Config{}, nil, &Error{Code: ErrorConfiguration}
 	}
-	if c.SchemaRegistry == nil && len(c.SchemaValidators) == 0 {
+	if c.SchemaRegistry == nil || len(c.SchemaValidators) != 0 {
 		return Config{}, nil, &Error{Code: ErrorConfiguration}
 	}
-	validators := make(map[port.OutputSchemaRef]SchemaValidator, len(c.SchemaValidators))
-	for schema, validator := range c.SchemaValidators {
-		if err := schema.Validate(); err != nil || validator == nil {
-			return Config{}, nil, &Error{Code: ErrorConfiguration}
-		}
-		validators[schema] = validator
-	}
-	c.SchemaValidators = validators
 	return c, parsed, nil
 }
 
@@ -492,16 +485,11 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 	if resolveErr != nil {
 		return empty, &Error{Code: ErrorConfiguration}
 	}
-	var validator SchemaValidator
-	if a.config.SchemaRegistry != nil {
-		validator = func(raw []byte) error {
-			return a.config.SchemaRegistry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
-		}
-	} else {
-		validator, _ = a.config.SchemaValidators[request.Schema]
-		if validator == nil {
-			return empty, &Error{Code: ErrorConfiguration}
-		}
+	if a.config.SchemaRegistry == nil {
+		return empty, &Error{Code: ErrorConfiguration}
+	}
+	validator := func(raw []byte) error {
+		return a.config.SchemaRegistry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
 	}
 	if !validLogicalOperationKey(request.LogicalIdempotencyKey) || request.ProviderPolicyDigest == "" || request.PrivacyClassification == "" {
 		return empty, &Error{Code: ErrorConfiguration}

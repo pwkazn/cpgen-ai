@@ -26,7 +26,11 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 		}
 		return port.DecodeStructuredOutput(raw, schema.SchemaVersion, maxBytes, &value)
 	}
-	model := NewStructuredLLMWithValidator(strictFixtureValidator, fixture)
+	registry, err := port.NewSchemaValidatorRegistry(port.SchemaValidatorDefinition{Schema: request.Schema, Validate: strictFixtureValidator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := NewStructuredLLMWithRegistry(registry, fixture)
 	first, err := model.Generate(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -57,26 +61,20 @@ func TestStructuredLLMIsDeterministicAndAppliesStrictBoundary(t *testing.T) {
 		t.Fatalf("depleted fixture = %#v, err = %v", second, err)
 	}
 
-	invalid := NewStructuredLLMWithValidator(strictFixtureValidator, []byte(`{"schema_version":"cpgen.idea/v1","title":"fixture","title":"secret"}`))
+	invalid := NewStructuredLLMWithRegistry(registry, []byte(`{"schema_version":"cpgen.idea/v1","title":"fixture","title":"secret"}`))
 	_, err = invalid.Generate(context.Background(), request)
 	var typed *port.StructuredOutputError
 	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputDuplicateField {
 		t.Fatalf("invalid fixture error = %T %v", err, err)
 	}
-	validatorModel := NewStructuredLLMWithValidator(func(raw []byte, schema port.OutputSchemaRef, maxBytes int64) error {
-		var value struct {
-			SchemaVersion string `json:"schema_version"`
-			Title         string `json:"title" required:"true"`
-		}
-		return port.DecodeStructuredOutput(raw, schema.SchemaVersion, maxBytes, &value)
-	}, []byte(`{"schema_version":"cpgen.idea/v1","title":"ok","secret":"not allowed"}`))
+	validatorModel := NewStructuredLLMWithRegistry(registry, []byte(`{"schema_version":"cpgen.idea/v1","title":"ok","secret":"not allowed"}`))
 	_, err = validatorModel.Generate(context.Background(), request)
 	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputUnknownField {
 		t.Fatalf("typed validator error = %T %v", err, err)
 	}
 }
 
-func TestStructuredLLMValidatorCannotOptOutOfGenericBoundary(t *testing.T) {
+func TestStructuredLLMLegacyValidatorCannotBypassStrictRegistry(t *testing.T) {
 	request := port.GenerateRequest{
 		Prompt:    port.PromptRef{Step: "idea", Version: "v1", Digest: domain.SumBytes([]byte("prompt"))},
 		Schema:    port.OutputSchemaRef{SchemaVersion: "cpgen.idea/v1", Digest: domain.SumBytes([]byte("schema"))},
@@ -89,7 +87,7 @@ func TestStructuredLLMValidatorCannotOptOutOfGenericBoundary(t *testing.T) {
 	}, []byte(`{"schema_version":"cpgen.idea/v1","title":"safe","title":"secret"}`))
 	_, err := model.Generate(context.Background(), request)
 	var typed *port.StructuredOutputError
-	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputDuplicateField {
-		t.Fatalf("callback bypassed generic boundary: %T %v", err, err)
+	if !errors.As(err, &typed) || typed.Code != port.StructuredOutputSchemaUnbound {
+		t.Fatalf("legacy callback was accepted without a trusted registry: %T %v", err, err)
 	}
 }
