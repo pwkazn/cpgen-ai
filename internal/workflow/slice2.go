@@ -140,7 +140,7 @@ func (p Slice2Pipeline) Revalidate(ctx context.Context, view domain.RunView, sta
 	if err := validateSlice2RevalidationView(view, stage); err != nil {
 		return false, err
 	}
-	if binding.RunID != view.RunID() || binding.StageName != stage || binding.DependencyID != "similarity-provider" || binding.PolicyDigest != p.policy.PolicyDigest {
+	if binding.RunID != view.RunID() || binding.StageName != stage || binding.PolicyDigest != p.policy.PolicyDigest || (stage == "similarity" && binding.DependencyID != "similarity-provider") {
 		return false, errors.New("slice2 blocked checkpoint is not bound to this run, stage, or policy")
 	}
 	if err := binding.StageInputDigest.Validate(); err != nil {
@@ -341,6 +341,9 @@ func (p Slice2Pipeline) RunIdea(ctx context.Context, view domain.RunView, input 
 	if err := input.Validate(); err != nil {
 		return empty, err
 	}
+	if input.RequestDigest != view.RequestDigest() || input.SchemaVersion != string(view.SchemaVersion()) {
+		return empty, errors.New("idea input is not bound to RunView")
+	}
 	result, err := p.idea.Run(ctx, view, input)
 	if err != nil {
 		return empty, err
@@ -382,6 +385,9 @@ func (p Slice2Pipeline) RunSimilarity(ctx context.Context, view domain.RunView, 
 	}
 	if err := input.Validate(); err != nil {
 		return empty, err
+	}
+	if input.PolicyDigest != p.policy.PolicyDigest {
+		return empty, errors.New("similarity request policy differs from pipeline policy")
 	}
 	result, err := p.similarity.Run(ctx, view, input)
 	if err != nil {
