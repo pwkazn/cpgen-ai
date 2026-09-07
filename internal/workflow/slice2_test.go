@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -20,7 +21,7 @@ func (slice2IdeaStep) Name() domain.StageName { return "idea" }
 
 func (s slice2IdeaStep) Run(_ context.Context, _ domain.RunView, input domain.GenerationRequestSnapshotV1) (domain.AgentResult[domain.IdeaBatch], error) {
 	if input.RequestDigest != s.batch.RequestDigest {
-		return domain.AgentResult[domain.IdeaBatch]{}, testing.ErrMainStarted // unreachable in the fixture
+		return domain.AgentResult[domain.IdeaBatch]{}, errors.New("fixture request digest mismatch")
 	}
 	return domain.Success(s.batch), nil
 }
