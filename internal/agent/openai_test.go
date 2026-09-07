@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,7 +26,7 @@ func TestOpenAICompatibleSuccessUsesStrictPortAndConservativeMetadata(t *testing
 	}))
 	defer server.Close()
 
-	model, err := New(Config{Endpoint: server.URL, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, RetryBaseDelay: time.Nanosecond})
+	model, err := New(testConfig(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,9 @@ func TestOpenAICompatibleRetriesTransientStatusWithStableIdentity(t *testing.T) 
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"schema_version\":\"cpgen.idea/v1\"}"}}]}`))
 	}))
 	defer server.Close()
-	model, err := New(Config{Endpoint: server.URL, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, MaxAttempts: 2, RetryBaseDelay: time.Nanosecond, RetryMaxDelay: time.Millisecond})
+	config := testConfig(server.URL)
+	config.MaxAttempts, config.RetryBaseDelay, config.RetryMaxDelay = 2, time.Nanosecond, time.Millisecond
+	model, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,9 @@ func TestOpenAICompatibleReturnsTypedFailuresWithoutProviderContent(t *testing.T
 			if tc.name == "too-large" {
 				maxBytes = 16
 			}
-			model, err := New(Config{Endpoint: server.URL, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, MaxAttempts: 1, MaxResponseBytes: maxBytes})
+			config := testConfig(server.URL)
+			config.MaxAttempts, config.MaxResponseBytes = 1, maxBytes
+			model, err := New(config)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +127,9 @@ func TestOpenAICompatibleReturnsTypedFailuresWithoutProviderContent(t *testing.T
 }
 
 func TestOpenAICompatibleRejectsEndpointPolicyAndPreservesCancellation(t *testing.T) {
-	if _, err := New(Config{Endpoint: "http://example.com", Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY"}); !errors.Is(err, &Error{Code: ErrorPolicy}) {
+	config := testConfig("http://example.com")
+	config.AllowInsecureHTTP = false
+	if _, err := New(config); !errors.Is(err, &Error{Code: ErrorPolicy}) {
 		var typed *Error
 		if !errors.As(err, &typed) || typed.Code != ErrorPolicy {
 			t.Fatalf("HTTP policy error = %T %v", err, err)
@@ -131,7 +138,9 @@ func TestOpenAICompatibleRejectsEndpointPolicyAndPreservesCancellation(t *testin
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	defer server.Close()
 	t.Setenv("CPGEN_TEST_LLM_KEY", "secret")
-	model, err := New(Config{Endpoint: server.URL, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, Timeout: time.Second})
+	config = testConfig(server.URL)
+	config.Timeout = time.Second
+	model, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +159,9 @@ func TestOpenAICompatibleUsesConservativeUsageWhenProviderOmitsUsage(t *testing.
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"schema_version\":\"cpgen.idea/v1\"}"}}]}`))
 	}))
 	defer server.Close()
-	model, err := New(Config{Endpoint: server.URL, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, MaxAttempts: 1})
+	config := testConfig(server.URL)
+	config.MaxAttempts = 1
+	model, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,14 +174,99 @@ func TestOpenAICompatibleUsesConservativeUsageWhenProviderOmitsUsage(t *testing.
 	}
 }
 
-func testGenerateRequest() port.GenerateRequest {
-	return port.GenerateRequest{
-		Prompt:    port.PromptRef{Step: "idea", Version: "v1", Digest: domain.SumBytes([]byte("prompt"))},
-		Schema:    port.OutputSchemaRef{SchemaVersion: "cpgen.idea/v1", Digest: domain.SumBytes([]byte("schema"))},
-		Variables: []byte(`{"brief":"fixture"}`),
-		Sampling:  port.SamplingPolicy{TopP: 1},
-		MaxOutput: port.OutputLimit{Tokens: 8, Bytes: 1024},
+func TestOpenAICompatibleMissingCredentialIsBlockedWithoutDispatch(t *testing.T) {
+	t.Setenv("CPGEN_TEST_LLM_KEY", "")
+	model, err := New(testConfig("http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	outcome, err := model.Generate(context.Background(), testGenerateRequest())
+	if err != nil || outcome.Failure == nil {
+		t.Fatalf("outcome = %#v, err = %v", outcome, err)
+	}
+	if outcome.Failure.Code != domain.FailurePolicyRejected || outcome.Failure.Class != domain.FailureBlocked || outcome.CallTrace.DispatchKind != domain.DispatchNone {
+		t.Fatalf("blocked outcome = %#v", outcome)
+	}
+}
+
+func TestOpenAICompatibleTransportUnknownIsNotRetriedAndTraceIsSettled(t *testing.T) {
+	t.Setenv("CPGEN_TEST_LLM_KEY", "secret")
+	transport := &errorRoundTripper{err: errors.New("send boundary is unknown: " + "private-response")}
+	config := testConfig("http://127.0.0.1:1")
+	config.MaxAttempts = 3
+	config.HTTPClient = &http.Client{Transport: transport}
+	model, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := model.Generate(context.Background(), testGenerateRequest())
+	if err != nil || outcome.Failure == nil {
+		t.Fatalf("outcome = %#v, err = %v", outcome, err)
+	}
+	if transport.calls != 1 || outcome.Failure.Code != domain.FailureBoundaryUnknown || outcome.Failure.Class != domain.FailureUnknown || len(outcome.CallTrace.PhysicalAttemptCallIDs) != 1 {
+		t.Fatalf("calls=%d failure=%#v trace=%#v", transport.calls, outcome.Failure, outcome.CallTrace)
+	}
+}
+
+func TestOpenAICompatibleConfirmedNoSendMayRetry(t *testing.T) {
+	t.Setenv("CPGEN_TEST_LLM_KEY", "secret")
+	transport := &errorRoundTripper{err: fmt.Errorf("%w: fixture", ErrConfirmedNoSend)}
+	config := testConfig("http://127.0.0.1:1")
+	config.MaxAttempts = 2
+	config.HTTPClient = &http.Client{Transport: transport}
+	model, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := model.Generate(context.Background(), testGenerateRequest())
+	if err != nil || outcome.Failure == nil || transport.calls != 2 {
+		t.Fatalf("calls=%d outcome=%#v err=%v", transport.calls, outcome, err)
+	}
+	if len(outcome.CallTrace.PhysicalAttemptCallIDs) != 0 || outcome.CallTrace.DispatchKind != domain.DispatchNone {
+		t.Fatalf("confirmed no-send trace = %#v", outcome.CallTrace)
+	}
+}
+
+type errorRoundTripper struct {
+	err   error
+	calls int
+}
+
+func (t *errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return nil, t.err
+}
+
+func testGenerateRequest() port.GenerateRequest {
+	schema := port.OutputSchemaRef{SchemaVersion: "cpgen.idea/v1", Digest: domain.SumBytes([]byte("schema"))}
+	template := "Generate one candidate from the supplied data."
+	return port.GenerateRequest{
+		Prompt: port.PromptRef{Step: "idea", Version: "v1", Digest: domain.SumBytes([]byte(template)), SchemaVersion: schema.SchemaVersion, SchemaDigest: schema.Digest},
+		Schema: schema, Variables: []byte(`{"brief":"fixture"}`), Sampling: port.SamplingPolicy{TopP: 1}, MaxOutput: port.OutputLimit{Tokens: 8, Bytes: 1024},
+		LogicalIdempotencyKey: "run_idea_attempt_1", ProviderPolicyDigest: domain.SumBytes([]byte("policy")), PrivacyClassification: "private",
+	}
+}
+
+type testOutput struct {
+	SchemaVersion string `json:"schema_version"`
+	Title         string `json:"title,omitempty"`
+}
+
+func testConfig(endpoint string) Config {
+	schema := port.OutputSchemaRef{SchemaVersion: "cpgen.idea/v1", Digest: domain.SumBytes([]byte("schema"))}
+	template := "Generate one candidate from the supplied data."
+	registry, err := port.NewPromptRegistry(port.PromptVersion{Step: "idea", Version: "v1", Template: template, TemplateDigest: domain.SumBytes([]byte(template)), OutputSchema: schema})
+	if err != nil {
+		panic(err)
+	}
+	schemaRegistry, err := port.NewSchemaValidatorRegistry(port.SchemaValidatorDefinition{Schema: schema, Validate: func(raw []byte, expected port.OutputSchemaRef, maxBytes int64) error {
+		var output testOutput
+		return port.DecodeStructuredOutput(raw, expected.SchemaVersion, maxBytes, &output)
+	}})
+	if err != nil {
+		panic(err)
+	}
+	return Config{Endpoint: endpoint, Model: "fixture", APIKeyEnv: "CPGEN_TEST_LLM_KEY", AllowInsecureHTTP: true, PromptRegistry: registry, SchemaRegistry: schemaRegistry}
 }
 
 func errString(err error) string {
