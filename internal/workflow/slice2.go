@@ -144,7 +144,15 @@ func (p Slice2Pipeline) Validate() error {
 	if p.idea.Name() != "idea" || p.statement.Name() != "statement" || p.similarity.Name() != "similarity" {
 		return errors.New("slice2 pipeline has an invalid stage name")
 	}
-	return p.policy.Validate()
+	if err := p.policy.Validate(); err != nil {
+		return err
+	}
+	for _, stage := range []domain.StageName{"idea", "statement"} {
+		if _, err := p.stagePolicyDigest(stage); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p Slice2Pipeline) Idea() Step[domain.GenerationRequestSnapshotV1, domain.IdeaBatch] {
