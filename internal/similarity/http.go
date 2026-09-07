@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -233,7 +234,14 @@ func New(c Config) (*HTTPAdapter, error) {
 	if normalized.HTTPClient != nil && normalized.HTTPClient.Transport != nil {
 		base = normalized.HTTPClient.Transport
 	}
-	client.Transport = &policyTransport{base: base, allowLoopback: normalized.AllowInsecureHTTP || normalized.AllowLoopbackForTesting, hosts: normalized.AllowedHosts}
+	allowLoopback := normalized.AllowInsecureHTTP || normalized.AllowLoopbackForTesting
+	if _, ok := base.(*http.Transport); !ok && !isLoopbackHost(endpoint.Hostname()) {
+		// An arbitrary RoundTripper can choose a proxy or destination that is
+		// unrelated to the policy-checked endpoint. Only permit it for explicit
+		// loopback tests; public calls use the dial-enforced standard transport.
+		return nil, &Error{Code: ErrorPolicy}
+	}
+	client.Transport = newPolicyTransport(base, allowLoopback, normalized.AllowedHosts)
 	return &HTTPAdapter{config: normalized, endpoint: endpoint, client: client}, nil
 }
 
@@ -748,6 +756,59 @@ type policyTransport struct {
 	base          http.RoundTripper
 	allowLoopback bool
 	hosts         []string
+	dialEnforced  bool
+}
+
+func newPolicyTransport(base http.RoundTripper, allowLoopback bool, hosts []string) *policyTransport {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if transport, ok := base.(*http.Transport); ok {
+		clone := transport.Clone()
+		// Proxies receive the request before the endpoint dial and therefore can
+		// bypass target DNS/IP policy. Similarity calls are direct only.
+		clone.Proxy = nil
+		originalDial := clone.DialContext
+		if originalDial == nil {
+			dialer := &net.Dialer{}
+			originalDial = dialer.DialContext
+		}
+		clone.DialTLSContext = nil
+		clone.DialContext = similarityPolicyDialContext(originalDial, allowLoopback)
+		return &policyTransport{base: clone, allowLoopback: allowLoopback, hosts: append([]string(nil), hosts...), dialEnforced: true}
+	}
+	return &policyTransport{base: base, allowLoopback: allowLoopback, hosts: append([]string(nil), hosts...)}
+}
+
+func similarityPolicyDialContext(original func(context.Context, string, string) (net.Conn, error), allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
+		}
+		if isLoopbackHost(host) {
+			if !allowLoopback {
+				return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
+			}
+			return original(ctx, network, address)
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil || len(addresses) == 0 {
+			return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
+		}
+		var lastErr error
+		for _, resolved := range addresses {
+			if !isPublicIP(resolved.IP) || (network == "tcp4" && resolved.IP.To4() == nil) || (network == "tcp6" && resolved.IP.To4() != nil) {
+				return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
+			}
+			connection, dialErr := original(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+			if dialErr == nil {
+				return connection, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, lastErr
+	}
 }
 
 func (t *policyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -759,7 +820,7 @@ func (t *policyTransport) RoundTrip(request *http.Request) (*http.Response, erro
 		if !t.allowLoopback {
 			return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
 		}
-	} else {
+	} else if !t.dialEnforced {
 		addresses, err := net.DefaultResolver.LookupIPAddr(request.Context(), host)
 		if err != nil || len(addresses) == 0 {
 			return nil, &Error{Code: ErrorPolicy, ConfirmedNoSend: true}
@@ -810,7 +871,28 @@ func isLoopbackHost(host string) bool {
 }
 
 func isPublicIP(ip net.IP) bool {
-	return ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast()
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	address, err := netip.ParseAddr(ip.String())
+	if err != nil {
+		return false
+	}
+	for _, prefix := range similarityNonRoutablePrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+var similarityNonRoutablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"), netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("2001:2::/48"),
 }
 
 func validateSafeIdentity(value string) error {
