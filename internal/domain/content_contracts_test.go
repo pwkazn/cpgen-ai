@@ -44,7 +44,7 @@ func TestContentContractsSelectionAndDigestChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	rd, _ := r.Digest()
-	candidates := []IdeaCandidate{{CandidateOrdinal: 1, AbstractTask: "B", IntendedAlgorithm: "heap", FeasibilityStatus: "FEASIBLE"}, {CandidateOrdinal: 0, AbstractTask: "A", IntendedAlgorithm: "bfs", FeasibilityStatus: "REJECTED", FeasibilityReasons: []string{"conflict"}}}
+	candidates := []IdeaCandidate{{CandidateOrdinal: 1, AbstractTask: "B", IntendedAlgorithm: "heap", FeasibilityStatus: "REJECTED", FeasibilityReasons: []string{"conflict"}}, {CandidateOrdinal: 0, AbstractTask: "A", IntendedAlgorithm: "bfs", FeasibilityStatus: "FEASIBLE"}}
 	batch, err := NewIdeaBatch(snap, 2, "policy/v1", candidates)
 	if err != nil {
 		t.Fatal(err)
@@ -55,10 +55,10 @@ func TestContentContractsSelectionAndDigestChain(t *testing.T) {
 	if len(batch.FeasibleCandidateIDs()) != 1 {
 		t.Fatal("wrong feasible set")
 	}
-	if _, err := NewIdeaSelection(rd, batch, batch.Candidates[0].IdeaID, "selection/v1", []string{"reason"}, nil); err == nil {
+	if _, err := NewIdeaSelection(rd, batch, batch.Candidates[1].IdeaID, "selection/v1", []string{"reason"}, nil); err == nil {
 		t.Fatal("rejected candidate was selectable")
 	}
-	sel, err := NewIdeaSelection(rd, batch, batch.Candidates[1].IdeaID, "selection/v1", []string{"reason"}, nil)
+	sel, err := NewIdeaSelection(rd, batch, batch.Candidates[0].IdeaID, "selection/v1", []string{"reason"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

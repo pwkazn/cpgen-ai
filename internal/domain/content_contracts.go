@@ -7,22 +7,34 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // GenerationRequestV1 is the stable, provider-independent content request.
 type GenerationRequestV1 struct {
-	SchemaVersion       int      `json:"schema_version"`
-	TitleHint           string   `json:"title_hint"`
-	TopicTags           []string `json:"topic_tags"`
-	DifficultyLower     int      `json:"difficulty_lower"`
-	DifficultyUpper     int      `json:"difficulty_upper"`
-	TimeLimitMS         int64    `json:"time_limit_ms"`
-	MemoryLimitMB       int64    `json:"memory_limit_mb"`
-	Languages           []string `json:"languages"`
-	SimilarityRequired  bool     `json:"similarity_required"`
-	SimilarityThreshold float64  `json:"similarity_threshold"`
-	OutputFormat        string   `json:"output_format"`
+	SchemaVersion       int          `json:"schema_version"`
+	Mode                string       `json:"mode,omitempty"`
+	Brief               string       `json:"brief,omitempty"`
+	TitleHint           string       `json:"title_hint"`
+	TopicTags           []string     `json:"topic_tags"`
+	DifficultyLower     int          `json:"difficulty_lower"`
+	DifficultyUpper     int          `json:"difficulty_upper"`
+	TimeLimitMS         int64        `json:"time_limit_ms"`
+	MemoryLimitMB       int64        `json:"memory_limit_mb"`
+	Languages           []string     `json:"languages"`
+	RequiredFeatures    []string     `json:"required_features,omitempty"`
+	ForbiddenFeatures   []string     `json:"forbidden_features,omitempty"`
+	SolutionLanguage    string       `json:"solution_language,omitempty"`
+	Seed                *int64       `json:"seed,omitempty"`
+	VerificationProfile string       `json:"verification_profile,omitempty"`
+	ExportTargets       []string     `json:"export_targets,omitempty"`
+	BudgetLimits        BudgetLimits `json:"budget_limits,omitempty"`
+	SimilarityRequired  bool         `json:"similarity_required"`
+	SimilarityThreshold float64      `json:"similarity_threshold"`
+	OutputFormat        string       `json:"output_format"`
 }
 
 // UnmarshalJSON performs strict decoding at the contract boundary.
@@ -90,12 +102,48 @@ type StatementInput struct {
 	SelectedIdeaID        string `json:"selected_idea_id"`
 }
 
+// ProblemSpec is the immutable structured statement input produced downstream.
+type ProblemSpec struct {
+	SchemaVersion          int      `json:"schema_version"`
+	RequestDigest          Digest   `json:"request_digest"`
+	IdeaBatchDigest        Digest   `json:"idea_batch_digest"`
+	IdeaSelectionDigest    Digest   `json:"idea_selection_digest"`
+	SelectedIdeaID         string   `json:"selected_idea_id"`
+	SelectionPolicyVersion string   `json:"selection_policy_version"`
+	Language               string   `json:"language"`
+	TimeLimitMS            int64    `json:"time_limit_ms"`
+	MemoryLimitMB          int64    `json:"memory_limit_mb"`
+	RequiredConstraints    []string `json:"required_constraints"`
+	ForbiddenConstraints   []string `json:"forbidden_constraints"`
+}
+
+func (p ProblemSpec) Validate() error {
+	if p.SchemaVersion != 1 || p.SelectedIdeaID == "" || p.SelectionPolicyVersion == "" || p.Language == "" || p.TimeLimitMS <= 0 || p.MemoryLimitMB <= 0 {
+		return errors.New("invalid problem spec")
+	}
+	if err := p.RequestDigest.Validate(); err != nil {
+		return err
+	}
+	if err := p.IdeaBatchDigest.Validate(); err != nil {
+		return err
+	}
+	if err := p.IdeaSelectionDigest.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (r GenerationRequestV1) Validate() error {
 	if r.SchemaVersion != 1 {
 		return fmt.Errorf("schema_version must be 1")
 	}
 	if !utf8.ValidString(r.TitleHint) || len([]byte(r.TitleHint)) > 200 {
 		return errors.New("title_hint is invalid or too long")
+	}
+	for _, s := range []string{r.Mode, r.Brief, r.SolutionLanguage, r.VerificationProfile} {
+		if s != "" && (strings.TrimSpace(s) != s || !norm.NFC.IsNormalString(s) || len([]byte(s)) > 4096) {
+			return errors.New("invalid request text")
+		}
 	}
 	if r.DifficultyLower < 0 || r.DifficultyUpper < r.DifficultyLower {
 		return errors.New("invalid difficulty range")
@@ -116,6 +164,23 @@ func (r GenerationRequestV1) Validate() error {
 		if !utf8.ValidString(s) || s == "" {
 			return errors.New("invalid empty/non-UTF-8 tag or language")
 		}
+	}
+	seen := map[string]bool{}
+	for _, s := range append(append(append([]string{}, r.RequiredFeatures...), r.ForbiddenFeatures...), r.ExportTargets...) {
+		if s == "" || strings.TrimSpace(s) != s || !norm.NFC.IsNormalString(s) || seen[s] {
+			return errors.New("invalid or duplicate feature/export")
+		}
+		seen[s] = true
+	}
+	for _, req := range r.RequiredFeatures {
+		for _, ban := range r.ForbiddenFeatures {
+			if req == ban {
+				return errors.New("required/forbidden feature conflict")
+			}
+		}
+	}
+	if err := r.BudgetLimits.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -188,7 +253,7 @@ func NewIdeaBatch(s GenerationRequestSnapshotV1, requested int, policy string, c
 		if r.Candidates[i].FeasibilityStatus != "FEASIBLE" && r.Candidates[i].FeasibilityStatus != "REJECTED" {
 			return IdeaBatch{}, errors.New("invalid feasibility status")
 		}
-		r.Candidates[i].IdeaID = ideaID(r.RequestDigest, r.EffectiveSeed, i, r.Candidates[i])
+		r.Candidates[i].IdeaID = ideaID(r.RequestDigest, r.EffectiveSeed, r.BatchOrdinal, i, r.Candidates[i])
 		r.Candidates[i].SeedAxes = append([]string(nil), r.Candidates[i].SeedAxes...)
 		r.Candidates[i].FeasibilityReasons = append([]string(nil), r.Candidates[i].FeasibilityReasons...)
 		r.Candidates[i].NegativeConstraints = append([]string(nil), r.Candidates[i].NegativeConstraints...)
@@ -203,7 +268,7 @@ func (b IdeaBatch) Validate() error {
 		return errors.New("invalid idea batch")
 	}
 	for n, c := range b.Candidates {
-		if c.CandidateOrdinal != n || (c.FeasibilityStatus != "FEASIBLE" && c.FeasibilityStatus != "REJECTED") || c.IdeaID != ideaID(b.RequestDigest, b.EffectiveSeed, n, c) {
+		if c.CandidateOrdinal != n || (c.FeasibilityStatus != "FEASIBLE" && c.FeasibilityStatus != "REJECTED") || c.IdeaID != ideaID(b.RequestDigest, b.EffectiveSeed, b.BatchOrdinal, n, c) {
 			return errors.New("invalid idea candidate")
 		}
 	}
@@ -215,14 +280,15 @@ func (b IdeaBatch) Validate() error {
 	}
 	return nil
 }
-func ideaID(rd Digest, seed uint64, ordinal int, c IdeaCandidate) string {
+func ideaID(rd Digest, seed uint64, batchOrdinal, ordinal int, c IdeaCandidate) string {
 	c.IdeaID = ""
 	b, _ := json.Marshal(struct {
 		R Digest
 		S uint64
+		B int
 		O int
 		C IdeaCandidate
-	}{rd, seed, ordinal, c})
+	}{rd, seed, batchOrdinal, ordinal, c})
 	return "idea:" + string(SumBytes(b))
 }
 func (b IdeaBatch) FeasibleCandidateIDs() []string {
@@ -236,6 +302,17 @@ func (b IdeaBatch) FeasibleCandidateIDs() []string {
 }
 
 func NewIdeaSelection(rd Digest, b IdeaBatch, id, policy string, reasons []string, evidence []Digest) (IdeaSelection, error) {
+	if err := b.Validate(); err != nil {
+		return IdeaSelection{}, err
+	}
+	if policy == "" || len(reasons) == 0 {
+		return IdeaSelection{}, errors.New("selection policy/reasons required")
+	}
+	for _, d := range evidence {
+		if err := d.Validate(); err != nil {
+			return IdeaSelection{}, err
+		}
+	}
 	if rd != b.RequestDigest {
 		return IdeaSelection{}, errors.New("request digest mismatch")
 	}
@@ -252,6 +329,9 @@ func NewIdeaSelection(rd Digest, b IdeaBatch, id, policy string, reasons []strin
 		return IdeaSelection{}, errors.New("selected candidate not in batch")
 	}
 	o := b.FeasibleCandidateIDs()
+	if len(o) == 0 || id != o[0] {
+		return IdeaSelection{}, errors.New("selected candidate is not the stable policy preference")
+	}
 	s := IdeaSelection{RequestDigest: rd, IdeaBatchDigest: b.BatchDigest, SelectedIdeaID: id, SelectionPolicyVersion: policy, OrderedCandidateIDs: o, ReasonCodes: append([]string(nil), reasons...), EvidenceDigests: append([]Digest(nil), evidence...)}
 	x := s
 	x.SelectionDigest = ""
@@ -261,6 +341,9 @@ func NewIdeaSelection(rd Digest, b IdeaBatch, id, policy string, reasons []strin
 }
 
 func (s IdeaSelection) Validate(b IdeaBatch) error {
+	if err := b.Validate(); err != nil {
+		return err
+	}
 	if s.RequestDigest != b.RequestDigest || s.IdeaBatchDigest != b.BatchDigest {
 		return errors.New("selection digest chain mismatch")
 	}
@@ -296,6 +379,9 @@ func (i StatementInput) ValidateChain(s GenerationRequestSnapshotV1, b IdeaBatch
 	}
 	if i.RequestSnapshotDigest != s.SnapshotDigest || i.IdeaBatchDigest != b.BatchDigest || i.IdeaSelectionDigest != sel.SelectionDigest || sel.RequestDigest != s.RequestDigest || sel.IdeaBatchDigest != b.BatchDigest || sel.SelectedIdeaID != i.SelectedIdeaID {
 		return errors.New("statement input digest chain mismatch")
+	}
+	if err := sel.Validate(b); err != nil {
+		return err
 	}
 	for _, c := range b.Candidates {
 		if c.IdeaID == i.SelectedIdeaID && c.FeasibilityStatus == "FEASIBLE" {
