@@ -290,7 +290,14 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 		return empty, err
 	}
 	if len(feasible) == 0 {
-		return domain.Review[Slice2Output](domain.ReviewRequest{EvidenceDigest: batch.BatchDigest, PolicyDigest: p.policy.PolicyDigest, Reason: "no feasible idea candidates"}), nil
+		reviewPolicy := ideaPolicy
+		if reviewPolicy == "" {
+			// Legacy generic steps do not expose a stage policy.  The immutable
+			// run configuration digest is the only safe durable fallback; it is
+			// deliberately not confused with the Similarity decision policy.
+			reviewPolicy = view.ConfigDigest()
+		}
+		return domain.Review[Slice2Output](domain.ReviewRequest{EvidenceDigest: batch.BatchDigest, PolicyDigest: reviewPolicy, Reason: "no feasible idea candidates"}), nil
 	}
 	selection, err := domain.NewIdeaSelection(snapshot.RequestDigest, batch, feasible[0], p.selectionPolicy, []string{"deterministic_selection"}, []domain.Digest{batch.BatchDigest})
 	if err != nil {
