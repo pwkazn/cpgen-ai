@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cpgen/internal/domain"
 )
@@ -176,10 +177,16 @@ type SimilaritySearchRequest struct {
 }
 
 func (r SimilaritySearchRequest) Validate() error {
-	if r.Query == "" || r.Limit <= 0 {
+	if r.Query == "" || len(r.Query) > 65536 || !utf8.ValidString(r.Query) || r.Limit <= 0 {
 		return fmt.Errorf("similarity query and positive limit are required")
 	}
-	return r.QueryDigest.Validate()
+	if err := r.QueryDigest.Validate(); err != nil {
+		return err
+	}
+	if r.QueryDigest != domain.SumBytes([]byte(r.Query)) {
+		return fmt.Errorf("similarity query digest does not match query")
+	}
+	return nil
 }
 
 type SimilarityHit struct {

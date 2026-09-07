@@ -117,6 +117,7 @@ type Request struct {
 	PolicyRef                 string               `json:"policy_ref"`
 	PolicyDigest              domain.Digest        `json:"policy_digest"`
 	LogicalIdempotencyKey     string               `json:"logical_idempotency_key"`
+	Limit                     int                  `json:"limit"`
 }
 
 // SimilarityRequest is the descriptive name used by callers that prefer the
@@ -138,6 +139,7 @@ func NewRequest(projection PackageSafeProjection, policyRef string, policyDigest
 		PolicyRef:                 cleanSingleLine(policyRef),
 		PolicyDigest:              policyDigest,
 		LogicalIdempotencyKey:     strings.TrimSpace(logicalID),
+		Limit:                     defaultHTTPMaxHits,
 	}
 	if err := r.Validate(); err != nil {
 		return Request{}, err
@@ -180,6 +182,9 @@ func (r Request) Validate() error {
 	}
 	if err := validateText("logical idempotency key", r.LogicalIdempotencyKey, 256, true, false); err != nil {
 		return err
+	}
+	if r.Limit <= 0 || r.Limit > 10000 {
+		return errors.New("similarity request limit is outside the allowed range")
 	}
 	return nil
 }
@@ -860,7 +865,11 @@ func sanitizeURL(raw string) (string, error) {
 		return "", errors.New("hit URL must be an HTTPS URL without credentials, query, or fragment")
 	}
 	u.Scheme = "https"
-	u.Path = strings.TrimRight(u.EscapedPath(), "/")
+	// URL.Path is already the decoded path. Writing EscapedPath back into
+	// Path would make a subsequent String call double-escape sequences such as
+	// %20. Clear RawPath and let net/url perform one canonical escaping pass.
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
 	return u.String(), nil
 }
 

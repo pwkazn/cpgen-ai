@@ -202,7 +202,8 @@ func (s *CheckpointStep) Revalidate(ctx context.Context, view domain.RunView, bi
 	if s.capabilities.Similarity == nil {
 		return true, nil
 	}
-	outcome, err := s.capabilities.Similarity.Search(ctx, port.SimilaritySearchRequest{Query: binding.DependencyID, QueryDigest: binding.DependencyDigest, Limit: 1})
+	queryDigest := domain.SumBytes([]byte(binding.DependencyID))
+	outcome, err := s.capabilities.Similarity.Search(ctx, port.SimilaritySearchRequest{Query: binding.DependencyID, QueryDigest: queryDigest, Limit: 1})
 	if err != nil {
 		return false, err
 	}

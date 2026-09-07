@@ -211,7 +211,7 @@ func TestHTTPAdapterSuccessUsageSortingAndCompatibilityPort(t *testing.T) {
 	if outcome.Value.Hits[0].ExternalID != "strong" || gotAuth.Load().(string) != "Bearer "+secret || gotID.Load().(string) == "" {
 		t.Fatalf("request metadata/hits = %#v auth=%q id=%q", outcome.Value.Hits, gotAuth.Load(), gotID.Load())
 	}
-	portOutcome, err := adapter.Search(context.Background(), port.SimilaritySearchRequest{Query: "statement", QueryDigest: domain.SumBytes([]byte("query")), Limit: 3})
+	portOutcome, err := adapter.Search(context.Background(), port.SimilaritySearchRequest{Query: "statement", QueryDigest: domain.SumBytes([]byte("statement")), Limit: 3})
 	if err != nil || portOutcome.Value == nil {
 		var typed *Error
 		if errors.As(err, &typed) {

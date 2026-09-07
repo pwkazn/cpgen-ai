@@ -281,12 +281,22 @@ func (o EvidenceOutcome) Validate() error {
 
 // SearchEvidence executes the richer provider-neutral contract.
 func (a *HTTPAdapter) SearchEvidence(ctx context.Context, request Request) (EvidenceOutcome, error) {
+	if a == nil {
+		return EvidenceOutcome{}, &Error{Code: ErrorConfiguration}
+	}
+	return a.searchEvidence(ctx, request, a.config.MaxHits)
+}
+
+func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHits int) (EvidenceOutcome, error) {
 	var empty EvidenceOutcome
 	if a == nil || a.client == nil || a.endpoint == nil {
 		return empty, &Error{Code: ErrorConfiguration}
 	}
 	if err := request.Validate(); err != nil {
 		return empty, &Error{Code: ErrorConfiguration, cause: err}
+	}
+	if maxHits <= 0 || maxHits > a.config.MaxHits {
+		return empty, &Error{Code: ErrorConfiguration}
 	}
 	if err := ctx.Err(); err != nil {
 		return empty, &Error{Code: ErrorCanceled, cause: err}
@@ -349,7 +359,7 @@ func (a *HTTPAdapter) SearchEvidence(ctx context.Context, request Request) (Evid
 			}
 			return a.failureOutcome(logicalID, traceIDs, adapterErr), nil
 		}
-		wire, usage, usageSource, parseErr := decodeResponse(body, requestBytes, a.config.MaxHits)
+		wire, usage, usageSource, parseErr := decodeResponse(body, requestBytes, maxHits)
 		if parseErr != nil {
 			return a.failureOutcome(logicalID, traceIDs, parseErr), nil
 		}
@@ -385,8 +395,17 @@ func (a *HTTPAdapter) SearchEvidence(ctx context.Context, request Request) (Evid
 // callers needing policy-bound provenance should use SearchEvidence.
 func (a *HTTPAdapter) Search(ctx context.Context, request port.SimilaritySearchRequest) (domain.MeteredOutcome[port.SimilarityEvidence], error) {
 	var empty domain.MeteredOutcome[port.SimilarityEvidence]
+	if a == nil {
+		return empty, &Error{Code: ErrorConfiguration}
+	}
 	if err := request.Validate(); err != nil {
 		return empty, &Error{Code: ErrorConfiguration, cause: err}
+	}
+	if request.QueryDigest != domain.SumBytes([]byte(request.Query)) {
+		return empty, &Error{Code: ErrorConfiguration}
+	}
+	if request.Limit > a.config.MaxHits {
+		return empty, &Error{Code: ErrorConfiguration}
 	}
 	projection, err := NewPackageSafeProjection("similarity query", request.Query, nil, "unknown")
 	if err != nil {
@@ -398,7 +417,11 @@ func (a *HTTPAdapter) Search(ctx context.Context, request port.SimilaritySearchR
 	if err != nil {
 		return empty, &Error{Code: ErrorConfiguration, cause: err}
 	}
-	outcome, err := a.SearchEvidence(ctx, richRequest)
+	richRequest.Limit = request.Limit
+	if err := richRequest.Validate(); err != nil {
+		return empty, &Error{Code: ErrorConfiguration, cause: err}
+	}
+	outcome, err := a.searchEvidence(ctx, richRequest, request.Limit)
 	if err != nil {
 		return empty, err
 	}
@@ -466,7 +489,8 @@ func requestBody(request Request) ([]byte, domain.Digest, error) {
 		PolicyRef                 string               `json:"policy_ref"`
 		PolicyDigest              domain.Digest        `json:"policy_digest"`
 		LogicalID                 string               `json:"logical_idempotency_key"`
-	}{ProtocolVersion, request.SchemaVersion, request.CandidateProjectionDigest, request.NormalizedTitle, request.NormalizedStatement, request.NormalizedTags, request.Language, request.PolicyRef, request.PolicyDigest, request.LogicalIdempotencyKey}
+		Limit                     int                  `json:"limit"`
+	}{ProtocolVersion, request.SchemaVersion, request.CandidateProjectionDigest, request.NormalizedTitle, request.NormalizedStatement, request.NormalizedTags, request.Language, request.PolicyRef, request.PolicyDigest, request.LogicalIdempotencyKey, request.Limit}
 	raw, err := json.Marshal(wire)
 	if err != nil {
 		return nil, "", err
@@ -486,10 +510,17 @@ func (a *HTTPAdapter) doRequest(ctx context.Context, body []byte, key, logicalID
 	response, err := a.client.Do(req)
 	if err != nil {
 		confirmed := errors.Is(err, ErrConfirmedNoSend)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, 0, 0, true, &Error{Code: ErrorTransport, ConfirmedNoSend: confirmed, cause: err}
+		var typed *Error
+		if errors.As(err, &typed) {
+			return nil, 0, 0, !typed.ConfirmedNoSend, typed
 		}
-		return nil, 0, 0, confirmed, &Error{Code: ErrorTransport, ConfirmedNoSend: confirmed}
+		if confirmed {
+			return nil, 0, 0, false, &Error{Code: ErrorTransport, ConfirmedNoSend: true}
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, 0, true, &Error{Code: ErrorTransport, cause: err}
+		}
+		return nil, 0, 0, true, &Error{Code: ErrorTransport, cause: err}
 	}
 	defer response.Body.Close()
 	data, readErr := readCapped(response.Body, a.config.MaxResponseBytes)
