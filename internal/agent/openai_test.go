@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -224,6 +225,115 @@ func TestOpenAICompatibleConfirmedNoSendMayRetry(t *testing.T) {
 	}
 	if len(outcome.CallTrace.PhysicalAttemptCallIDs) != 0 || outcome.CallTrace.DispatchKind != domain.DispatchNone {
 		t.Fatalf("confirmed no-send trace = %#v", outcome.CallTrace)
+	}
+}
+
+func TestOpenAICompatibleTypedConfirmedNoSendDoesNotDispatch(t *testing.T) {
+	t.Setenv("CPGEN_TEST_LLM_KEY", "secret")
+	transport := &errorRoundTripper{err: &Error{Code: ErrorTransport, ConfirmedNoSend: true}}
+	config := testConfig("http://127.0.0.1:1")
+	config.MaxAttempts = 1
+	config.HTTPClient = &http.Client{Transport: transport}
+	model, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := model.Generate(context.Background(), testGenerateRequest())
+	if err != nil || outcome.Failure == nil {
+		t.Fatalf("outcome=%#v err=%v", outcome, err)
+	}
+	if transport.calls != 1 || outcome.Failure.Code != domain.FailureTransport || outcome.Failure.Class != domain.FailureRetryable || outcome.CallTrace.DispatchKind != domain.DispatchNone || len(outcome.CallTrace.PhysicalAttemptCallIDs) != 0 {
+		t.Fatalf("calls=%d failure=%#v trace=%#v", transport.calls, outcome.Failure, outcome.CallTrace)
+	}
+}
+
+func TestOpenAICompatibleLogicalIdentityUsesStableKeyAndPartitions(t *testing.T) {
+	t.Setenv("CPGEN_TEST_LLM_KEY", "secret")
+	var keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"schema_version\":\"cpgen.idea/v1\"}"}}]}`))
+	}))
+	defer server.Close()
+	config := testConfig(server.URL)
+	config.MaxAttempts = 1
+	model, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := testGenerateRequest()
+	second := first
+	second.Variables = []byte(`{"brief":"different payload"}`)
+	firstOutcome, err := model.Generate(context.Background(), first)
+	if err != nil || firstOutcome.Value == nil {
+		t.Fatalf("first outcome=%#v err=%v", firstOutcome, err)
+	}
+	secondOutcome, err := model.Generate(context.Background(), second)
+	if err != nil || secondOutcome.Value == nil {
+		t.Fatalf("second outcome=%#v err=%v", secondOutcome, err)
+	}
+	if firstOutcome.CallTrace.LogicalOperationID != secondOutcome.CallTrace.LogicalOperationID || len(keys) != 2 || keys[0] != keys[1] {
+		t.Fatalf("same logical key did not remain stable: ids=%q/%q keys=%q", firstOutcome.CallTrace.LogicalOperationID, secondOutcome.CallTrace.LogicalOperationID, keys)
+	}
+	third := second
+	third.LogicalIdempotencyKey = "run_idea_attempt_2"
+	thirdOutcome, err := model.Generate(context.Background(), third)
+	if err != nil || thirdOutcome.Value == nil {
+		t.Fatalf("third outcome=%#v err=%v", thirdOutcome, err)
+	}
+	if thirdOutcome.CallTrace.LogicalOperationID == firstOutcome.CallTrace.LogicalOperationID || keys[2] == keys[0] {
+		t.Fatalf("different run key collided: id=%q key=%q", thirdOutcome.CallTrace.LogicalOperationID, keys[2])
+	}
+}
+
+func TestOpenAICompatibleCanonicalizesLegacyPromptDigestSpellings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	model, err := New(testConfig(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := testGenerateRequest()
+	current := legacy
+	current.Prompt.TemplateDigest = current.Prompt.Digest
+	legacy.Prompt.TemplateDigest = ""
+	current.Prompt.Digest = ""
+	definition, err := model.config.PromptRegistry.ResolveRequest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBody, legacyDigest, err := model.requestBody(legacy, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBody, currentDigest, err := model.requestBody(current, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyDigest != currentDigest || string(legacyBody) != string(currentBody) {
+		t.Fatalf("legacy/current prompt spellings differ: %s/%s %s/%s", legacyDigest, currentDigest, legacyBody, currentBody)
+	}
+}
+
+func TestOpenAICompatibleTransportPolicyDisablesProxyAndRejectsReservedIPs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	model, err := New(testConfig(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := model.client.Transport.(*policyTransport)
+	if !ok {
+		t.Fatalf("transport type = %T", model.client.Transport)
+	}
+	base, ok := policy.base.(*http.Transport)
+	if !ok || base.Proxy != nil {
+		t.Fatalf("proxy was not disabled: %#v", base)
+	}
+	for _, raw := range []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.1", "2001:db8::1"} {
+		if isPublicIP(net.ParseIP(raw)) {
+			t.Errorf("reserved address accepted: %s", raw)
+		}
 	}
 }
 

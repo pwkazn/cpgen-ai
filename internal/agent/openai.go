@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -299,6 +300,9 @@ func newPolicyTransport(base http.RoundTripper, allowLoopback bool) *policyTrans
 	}
 	if transport, ok := base.(*http.Transport); ok {
 		clone := transport.Clone()
+		// A configured proxy is an alternate dial destination and would bypass
+		// the endpoint host's DNS/IP policy. Provider calls are direct only.
+		clone.Proxy = nil
 		originalDial := clone.DialContext
 		if originalDial == nil {
 			dialer := &net.Dialer{}
@@ -487,8 +491,12 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 	if err != nil {
 		return empty, &Error{Code: ErrorConfiguration}
 	}
-	logicalID := "llm:" + strings.TrimPrefix(string(requestDigest), "sha256:")
-	idempotencyKey := "cpgen-llm-" + strings.TrimPrefix(string(requestDigest), "sha256:")
+	logicalDigest, err := a.logicalIdentityDigest(request)
+	if err != nil {
+		return empty, &Error{Code: ErrorConfiguration}
+	}
+	logicalID := "llm:" + strings.TrimPrefix(string(logicalDigest), "sha256:")
+	idempotencyKey := "cpgen-llm-" + strings.TrimPrefix(string(logicalDigest), "sha256:")
 	apiKey, ok := os.LookupEnv(a.config.APIKeyEnv)
 	if !ok || !validCredential(apiKey) {
 		return blockedOutcome(logicalID, domain.FailurePolicyRejected), nil
@@ -554,7 +562,7 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 			return domain.MeteredOutcome[port.GenerateResponse]{Failure: &failure, CallTrace: trace}, nil
 		}
 
-		response, parseErr := a.decodeResponse(responseBody, body, request, requestDigest, validator, logicalID, physicalIDs, providerResponseID)
+		response, parseErr := a.decodeResponse(responseBody, body, request, requestDigest, logicalDigest, validator, logicalID, physicalIDs, providerResponseID)
 		if parseErr != nil {
 			trace := dispatchedTrace(logicalID, physicalIDs)
 			return domain.MeteredOutcome[port.GenerateResponse]{Failure: &domain.PortFailure{Code: domain.FailureProtocol, Class: domain.FailureRejected}, CallTrace: trace}, nil
@@ -584,7 +592,7 @@ func (a *OpenAICompatible) requestBody(request port.GenerateRequest, definition 
 		Privacy   string               `json:"privacy_classification"`
 		Endpoint  string               `json:"endpoint"`
 		Protocol  string               `json:"protocol"`
-	}{request.Prompt, request.Schema, variables, request.Sampling, request.MaxOutput, a.config.Model, definition.TemplateDigest, request.LogicalIdempotencyKey, request.ProviderPolicyDigest, request.PrivacyClassification, a.endpoint.String(), "openai-compatible-v1"}
+	}{canonicalPromptRef(request.Prompt), request.Schema, variables, request.Sampling, request.MaxOutput, a.config.Model, definition.TemplateDigest, request.LogicalIdempotencyKey, request.ProviderPolicyDigest, request.PrivacyClassification, a.endpoint.String(), "openai-compatible-v1"}
 	identity, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, "", err
@@ -606,6 +614,42 @@ func (a *OpenAICompatible) requestBody(request port.GenerateRequest, definition 
 	return body, digest, err
 }
 
+// logicalIdentityDigest binds the provider idempotency identity to the
+// caller-owned logical operation rather than to the entire request payload.
+// The endpoint/protocol/policy/privacy partition prevents a key from being
+// reused across incompatible provider or privacy boundaries, while retries
+// of the same logical operation retain exactly the same identity.
+func (a *OpenAICompatible) logicalIdentityDigest(request port.GenerateRequest) (domain.Digest, error) {
+	canonical := struct {
+		Protocol  string        `json:"protocol"`
+		Endpoint  string        `json:"endpoint"`
+		Model     string        `json:"model"`
+		LogicalID string        `json:"logical_idempotency_key"`
+		Policy    domain.Digest `json:"provider_policy_digest"`
+		Privacy   string        `json:"privacy_classification"`
+	}{"openai-compatible-v1", a.endpoint.String(), a.config.Model, request.LogicalIdempotencyKey, request.ProviderPolicyDigest, request.PrivacyClassification}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	return domain.SumBytes(encoded), nil
+}
+
+func canonicalPromptRef(ref port.PromptRef) port.PromptRef {
+	digest := ref.TemplateDigest
+	if digest == "" {
+		digest = ref.Digest
+	}
+	// Digest and TemplateDigest are legacy/current spellings for the same
+	// identity. Normalize both in the canonical projection so equivalent
+	// requests cannot produce different physical request digests.
+	if digest != "" {
+		ref.Digest = digest
+		ref.TemplateDigest = digest
+	}
+	return ref
+}
+
 func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, idempotencyKey string) ([]byte, int, string, time.Duration, bool, error) {
 	requestContext, cancel := context.WithTimeout(ctx, a.config.Timeout)
 	defer cancel()
@@ -624,7 +668,10 @@ func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, i
 		}
 		var adapterErr *Error
 		if errors.As(err, &adapterErr) {
-			return nil, 0, "", 0, adapterErr.ConfirmedNoSend, adapterErr
+			// An injected transport may return a typed policy/transport error
+			// carrying the explicit no-send boundary. Preserve that boundary;
+			// every other transport error is conservatively treated as sent.
+			return nil, 0, "", 0, !adapterErr.ConfirmedNoSend, adapterErr
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if ctx.Err() != nil {
@@ -661,7 +708,7 @@ func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, i
 	return data, resp.StatusCode, providerID, parseRetryAfter(resp.Header.Get("Retry-After"), a.now()), true, nil
 }
 
-func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.GenerateRequest, requestDigest domain.Digest, validator SchemaValidator, logicalID string, physicalIDs []domain.AttemptCallID, providerID string) (port.GenerateResponse, error) {
+func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.GenerateRequest, requestDigest, logicalDigest domain.Digest, validator SchemaValidator, logicalID string, physicalIDs []domain.AttemptCallID, providerID string) (port.GenerateResponse, error) {
 	if !utf8.Valid(raw) || !json.Valid(raw) || !jsonDocumentHasObject(raw) || hasDuplicateJSONFields(raw) {
 		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
 	}
@@ -692,15 +739,16 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 	usage, usageSource := conservativeUsage(decoded.Usage, len(requestBody), request.MaxOutput.Tokens)
 	responseDigest := domain.SumBytes(structured)
 	meta := map[string]string{
-		"adapter":          "openai-compatible-v1",
-		"provider_host":    strings.ToLower(a.endpoint.Hostname()),
-		"model":            safeMetadata(a.config.Model),
-		"request_digest":   string(requestDigest),
-		"response_digest":  string(responseDigest),
-		"usage_source":     usageSource,
-		"usage_settlement": usageSource,
-		"attempt_count":    strconv.Itoa(len(physicalIDs)),
-		"idempotency":      "stable",
+		"adapter":                 "openai-compatible-v1",
+		"provider_host":           strings.ToLower(a.endpoint.Hostname()),
+		"model":                   safeMetadata(a.config.Model),
+		"request_digest":          string(requestDigest),
+		"logical_identity_digest": string(logicalDigest),
+		"response_digest":         string(responseDigest),
+		"usage_source":            usageSource,
+		"usage_settlement":        usageSource,
+		"attempt_count":           strconv.Itoa(len(physicalIDs)),
+		"idempotency":             "stable",
 	}
 	if providerID == "" {
 		providerID = safeMetadata(decoded.ID)
@@ -1124,7 +1172,59 @@ func isPublicIP(ip net.IP) bool {
 	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
 		return false
 	}
+	address, ok := ipToNetip(ip)
+	if !ok {
+		return false
+	}
+	for _, prefix := range nonRoutablePrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
 	return true
+}
+
+func ipToNetip(ip net.IP) (netip.Addr, bool) {
+	if ipv4 := ip.To4(); ipv4 != nil {
+		var bytes4 [4]byte
+		copy(bytes4[:], ipv4)
+		return netip.AddrFrom4(bytes4), true
+	}
+	address, err := netip.ParseAddr(ip.String())
+	return address, err == nil
+}
+
+// net.IP considers some special-use ranges global-unicast. Keep an explicit
+// deny-list for destinations that are not valid public provider addresses,
+// including CGNAT and documentation/benchmark networks. This list is
+// intentionally conservative: a false rejection is safer than allowing a
+// DNS result to reach an internal or non-routable network.
+var nonRoutablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("fec0::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:10::/28"),
+	netip.MustParsePrefix("2001:20::/28"),
+	netip.MustParsePrefix("2001:db8::/32"),
 }
 
 func safeMetadata(value string) string {
