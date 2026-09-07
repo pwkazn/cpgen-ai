@@ -368,7 +368,7 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	case similarity.DecisionReject:
 		return domain.Failure[Slice2Output](domain.PermanentFailure{Code: domain.FailurePolicyRejected, Evidence: evidence.EvidenceDigest}), nil
 	case similarity.DecisionBlocked:
-		return domain.Blocked[Slice2Output](blockedSimilarityCheckpoint(view, requestDigest, p.policy.PolicyDigest, evidence.ProviderIdentity, evidence.EvidenceDigest)), nil
+		return domain.Blocked[Slice2Output](blockedSimilarityCheckpoint(view, requestDigest, p.policy.PolicyDigest, evidence.ServiceIdentity, evidence.EvidenceDigest)), nil
 	default:
 		return empty, errors.New("unknown similarity decision")
 	}

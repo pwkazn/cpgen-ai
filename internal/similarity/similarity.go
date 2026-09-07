@@ -399,6 +399,7 @@ type Evidence struct {
 	SchemaVersion    domain.SchemaVersion `json:"schema_version"`
 	RequestDigest    domain.Digest        `json:"request_digest"`
 	ProviderIdentity string               `json:"provider_identity"`
+	ServiceIdentity  string               `json:"service_identity"`
 	Hits             []Hit                `json:"hits"`
 	ScoreSummary     ScoreSummary         `json:"score_summary"`
 	ObservedAt       time.Time            `json:"observed_at"`
@@ -413,16 +414,24 @@ type Evidence struct {
 }
 
 func NewEvidence(request Request, providerIdentity string, hits []Hit, observedAt time.Time, usage Usage, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
-	return newEvidence(request, providerIdentity, hits, observedAt, usage, UsageProviderVerified, "", "", cache, trace)
+	return newEvidence(request, providerIdentity, providerIdentity, hits, observedAt, usage, UsageProviderVerified, "", "", cache, trace)
 }
 
 // NewEvidenceWithMetadata retains provider usage/index metadata in the
 // auditable evidence without exposing provider-specific wire fields.
 func NewEvidenceWithMetadata(request Request, providerIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
-	return newEvidence(request, providerIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
+	return newEvidence(request, providerIdentity, providerIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
 }
 
-func newEvidence(request Request, providerIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
+// NewEvidenceWithServiceIdentity records the exact configured service (for
+// example endpoint host and port) separately from a provider-reported label.
+// The service identity is part of the evidence digest and is the durable
+// dependency identity used by workflow checkpoints.
+func NewEvidenceWithServiceIdentity(request Request, providerIdentity, serviceIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
+	return newEvidence(request, providerIdentity, serviceIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
+}
+
+func newEvidence(request Request, providerIdentity, serviceIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
 	if err := request.Validate(); err != nil {
 		return Evidence{}, err
 	}
@@ -434,6 +443,7 @@ func newEvidence(request Request, providerIdentity string, hits []Hit, observedA
 		SchemaVersion:    EvidenceSchemaVersion,
 		RequestDigest:    mustDigest(request),
 		ProviderIdentity: cleanSingleLine(providerIdentity),
+		ServiceIdentity:  cleanSingleLine(serviceIdentity),
 		Hits:             sortedHits,
 		ScoreSummary:     summarize(sortedHits),
 		ObservedAt:       observedAt.UTC(),
@@ -473,6 +483,9 @@ func (e Evidence) validateWithoutDigest() error {
 		return fmt.Errorf("request digest: %w", err)
 	}
 	if err := validateText("provider identity", e.ProviderIdentity, 512, true, false); err != nil {
+		return err
+	}
+	if err := validateText("service identity", e.ServiceIdentity, 512, true, false); err != nil {
 		return err
 	}
 	sorted, err := SortHits(e.Hits)
@@ -531,6 +544,7 @@ type evidenceCanonical struct {
 	SchemaVersion    domain.SchemaVersion `json:"schema_version"`
 	RequestDigest    domain.Digest        `json:"request_digest"`
 	ProviderIdentity string               `json:"provider_identity"`
+	ServiceIdentity  string               `json:"service_identity"`
 	Hits             []Hit                `json:"hits"`
 	ScoreSummary     ScoreSummary         `json:"score_summary"`
 	ObservedAt       time.Time            `json:"observed_at"`
@@ -544,7 +558,7 @@ type evidenceCanonical struct {
 }
 
 func canonicalEvidenceJSON(e Evidence) ([]byte, error) {
-	return json.Marshal(evidenceCanonical{e.SchemaVersion, e.RequestDigest, e.ProviderIdentity, e.Hits, e.ScoreSummary, e.ObservedAt.UTC(), e.PolicyDigest, e.Usage, e.UsageSource, e.ModelVersion, e.IndexVersion, e.Cache, e.CallTrace})
+	return json.Marshal(evidenceCanonical{e.SchemaVersion, e.RequestDigest, e.ProviderIdentity, e.ServiceIdentity, e.Hits, e.ScoreSummary, e.ObservedAt.UTC(), e.PolicyDigest, e.Usage, e.UsageSource, e.ModelVersion, e.IndexVersion, e.Cache, e.CallTrace})
 }
 
 func digestEvidence(e Evidence) domain.Digest {

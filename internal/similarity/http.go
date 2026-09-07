@@ -380,7 +380,7 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 			hits = append(hits, hit)
 		}
 		observedAt := a.now()
-		evidence, evidenceErr := NewEvidenceWithMetadata(request, provider, hits, observedAt, usage, usageSource, wire.ModelVersion, wire.IndexVersion, CacheProvenance{Kind: CacheLive}, trace)
+		evidence, evidenceErr := NewEvidenceWithServiceIdentity(request, provider, a.config.ServiceIdentity, hits, observedAt, usage, usageSource, wire.ModelVersion, wire.IndexVersion, CacheProvenance{Kind: CacheLive}, trace)
 		if evidenceErr != nil {
 			return a.failureOutcome(logicalID, traceIDs, &Error{Code: ErrorProtocol, cause: evidenceErr}), nil
 		}
