@@ -318,7 +318,10 @@ func TestSlice2RunServiceOwnerObservesExternalCancelDuringProviderRequest(t *tes
 	if err := f.runGuard.Close(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	// Resume performs durable preparation before entering the provider. This
+	// is a synchronization test, not a ten-second startup benchmark; SQLite
+	// race instrumentation is substantially slower on shared CI runners.
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer stop()
 	owner := slice2FixtureService(t, f, 10*time.Millisecond)
 	type completion struct {
@@ -329,8 +332,10 @@ func TestSlice2RunServiceOwnerObservesExternalCancelDuringProviderRequest(t *tes
 	go func() { result, err := owner.Resume(ctx, f.runID); done <- completion{result, err} }()
 	select {
 	case <-started:
+	case result := <-done:
+		t.Fatalf("owner exited before provider started: snapshot=%+v err=%v", result.snapshot, result.err)
 	case <-ctx.Done():
-		t.Fatal("provider did not start")
+		t.Fatalf("provider did not start: %v", ctx.Err())
 	}
 	current, err := f.store.GetRun(ctx, f.runID)
 	if err != nil {
