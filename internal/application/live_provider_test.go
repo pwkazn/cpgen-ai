@@ -29,16 +29,16 @@ import (
 
 // Opt-in paid-provider acceptance. Only Similarity uses a local TLS fixture.
 // The persistent root contains private generated content, never credentials.
-func TestDeepSeekLiveMVPWithFixtureSimilarity(t *testing.T) {
-	if os.Getenv("CPGEN_RUN_DEEPSEEK_MVP") != "1" {
-		t.Skip("paid DeepSeek acceptance is opt-in")
+func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
+	if os.Getenv("CPGEN_RUN_LIVE_MVP") != "1" {
+		t.Skip("paid provider acceptance is opt-in")
 	}
-	if os.Getenv("CPGEN_DEEPSEEK_API_KEY") == "" {
-		t.Fatal("CPGEN_DEEPSEEK_API_KEY is required")
+	if os.Getenv("CPGEN_LIVE_API_KEY") == "" {
+		t.Fatal("CPGEN_LIVE_API_KEY is required")
 	}
-	root := os.Getenv("CPGEN_DEEPSEEK_TEST_ROOT")
+	root := os.Getenv("CPGEN_LIVE_ROOT")
 	if !filepath.IsAbs(root) {
-		t.Fatal("select an absolute private CPGEN_DEEPSEEK_TEST_ROOT")
+		t.Fatal("select an absolute private CPGEN_LIVE_ROOT")
 	}
 	must := func(err error) {
 		t.Helper()
@@ -67,15 +67,15 @@ func TestDeepSeekLiveMVPWithFixtureSimilarity(t *testing.T) {
 	must(err)
 	digest, err := base.Lock.Digest()
 	must(err)
-	modelName := os.Getenv("CPGEN_DEEPSEEK_MODEL")
+	modelName := os.Getenv("CPGEN_LIVE_MODEL")
 	if modelName == "" {
-		modelName = "deepseek-v4-flash"
+		t.Fatal("CPGEN_LIVE_MODEL is required")
 	}
 	raw = []byte(strings.NewReplacer(
 		"D:/cpgen-private/mvp", filepath.ToSlash(filepath.Join(root, "state")),
-		"https://provider.example.com/v1", "https://api.deepseek.com",
+		"https://provider.example.com/v1", os.Getenv("CPGEN_LIVE_BASE_URL"),
 		"replace-with-supported-model", modelName,
-		"CPGEN_LLM_API_KEY", "CPGEN_DEEPSEEK_API_KEY",
+		"CPGEN_LLM_API_KEY", "CPGEN_LIVE_API_KEY",
 		"timeout: 60s", "timeout: 180s",
 		"max_output_tokens: 8192", "max_output_tokens: 32768",
 		"max_format_repairs: 0", "max_format_repairs: 1",

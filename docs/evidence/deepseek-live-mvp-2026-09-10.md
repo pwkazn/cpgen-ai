@@ -33,11 +33,10 @@ No ZIP was produced.
 
 ## Reusable acceptance entry
 
-`TestDeepSeekLiveMVPWithFixtureSimilarity` is disabled by default. To enable it,
-supply `CPGEN_RUN_DEEPSEEK_MVP=1`, `CPGEN_RUN_DOCKER_CANARY=1`, an absolute
+The entry was subsequently generalized as `TestLiveProviderMVPWithFixtureSimilarity` and remains disabled by default. To enable it,
+supply `CPGEN_RUN_LIVE_MVP=1`, `CPGEN_RUN_DOCKER_CANARY=1`, an absolute
 `CPGEN_DOCKER_TOOLCHAIN_LOCK`, the credential environment variable, and a fresh
-absolute private `CPGEN_DEEPSEEK_TEST_ROOT`. `CPGEN_DEEPSEEK_MODEL` optionally
-selects an explicitly authorized model; its default is `deepseek-v4-flash`.
+absolute private `CPGEN_LIVE_ROOT`. `CPGEN_LIVE_BASE_URL` and `CPGEN_LIVE_MODEL` explicitly select the endpoint and model; `CPGEN_LIVE_API_KEY` supplies the credential. There is no implicit provider/model default.
 
 The test uses the production model adapter without an injected HTTP client.
 Only the Similarity adapter receives a local TLS fixture transport. It retains

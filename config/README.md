@@ -153,3 +153,27 @@ earlier effective bytes; provider blocks can be present without live selection.
 Physical-call replay and terminal provider reconciliation are integrated with
 the preview run service. Its acceptance uses local HTTP fixtures; no paid
 provider or Docker smoke result is claimed.
+
+## Explicit live-provider acceptance
+
+`TestLiveProviderMVPWithFixtureSimilarity` uses the real configured model and
+Docker; only Similarity is replaced with a local TLS fixture. It requires all
+of these process environment variables:
+
+- `CPGEN_RUN_LIVE_MVP=1` and `CPGEN_RUN_DOCKER_CANARY=1`.
+- `CPGEN_LIVE_BASE_URL`, `CPGEN_LIVE_MODEL`, and `CPGEN_LIVE_API_KEY`.
+- An absolute `CPGEN_DOCKER_TOOLCHAIN_LOCK` pointing to installed pinned images.
+- A fresh absolute private `CPGEN_LIVE_ROOT` for retained evidence and export.
+
+Run `go test ./internal/application -run '^TestLiveProviderMVPWithFixtureSimilarity$' -count=1 -v -timeout 30m`.
+This explicitly authorizes up to eight metered model calls for the test,
+including bounded format repair. The test has no implicit endpoint/model and
+refuses to reuse a started root. It builds its CLI before model dispatch,
+records stage progress and budgets, and requires READY plus independent ZIP
+compilation/execution to pass. Default test runs skip all live requests.
+
+Configure the actual API prefix: for the tested APINode service use
+`https://apinode.ltd/v1`; its root `/chat/completions` returned HTML.
+Credentials belong only in the process environment, not in YAML or logs.
+Provider fixture tests and successful authentication do not establish a
+successful live generation run; consult the retained acceptance result.
