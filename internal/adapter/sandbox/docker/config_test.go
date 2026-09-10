@@ -2,6 +2,7 @@ package docker
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	"cpgen/internal/domain"
@@ -49,8 +50,11 @@ func TestNewEngineClientIgnoresDockerEnvironment(t *testing.T) {
 	t.Setenv("DOCKER_API_VERSION", "9.99")
 
 	config := validConfig()
+	if runtime.GOOS != "windows" {
+		config.EngineEndpoint = "unix:///var/run/docker.sock"
+	}
 	var gotHost, gotVersion string
-	engine, err := newEngineClient(config, "windows", func(options ...moby.Opt) (*moby.Client, error) {
+	engine, err := newEngineClient(config, runtime.GOOS, func(options ...moby.Opt) (*moby.Client, error) {
 		client, err := moby.New(options...)
 		if err == nil {
 			gotHost = client.DaemonHost()

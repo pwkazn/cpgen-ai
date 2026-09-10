@@ -955,7 +955,15 @@ func (h *helperProcess) kill(t *testing.T) {
 
 func runCLI(t *testing.T, args ...string) (int, []byte, []byte) {
 	t.Helper()
-	command := exec.Command("go", append([]string{"run", "./cmd/cpgen", "--config"}, args...)...)
+	// Execute the binary itself: go run maps nonzero application exits to 1
+	// and writes "exit status N" to stderr, hiding the CLI's public contract.
+	binary := filepath.Join(t.TempDir(), "cpgen.exe")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/cpgen")
+	build.Dir = filepath.Join("..", "..")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build cpgen: %v: %s", err, output)
+	}
+	command := exec.Command(binary, append([]string{"--config"}, args...)...)
 	command.Dir = filepath.Join("..", "..")
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
