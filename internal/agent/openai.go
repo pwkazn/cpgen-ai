@@ -287,6 +287,8 @@ type OpenAICompatible struct {
 	// exchange is adapter-local; all request identity, policy, retry and strict
 	// response validation remain shared across the two protocol implementations.
 	exchange func(context.Context, []byte, string, string) ([]byte, int, string, time.Duration, bool, error)
+	// prepareBody performs local SDK serialization before budget admission.
+	prepareBody func([]byte) ([]byte, error)
 }
 
 type policyTransport struct {
@@ -636,6 +638,9 @@ func (a *OpenAICompatible) requestBody(request port.GenerateRequest, definition 
 		Stream:         false,
 	}
 	body, err := json.Marshal(wire)
+	if err == nil && a.prepareBody != nil {
+		body, err = a.prepareBody(body)
+	}
 	return body, digest, err
 }
 
@@ -783,6 +788,7 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 		"provider_host":           strings.ToLower(a.endpoint.Hostname()),
 		"model":                   safeMetadata(a.config.Model),
 		"request_digest":          string(requestDigest),
+		"wire_request_digest":     string(domain.SumBytes(requestBody)),
 		"logical_identity_digest": string(logicalDigest),
 		"cache_provenance":        "live",
 		"response_digest":         string(responseDigest),

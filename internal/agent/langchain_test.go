@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestLangChainPreservesCanonicalRequest(t *testing.T) {
+func TestLangChainPreservesTransportContractWithSDKPayload(t *testing.T) {
 	t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
 	t.Setenv("OPENAI_ORGANIZATION", "ambient-organization-must-not-leak")
 	t.Setenv("OPENAI_BASE_URL", "https://ambient.invalid")
@@ -60,6 +61,7 @@ func TestLangChainPreservesCanonicalRequest(t *testing.T) {
 			}
 			request := testGenerateRequest()
 			request.Sampling = port.SamplingPolicy{Temperature: 0.35, TopP: 0.72}
+			legacy.prepareBody = model.prepareBody
 			before, err := legacy.Generate(context.Background(), request)
 			if err != nil {
 				t.Fatal(err)
@@ -131,6 +133,7 @@ func TestLangChainMatchesHTTPFailureAndValidationContracts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			legacy.prepareBody = model.prepareBody
 			before, errBefore := legacy.Generate(context.Background(), testGenerateRequest())
 			after, errAfter := model.Generate(context.Background(), testGenerateRequest())
 			if errBefore != nil || errAfter != nil {
@@ -225,59 +228,89 @@ func TestLangChainRejectsTruncationEvenWithValidJSON(t *testing.T) {
 	}
 }
 
-func TestLangChainRejectsSDKMessageRewritingBeforeSend(t *testing.T) {
-	t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
-	var calls atomic.Int32
-	config := testConfig("http://127.0.0.1")
-	config.Model = "o1-mini"
-	config.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { calls.Add(1); return nil, io.EOF })}
-	model, err := NewLangChain(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome, err := model.Generate(context.Background(), testGenerateRequest())
-	if err != nil || outcome.Failure == nil || calls.Load() != 0 {
-		t.Fatalf("outcome=%#v err=%v calls=%d", outcome, err, calls.Load())
+func TestLangChainAllowsSDKAdaptationsAndPlansActualBytes(t *testing.T) {
+	for _, name := range []string{"fixture-model", "gpt-5.6-luna", "o1-mini", "o3-mini"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CPGEN_TEST_LLM_KEY", "")
+			var body []byte
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, _ = io.ReadAll(r.Body)
+				_, _ = io.WriteString(w, langchainSuccess)
+			}))
+			defer server.Close()
+			config := testConfig(server.URL)
+			config.Model = name
+			model, err := NewLangChain(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testGenerateRequest()
+			request.Sampling = port.SamplingPolicy{Temperature: 0.35, TopP: 0.72}
+			plan, err := model.PlanGenerate(request)
+			if err != nil || calls != 0 {
+				t.Fatalf("local planning: %+v %v calls=%d", plan, err, calls)
+			}
+			t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
+			outcome, err := model.Generate(context.Background(), request)
+			if err != nil || outcome.Value == nil || calls != 1 {
+				t.Fatalf("generation: %+v %v calls=%d", outcome, err, calls)
+			}
+			if plan.InputTokenUpperBound != int64(len(body)) || outcome.Value.ProviderMeta["wire_request_digest"] != string(domain.SumBytes(body)) {
+				t.Fatal("planning or evidence differs from actual SDK payload")
+			}
+			if outcome.Value.ProviderMeta["request_digest"] != string(plan.RequestDigest) {
+				t.Fatal("intent identity changed")
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := wire["top_p"]; ok {
+				t.Fatal("adapter restored SDK-omitted top_p")
+			}
+			if name != "fixture-model" {
+				if _, ok := wire["temperature"]; ok {
+					t.Fatal("adapter restored unsupported temperature")
+				}
+			}
+			var tokenLimit int64
+			tokenField := wire["max_completion_tokens"]
+			if tokenField == nil {
+				tokenField = wire["max_tokens"]
+			}
+			if json.Unmarshal(tokenField, &tokenLimit) != nil || tokenLimit != request.MaxOutput.Tokens {
+				t.Fatal("output limit changed")
+			}
+			if strings.HasPrefix(name, "o") {
+				var messages []struct{ Role string }
+				if json.Unmarshal(wire["messages"], &messages) != nil || len(messages) == 0 || messages[0].Role == "system" {
+					t.Fatal("SDK role adaptation was lost")
+				}
+			}
+		})
 	}
 }
 
-func TestLangChainRestoresGPT5SamplingWithoutChangingWire(t *testing.T) {
-	t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
-	var bodies [][]byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Error(err)
+func TestLangChainCaptureAllowsAdditionalFieldsButCannotDispatch(t *testing.T) {
+	raw := `{"model":"fixture","future_sdk_option":true}`
+	capture := &langChainRequestCapture{maxBytes: 1024}
+	request, _ := http.NewRequest(http.MethodPost, "https://unused.invalid", strings.NewReader(raw))
+	_, err := capture.Do(request)
+	if !errors.Is(err, errLangChainRequestCaptured) || string(capture.body) != raw {
+		t.Fatal("additional SDK fields rejected")
+	}
+	request, _ = http.NewRequest(http.MethodPost, "https://unused.invalid", strings.NewReader(raw))
+	if _, err := capture.Do(request); err == nil || capture.err == nil {
+		t.Fatal("second SDK invocation accepted")
+	}
+	for _, raw := range []string{"{", strings.Repeat(" ", 1025) + "{}"} {
+		capture := &langChainRequestCapture{maxBytes: 1024}
+		request, _ := http.NewRequest(http.MethodPost, "https://unused.invalid", strings.NewReader(raw))
+		if _, err := capture.Do(request); err == nil || capture.err == nil || capture.body != nil {
+			t.Fatal("invalid or oversized request accepted")
 		}
-		bodies = append(bodies, body)
-		_, _ = io.WriteString(w, langchainSuccess)
-	}))
-	defer server.Close()
-	cfg := testConfig(server.URL)
-	cfg.Model = "gpt-5.6-luna"
-	legacy, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	model, err := NewLangChain(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := testGenerateRequest()
-	request.Sampling = port.SamplingPolicy{Temperature: 0.35, TopP: 0.72}
-	before, err := legacy.Generate(context.Background(), request)
-	if err != nil || before.Value == nil {
-		t.Fatalf("legacy: %+v %v", before, err)
-	}
-	after, err := model.Generate(context.Background(), request)
-	if err != nil || after.Value == nil {
-		t.Fatalf("LangChain: %+v %v", after, err)
-	}
-	if len(bodies) != 2 || string(bodies[0]) != string(bodies[1]) {
-		t.Fatalf("canonical admitted request changed; sends=%d", len(bodies))
-	}
-	if !strings.Contains(string(bodies[1]), `"temperature":0.35`) || !strings.Contains(string(bodies[1]), `"top_p":0.72`) {
-		t.Fatal("sampling values changed")
 	}
 }
 func TestLangChainConcurrentCallsKeepRequestAndUsageIsolated(t *testing.T) {

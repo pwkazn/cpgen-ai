@@ -182,7 +182,7 @@ func (s *llmResponseSession) replayReceipt(ctx context.Context, grant domain.Dis
 // contain the same bounded, sanitized diagnostics used by the provider adapter.
 func privateLLMMetadata(meta map[string]string) map[string]string {
 	result := map[string]string{}
-	for _, key := range []string{"model", "request_digest", "logical_identity_digest", "response_digest", "usage_source", "usage_settlement", "attempt_count", "idempotency", "provider_request_id", "provider_model", "finish_reason", "adapter", "cache_provenance"} {
+	for _, key := range []string{"model", "request_digest", "wire_request_digest", "logical_identity_digest", "response_digest", "usage_source", "usage_settlement", "attempt_count", "idempotency", "provider_request_id", "provider_model", "finish_reason", "adapter", "cache_provenance"} {
 		if value, ok := meta[key]; ok && len(value) <= 256 {
 			result[key] = value
 		}
