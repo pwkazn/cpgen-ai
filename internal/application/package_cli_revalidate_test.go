@@ -35,7 +35,10 @@ func revalidateExportedPackageInDocker(t *testing.T, ctx context.Context, base a
 	if err := domain.DecodeStrictJSON(content["data/tests.json"], &index); err != nil {
 		t.Fatal(err)
 	}
-	f := newCoordinatorFixtureAt(t, "de", domain.BudgetLimits{MaxArtifactBytes: 64 << 20, MaxSandboxCreates: 40, MaxActiveTimeMilliseconds: 300000}, []domain.StageName{"prepare", "exercise"}, p.Manifest.PackageID, time.Now().UTC())
+	// A live model may produce more than the six cases in the fixed fixture.
+	// Bound independent verification by the validated index, allowing both
+	// programs on every case plus compilation and transfer helpers.
+	f := newCoordinatorFixtureAt(t, "de", domain.BudgetLimits{MaxArtifactBytes: 64 << 20, MaxSandboxCreates: int64(16 + 4*len(index.Tests)), MaxActiveTimeMilliseconds: 300000}, []domain.StageName{"prepare", "exercise"}, p.Manifest.PackageID, time.Now().UTC())
 	blobs, err := blob.NewStore(filepath.Join(t.TempDir(), "imported-blobs"))
 	if err != nil {
 		t.Fatal(err)
