@@ -113,11 +113,21 @@ func (d *langChainDoer) Do(request *http.Request) (*http.Response, error) {
 	}
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&generated) != nil || generated.Temperature == nil {
+	if decoder.Decode(&generated) != nil {
 		return nil, d.err
 	}
 	actual := generated.chatRequest
-	actual.Temperature = *generated.Temperature
+	if generated.Temperature == nil {
+		if !strings.HasPrefix(d.expected.Model, "gpt-5") {
+			return nil, d.err
+		}
+		// v0.1.14 omits temperature for every GPT-5-prefixed model.
+		// Restore the admitted value, including for compatible-provider
+		// aliases; the SDK must not silently choose a different policy.
+		actual.Temperature = d.expected.Temperature
+	} else {
+		actual.Temperature = *generated.Temperature
+	}
 	var extra json.RawMessage
 	if decoder.Decode(&extra) != io.EOF {
 		return nil, d.err

@@ -241,22 +241,45 @@ func TestLangChainRejectsSDKMessageRewritingBeforeSend(t *testing.T) {
 	}
 }
 
-func TestLangChainRejectsSDKOmittedTemperatureBeforeSend(t *testing.T) {
+func TestLangChainRestoresGPT5SamplingWithoutChangingWire(t *testing.T) {
 	t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
-	var calls atomic.Int32
-	config := testConfig("http://127.0.0.1")
-	config.Model = "gpt-5-fixture"
-	config.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { calls.Add(1); return nil, io.EOF })}
-	model, err := NewLangChain(config)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		bodies = append(bodies, body)
+		_, _ = io.WriteString(w, langchainSuccess)
+	}))
+	defer server.Close()
+	cfg := testConfig(server.URL)
+	cfg.Model = "gpt-5.6-luna"
+	legacy, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := model.Generate(context.Background(), testGenerateRequest())
-	if err != nil || outcome.Failure == nil || calls.Load() != 0 {
-		t.Fatalf("outcome=%#v err=%v calls=%d", outcome, err, calls.Load())
+	model, err := NewLangChain(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testGenerateRequest()
+	request.Sampling = port.SamplingPolicy{Temperature: 0.35, TopP: 0.72}
+	before, err := legacy.Generate(context.Background(), request)
+	if err != nil || before.Value == nil {
+		t.Fatalf("legacy: %+v %v", before, err)
+	}
+	after, err := model.Generate(context.Background(), request)
+	if err != nil || after.Value == nil {
+		t.Fatalf("LangChain: %+v %v", after, err)
+	}
+	if len(bodies) != 2 || string(bodies[0]) != string(bodies[1]) {
+		t.Fatalf("canonical admitted request changed; sends=%d", len(bodies))
+	}
+	if !strings.Contains(string(bodies[1]), `"temperature":0.35`) || !strings.Contains(string(bodies[1]), `"top_p":0.72`) {
+		t.Fatal("sampling values changed")
 	}
 }
-
 func TestLangChainConcurrentCallsKeepRequestAndUsageIsolated(t *testing.T) {
 	t.Setenv("CPGEN_TEST_LLM_KEY", "fixture-key")
 	var calls atomic.Int32
