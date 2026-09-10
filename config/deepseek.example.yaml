@@ -1,0 +1,17 @@
+# LLM-02 provider configuration example; no credential values belong here.
+# This provider-only example keeps the Fake workflow. Use slice2.example.yaml
+# for the separate explicit live preview selector and Similarity settings.
+# Replace state_root with a private absolute path on your machine.
+storage:
+  state_root: D:/cpgen-private/state
+fake_workflow:
+  scenario: review
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  api_key_env: CPGEN_DEEPSEEK_API_KEY
+  timeout: 30s
+  max_output_tokens: 4096
+  max_response_bytes: 1048576
+  # Optional JSON-format regeneration; independent of transport retries.
+  max_format_repairs: 0

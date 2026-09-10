@@ -1,0 +1,231 @@
+package application
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"reflect"
+	"time"
+
+	docker "cpgen/internal/adapter/sandbox/docker"
+	"cpgen/internal/domain"
+	"cpgen/internal/port"
+)
+
+type solutionVerificationReadStore interface {
+	port.SandboxLifecycleReader
+	ReadCommittedSandboxStage(context.Context, domain.RunID, domain.StageName) (port.CommittedPrivateStage, error)
+}
+
+// ReadVerification proves the current committed report, its exact source and
+// sample execution requests, Docker receipts, retained artifacts and cleanup.
+// Configuration supplies the frozen toolchain/Engine policy only; this method
+// never starts Docker, writes artifacts, or calls either external provider.
+func (s *SolutionExecutor) ReadVerification(ctx context.Context, runID domain.RunID, config DockerSandboxConfig) (SolutionVerificationReport, error) {
+	var empty SolutionVerificationReport
+	store, ok := s.generation.config.Store.(solutionVerificationReadStore)
+	if !ok {
+		return empty, errors.New("solution verification requires committed sandbox reads")
+	}
+	input, err := s.ReadInput(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if input.Value == nil {
+		return empty, errors.New("verification has no current accepted input")
+	}
+	content, err := s.ReadDraft(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	stage, err := store.ReadCommittedSandboxStage(ctx, runID, "solution_verify")
+	if err != nil {
+		return empty, err
+	}
+	attempt := stage.Attempt
+	if attempt.Validate() != nil || attempt.RunID != runID || attempt.StageName != "solution_verify" || attempt.State != domain.StageAttemptSucceeded || attempt.InputDigest != content.ContentDigest || attempt.OutputDigest == nil {
+		return empty, errors.New("solution verification stage differs from the current draft")
+	}
+	config.Identity = solutionVerificationIdentity(attempt, 1)
+	lockDigest, err := config.Lock.Digest()
+	if err != nil {
+		return empty, err
+	}
+	items := make(map[domain.SafeRelPath]port.CommittedPrivateStageArtifact, len(stage.Artifacts))
+	used := make(map[domain.SafeRelPath]bool, len(stage.Artifacts))
+	for _, item := range stage.Artifacts {
+		if _, duplicate := items[item.Blob.LogicalPath]; duplicate {
+			return empty, errors.New("verification repeats an artifact path")
+		}
+		items[item.Blob.LogicalPath] = item
+	}
+	blobs := s.generation.config.Blobs
+	read := func(path domain.SafeRelPath, expected domain.BlobRef, role domain.ArtifactRole, limit int64) ([]byte, error) {
+		item, exists := items[path]
+		if !exists || item.Blob.Blob != expected || item.Blob.Role != role {
+			return nil, fmt.Errorf("verification artifact is absent or differs: %s", path)
+		}
+		used[path] = true
+		return readSolutionVerificationBlob(ctx, blobs, expected, limit)
+	}
+	item, found := items["solution/verification.json"]
+	if !found || item.Blob.Blob.Digest != *attempt.OutputDigest || item.Blob.MediaType != "application/vnd.cpgen.solution-verification+json" || item.Blob.Provenance.SchemaVersion != solutionVerificationSchema || item.Blob.Provenance.Producer != "solution-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != content.ContentDigest {
+		return empty, errors.New("verification output lacks its committed report binding")
+	}
+	raw, err := read(item.Blob.LogicalPath, item.Blob.Blob, domain.ArtifactOutput, 1<<20)
+	if err != nil {
+		return empty, err
+	}
+	var report SolutionVerificationReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return empty, err
+	}
+	canonical, err := json.Marshal(report)
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return empty, errors.New("verification report is not canonical")
+	}
+	if err := report.ValidateFor(*input.Value, content); err != nil {
+		return empty, err
+	}
+	if report.ToolchainLockDigest != lockDigest || report.PolicyDigest != solutionVerificationPolicyDigest(lockDigest) {
+		return empty, errors.New("verification policy differs from the frozen toolchain")
+	}
+	verifyPending := func(p *domain.PendingArtifact) error {
+		if p == nil {
+			return nil
+		}
+		item, exists := items[p.LogicalPath]
+		if !exists || item.Blob.MediaType != p.MediaType || !reflect.DeepEqual(item.Blob.Provenance, p.Provenance) {
+			return errors.New("verification process artifact metadata differs")
+		}
+		call, err := s.generation.config.Store.ReadLogicalCall(ctx, item.CurrentCallRecordID)
+		if err != nil {
+			return err
+		}
+		if call.ResultAttemptCallID == nil || *call.ResultAttemptCallID != p.CallID {
+			return errors.New("verification process artifact changed its local producer")
+		}
+		_, err = read(p.LogicalPath, p.Blob, p.Role, 8<<20)
+		return err
+	}
+	verifyResult := func(kind domain.CallKind, request any, result any, build func(docker.PlanIdentity) (port.ContainerPlan, error)) error {
+		identity, planIdentity, err := sandboxOperationIdentity(config, kind, request)
+		if err != nil {
+			return err
+		}
+		plan, err := build(planIdentity)
+		if err != nil {
+			return err
+		}
+		path := domain.SafeRelPath("sandbox/" + string(identity.SandboxExecutionID) + "/result.json")
+		item, exists := items[path]
+		if !exists || item.Blob.MediaType != "application/vnd.cpgen.sandbox-result+json" || item.Blob.Provenance.SchemaVersion != "cpgen.sandbox-result/v1" || item.Blob.Provenance.Producer != "docker" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != identity.ScopeDigest {
+			return errors.New("verification lacks the exact Docker request receipt")
+		}
+		encoded, err := read(path, item.Blob.Blob, domain.ArtifactEvidence, 1<<20)
+		if err != nil {
+			return err
+		}
+		var receipt sandboxResultReceipt[json.RawMessage]
+		if err := json.Unmarshal(encoded, &receipt); err != nil {
+			return err
+		}
+		expected, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		if receipt.Schema != "cpgen.sandbox-result/v1" || receipt.Scope != identity.ScopeDigest || receipt.Plan != plan.PlanDigest || !bytes.Equal(receipt.Result, expected) {
+			return errors.New("verification result differs from its Docker receipt")
+		}
+		return verifySandboxCleaned(ctx, store, identity, plan)
+	}
+	language, filename, _, compiler, err := solutionCompiler(content.Language, config.Lock)
+	if err != nil {
+		return empty, err
+	}
+	programs := make(map[port.ProgramRole]domain.BlobRef)
+	for index, compiled := range report.Compiles {
+		name := "reference"
+		if index == 1 {
+			name = "brute"
+		}
+		if _, err := read(domain.SafeRelPath("solution/"+name+"/"+filename), compiled.Source, domain.ArtifactSource, 262144); err != nil {
+			return empty, err
+		}
+		bundle := port.SourceBundleManifest{SchemaVersion: "cpgen.source-bundle/v1", EntryPoint: domain.SafeRelPath(filename), Files: []port.SourceFile{{Path: domain.SafeRelPath(filename), Blob: compiled.Source}}}
+		bundle.Digest, err = port.ComputeSourceBundleDigest(bundle)
+		if err != nil {
+			return empty, err
+		}
+		if bundle.Digest != compiled.SourceBundleDigest {
+			return empty, errors.New("verification source bundle differs")
+		}
+		request := port.CompileRequest{Language: language, Role: compiled.Role, SourceBundle: bundle, Toolchain: compiler.ID, Limits: solutionCompileLimits(), ExpectedOutput: compiler.OutputPath}
+		if err := verifyResult(domain.CallSandboxCompile, request, compiled.Result, func(i docker.PlanIdentity) (port.ContainerPlan, error) {
+			return docker.BuildCompilePlan(request, config.Lock, i)
+		}); err != nil {
+			return empty, err
+		}
+		for _, p := range []*domain.PendingArtifact{compiled.Result.Program, compiled.Result.Stdout, compiled.Result.Stderr, compiled.Result.Execution} {
+			if err := verifyPending(p); err != nil {
+				return empty, err
+			}
+		}
+		if compiled.Result.Program != nil {
+			programs[compiled.Role] = compiled.Result.Program.Blob
+		}
+	}
+	for _, sample := range report.Samples {
+		if _, err := read(domain.SafeRelPath(fmt.Sprintf("solution/samples/%03d.in", sample.Sample)), sample.Input, domain.ArtifactInput, 1<<20); err != nil {
+			return empty, err
+		}
+		if _, err := read(domain.SafeRelPath(fmt.Sprintf("solution/samples/%03d.out", sample.Sample)), sample.Expected, domain.ArtifactOutput, 1<<20); err != nil {
+			return empty, err
+		}
+		request := port.RunRequest{Role: sample.Role, Program: programs[sample.Role], Stdin: &sample.Input, Limits: port.RunLimits{Time: time.Duration(input.Value.Problem.TimeLimitMS) * time.Millisecond, MemoryBytes: input.Value.Problem.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}}
+		if err := verifyResult(domain.CallSandboxRun, request, sample.Result, func(i docker.PlanIdentity) (port.ContainerPlan, error) {
+			return docker.BuildRunPlan(request, config.Lock, i)
+		}); err != nil {
+			return empty, err
+		}
+		for _, p := range []*domain.PendingArtifact{sample.Result.Stdout, sample.Result.Stderr, sample.Result.Execution} {
+			if err := verifyPending(p); err != nil {
+				return empty, err
+			}
+		}
+		if sample.ActualTokenDigest != "" {
+			actual, err := readSolutionVerificationBlob(ctx, blobs, sample.Result.Stdout.Blob, 1<<20)
+			if err != nil {
+				return empty, err
+			}
+			if solutionTokenDigest(actual) != sample.ActualTokenDigest {
+				return empty, errors.New("verification token comparison differs from actual stdout")
+			}
+		}
+	}
+	if len(used) != len(items) {
+		return empty, errors.New("verification stage contains unrelated artifacts")
+	}
+	return report, nil
+}
+
+func readSolutionVerificationBlob(ctx context.Context, blobs port.VerifiedBlobReader, ref domain.BlobRef, limit int64) ([]byte, error) {
+	if ref.Size > limit {
+		return nil, errors.New("verification artifact exceeds byte bound")
+	}
+	reader, err := blobs.OpenVerified(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err := errors.Join(readErr, reader.Close()); err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, errors.New("verification artifact exceeds byte bound")
+	}
+	return raw, nil
+}

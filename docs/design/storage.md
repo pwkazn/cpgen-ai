@@ -297,7 +297,7 @@ cache_uses(
 )
 ~~~
 
-Cache keys use canonical, versioned inputs. A hit checks policy, expiry, source evidence, and Blob readiness; creates current-run call, declaration, writer-token, pin, and occurrence evidence; then returns only after verified read. A stale provider-health snapshot may be diagnostic but cannot unblock a stage without a fresh current-attempt check.
+Cache keys use canonical, versioned inputs. A hit checks policy, expiry, source evidence and Blob readiness, then verifies the bytes and the owning adapter's output contract before creating a current-run logical cache-hit call and reuse record. The stage transaction attaches a CACHE_REUSE occurrence to that record; it does not borrow a source writer token or charge another physical write. Source calls can belong to an earlier stage/attempt in the same run, while the current call and occurrence remain bound to the current attempt. Cross-run sources remain forbidden. A stale provider-health snapshot may be diagnostic but cannot unblock a stage without a fresh current-attempt check.
 
 ## 9. Sandbox ledger
 
@@ -399,6 +399,8 @@ On resume, named idempotent operations inspect only the current run and its doma
 - apply an already-committed stage result or start a fresh attempt.
 
 There is no database table whose rows schedule arbitrary recovery work. Each operation validates expected run or lifecycle version before commit.
+
+For real LLM stage composition, M22 retains immutable logical opening and completion commands alongside their call records. Each bounded receipt commits atomically with the corresponding call transition and is verified against the existing command digest on read. The application stage-bound ledger can refresh optimistic versions after active-time accounting while replaying the exact original logical command. It checks the current RUNNING stage attempt on every mutation, retries only bounded database version conflicts and never retries provider I/O. Legacy calls without retained command metadata require their exact original command for adoption. This bridge is a composition prerequisite; interrupted-attempt reconciliation must still resolve already-dispatched identities before any new attempt.
 
 ## 13. Garbage collection
 

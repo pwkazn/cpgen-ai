@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -78,6 +80,14 @@ type LocalRunService struct {
 	reviews               port.ReviewStore
 	locks                 *runlock.Manager
 	pipeline              workflow.Slice1Pipeline
+	generation            *GenerationExecutor
+	similarity            *SimilarityExecutor
+	solution              *SolutionExecutor
+	data                  *DataExecutor
+	quality               *QualityExecutor
+	packages              *PackageExecutor
+	solutionSandbox       *DockerSandboxConfig
+	graph                 *compiledRunGraph
 	clock                 clock.Clock
 	active                *ActiveTime
 	reconciler            SandboxReconciler
@@ -87,13 +97,41 @@ type LocalRunService struct {
 	scenario              string
 	mu                    sync.Mutex
 	attempts              map[domain.RunID]domain.AttemptID
+	closeSandbox          func() error
+	closeOnce             sync.Once
+	closeErr              error
+}
+
+func (s *LocalRunService) Close() error {
+	s.closeOnce.Do(func() {
+		if s.closeSandbox != nil {
+			s.closeErr = s.closeSandbox()
+		}
+	})
+	return s.closeErr
 }
 
 func NewRunService(config RunServiceConfig) (*LocalRunService, error) {
+	return newRunService(config, nil, nil)
+}
+
+func newRunService(config RunServiceConfig, generation *GenerationExecutor, similarity *SimilarityExecutor) (*LocalRunService, error) {
 	if config.Runtime == nil || config.Locks == nil || config.Clock == nil {
 		return nil, errors.New("run service runtime, locks, and clock are required")
 	}
-	if err := config.Pipeline.Validate(); err != nil {
+	revision := workflow.Slice1WorkflowRevision
+	if generation == nil {
+		if err := config.Pipeline.Validate(); err != nil {
+			return nil, err
+		}
+	} else {
+		if similarity == nil {
+			return nil, errors.New("live run service requires its similarity executor")
+		}
+		revision = similarity.config.WorkflowRevision
+	}
+	compiled, err := newCompiledRunGraph(revision)
+	if err != nil {
 		return nil, err
 	}
 	if config.ActiveTimeInterval <= 0 {
@@ -104,6 +142,8 @@ func NewRunService(config RunServiceConfig) (*LocalRunService, error) {
 		return nil, err
 	}
 	service := &LocalRunService{runtime: config.Runtime, reviews: config.Reviews, locks: config.Locks, pipeline: config.Pipeline, clock: config.Clock, active: active, reconciler: config.Reconciler, recovery: config.Recovery, attempts: make(map[domain.RunID]domain.AttemptID), scenario: config.Scenario}
+	service.graph = compiled
+	service.generation, service.similarity = generation, similarity
 	if len(config.EffectiveConfigJSON) != 0 || config.EffectiveConfigDigest != "" {
 		if len(config.EffectiveConfigJSON) == 0 || config.EffectiveConfigDigest == "" {
 			return nil, errors.New("effective config JSON and digest must be supplied together")
@@ -125,8 +165,14 @@ func NewLocalRunService(config RunServiceConfig) (*LocalRunService, error) {
 }
 
 func (s *LocalRunService) Generate(ctx context.Context, request domain.RunRequest) (domain.RunSnapshot, error) {
+	if s.generation != nil {
+		return s.generateSlice2(ctx, request)
+	}
 	if err := request.Validate(); err != nil {
 		return domain.RunSnapshot{}, err
+	}
+	if request.SchemaVersion != domain.RequestSchemaV1 {
+		return domain.RunSnapshot{}, errors.New("request schema is incompatible with compiled workflow")
 	}
 	runIDRaw, err := domain.NewID("run")
 	if err != nil {
@@ -159,7 +205,11 @@ func (s *LocalRunService) Generate(ctx context.Context, request domain.RunReques
 	if s.scenario != "" {
 		scenario = s.scenario
 	}
-	return s.execute(ctx, create.RunID, &create, domain.Slice1Input{Brief: request.Brief, RequestDigest: requestDigest, ConfigDigest: create.RedactedEffectiveConfigDigest, Scenario: scenario})
+	input := domain.Slice1Input{Brief: request.Brief, RequestDigest: requestDigest, ConfigDigest: create.RedactedEffectiveConfigDigest, Scenario: scenario}
+	if err := input.Validate(); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	return s.execute(ctx, create.RunID, &create, input)
 }
 
 func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
@@ -179,6 +229,11 @@ func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domai
 	snapshot, err := s.runtime.GetRun(ctx, runID)
 	if err != nil {
 		return domain.RunSnapshot{}, err
+	}
+	// Reject incompatible selectors before recovery, review application or any
+	// other durable mutation. Old runs are never silently assigned a new graph.
+	if err := s.validateGraphPersistence(ctx, snapshot); err != nil {
+		return snapshot, err
 	}
 	if snapshot.State == domain.RunCancelled || snapshot.State == domain.RunFailed || snapshot.State == domain.RunReady {
 		return snapshot, nil
@@ -223,6 +278,15 @@ func (s *LocalRunService) Cancel(ctx context.Context, request domain.CancelReque
 	if err := request.Validate(); err != nil {
 		return domain.RunSnapshot{}, err
 	}
+	if s.generation != nil {
+		current, err := s.runtime.GetRun(ctx, request.RunID)
+		if err != nil {
+			return domain.RunSnapshot{}, err
+		}
+		if err := s.validateGraphPersistence(ctx, current); err != nil {
+			return current, err
+		}
+	}
 	if _, err := s.runtime.RequestCancel(ctx, request); err != nil {
 		return domain.RunSnapshot{}, err
 	}
@@ -261,31 +325,47 @@ func (s *LocalRunService) execute(ctx context.Context, runID domain.RunID, creat
 }
 
 func (s *LocalRunService) executeExisting(ctx context.Context, snapshot domain.RunSnapshot, input domain.Slice1Input) (domain.RunSnapshot, error) {
-	for snapshot.State == domain.RunCreated || snapshot.State == domain.RunBlocked || snapshot.State == domain.RunRunning {
-		if err := ctx.Err(); err != nil {
-			return snapshot, err
+	if err := s.validateGraphPersistence(ctx, snapshot); err != nil {
+		return snapshot, err
+	}
+	return s.graph.run(ctx, snapshot, func(ctx context.Context, current domain.RunSnapshot) (domain.RunSnapshot, error) {
+		if s.generation != nil {
+			next, err := s.readSlice2Input(ctx, current)
+			if err != nil {
+				return current, err
+			}
+			return s.executeStage(ctx, current, next)
 		}
 		var next any
-		switch snapshot.CurrentStage {
+		switch current.CurrentStage {
 		case "prepare":
 			next = input
 		case "exercise":
-			next = s.replayPrepared(snapshot)
+			next = s.replayPrepared(current)
 		case "checkpoint":
-			next = s.replayEvidence(snapshot)
+			next = s.replayEvidence(current)
 		default:
-			return snapshot, fmt.Errorf("unsupported slice1 stage %q", snapshot.CurrentStage)
+			return current, fmt.Errorf("unsupported slice1 stage %q", current.CurrentStage)
 		}
-		updated, outcomeErr := s.executeStage(ctx, snapshot, next)
-		if outcomeErr != nil {
-			return updated, outcomeErr
-		}
-		snapshot = updated
-		if snapshot.State != domain.RunRunning {
-			return snapshot, nil
-		}
+		return s.executeStage(ctx, current, next)
+	})
+}
+
+func (s *LocalRunService) validateGraphPersistence(ctx context.Context, snapshot domain.RunSnapshot) error {
+	if err := s.graph.validateSnapshot(snapshot); err != nil {
+		return err
 	}
-	return snapshot, nil
+	if s.generation != nil && snapshot.ConfigDigest != s.effectiveConfigDigest {
+		return errors.New("live run configuration differs from its frozen execution settings")
+	}
+	sequence, err := s.runtime.StageSequence(ctx, snapshot.RunID)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(sequence, s.graph.stages) {
+		return errors.New("persisted stage sequence differs from compiled workflow")
+	}
+	return nil
 }
 
 func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunSnapshot, input any) (domain.RunSnapshot, error) {
@@ -306,11 +386,6 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		binding := *persisted.BlockedBinding
 		blockedBinding = &binding
 	}
-	attemptRaw, err := domain.NewID("attempt")
-	if err != nil {
-		return snapshot, err
-	}
-	attemptID := domain.AttemptID(attemptRaw)
 	inputDigest, err := stageInputDigest(input)
 	if err != nil {
 		return snapshot, err
@@ -321,8 +396,7 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		}
 		inputDigest = blockedBinding.StageInputDigest
 	}
-	at := s.clock.Now().UTC()
-	attempt, err := s.runtime.BeginStage(ctx, domain.BeginStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attemptID, InputDigest: inputDigest, IdempotencyKey: stableServiceID("begin", snapshot.RunID, snapshot.Version), At: at})
+	attempt, err := s.beginOrResumeStage(ctx, snapshot, inputDigest)
 	if err != nil {
 		return snapshot, err
 	}
@@ -333,7 +407,7 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 	if err != nil {
 		return snapshot, err
 	}
-	if wasBlocked {
+	if wasBlocked && s.generation == nil {
 		view, viewErr := s.view(ctx, snapshot, attempt.AttemptID)
 		if viewErr != nil {
 			return snapshot, viewErr
@@ -367,6 +441,10 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		if reconcileErr := s.reconcileForTerminal(ctx, snapshot.RunID); reconcileErr != nil {
 			return snapshot, reconcileErr
 		}
+		snapshot, err = s.runtime.GetRun(ctx, snapshot.RunID)
+		if err != nil {
+			return snapshot, err
+		}
 		return s.finishOutcome(ctx, snapshot, attempt, inputDigest, result)
 	}
 	stageCtx, cancelCause := context.WithCancelCause(ctx)
@@ -376,7 +454,8 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 	accountErrors := make(chan error, 1)
 	go s.cancelPoller(stageCtx, snapshot.RunID, func() { cancelCause(domain.ExecutionInterrupted{Cause: domain.CauseUserCancel}) }, pollDone)
 	go s.accountingPoller(stageCtx, snapshot.RunID, func() { cancelCause(domain.ExecutionInterrupted{Cause: domain.CauseRunBudgetDeadline}) }, accountDone, accountExhausted, accountErrors)
-	result, runErr := s.runTyped(stageCtx, snapshot, input)
+	execution, runErr := s.runStage(stageCtx, snapshot, input)
+	result := execution.result
 	cancelCause(nil)
 	<-pollDone
 	<-accountDone
@@ -408,9 +487,6 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 	if accountingErr != nil {
 		return current, accountingErr
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return current, runErr
-	}
 	interruptedCause := domain.ExecutionCause("")
 	if interrupted, ok := context.Cause(stageCtx).(domain.ExecutionInterrupted); ok {
 		interruptedCause = interrupted.Cause
@@ -425,8 +501,15 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		if reconcileErr := s.reconcileForTerminal(ctx, current.RunID); reconcileErr != nil {
 			return current, reconcileErr
 		}
+		current, err = s.runtime.GetRun(ctx, current.RunID)
+		if err != nil {
+			return current, err
+		}
+		execution = stageExecution{result: result}
+	} else if runErr != nil {
+		return current, runErr
 	}
-	return s.finishOutcome(ctx, current, attempt, inputDigest, result)
+	return s.finishExecution(ctx, current, attempt, inputDigest, execution)
 }
 
 func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.RunID, cancel func(), done chan<- struct{}, exhausted chan<- bool, errorsOut chan<- error) {
@@ -450,6 +533,12 @@ func (s *LocalRunService) accountingPoller(ctx context.Context, runID domain.Run
 			}
 			result, err := s.active.Heartbeat(context.Background(), runID, snapshot.Version)
 			if err != nil {
+				// Provider settlement or a second handle's control request may
+				// advance the version after this read. Retry accounting on the
+				// next bounded tick; this conflict is not a budget cancellation.
+				if errors.Is(err, sqlite.ErrVersionConflict) {
+					continue
+				}
 				select {
 				case errorsOut <- err:
 				default:
@@ -534,11 +623,37 @@ func convertResult[O any](result domain.AgentResult[O]) domain.AgentResult[any] 
 }
 
 func (s *LocalRunService) finishOutcome(ctx context.Context, snapshot domain.RunSnapshot, attempt domain.StageAttempt, inputDigest domain.Digest, result domain.AgentResult[any]) (domain.RunSnapshot, error) {
+	return s.finishExecution(ctx, snapshot, attempt, inputDigest, stageExecution{result: result})
+}
+
+func (s *LocalRunService) finishExecution(ctx context.Context, snapshot domain.RunSnapshot, attempt domain.StageAttempt, inputDigest domain.Digest, execution stageExecution) (domain.RunSnapshot, error) {
+	result := execution.result
 	if err := result.Validate(); err != nil {
 		return snapshot, err
 	}
 	at := s.clock.Now().UTC()
 	command := domain.FinishStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attempt.AttemptID, IdempotencyKey: stableServiceID("finish", snapshot.RunID, snapshot.Version), At: at}
+	if result.Value != nil {
+		if binding, ok := (*result.Value).(domain.VerifiedPackageBinding); ok {
+			if s.packages == nil || snapshot.CurrentStage != "package" || inputDigest != binding.QualityDigest {
+				return snapshot, errors.New("verified package differs from current stage input")
+			}
+			store, ok := s.runtime.(interface {
+				FinalizeVerifiedPackage(context.Context, domain.FinalizeVerifiedPackageCommand) (domain.RunSnapshot, error)
+			})
+			if !ok {
+				return snapshot, errors.New("runtime lacks atomic verified package completion")
+			}
+			command.AttemptState, command.RunState = domain.StageAttemptSucceeded, domain.RunRunning
+			command.OutputDigest, command.NextInputDigest = &binding.Archive.Digest, &binding.Archive.Digest
+			command.NextStage, command.Occurrences = "package", execution.occurrences
+			finished, err := store.FinalizeVerifiedPackage(ctx, domain.FinalizeVerifiedPackageCommand{Finish: command, Package: binding})
+			if err != nil {
+				return snapshot, err
+			}
+			return finished, nil
+		}
+	}
 	switch {
 	case result.Value != nil:
 		output, err := stageOutputDigest(*result.Value)
@@ -547,6 +662,12 @@ func (s *LocalRunService) finishOutcome(ctx context.Context, snapshot domain.Run
 		}
 		command.AttemptState, command.RunState, command.OutputDigest = domain.StageAttemptSucceeded, domain.RunRunning, &output
 		next := nextStage(snapshot.CurrentStage)
+		if s.generation != nil {
+			next = ""
+			if snapshot.CurrentStageOrdinal > 0 && snapshot.CurrentStageOrdinal < len(s.graph.stages) {
+				next = s.graph.stages[snapshot.CurrentStageOrdinal]
+			}
+		}
 		if next == "" {
 			return snapshot, errors.New("slice1 terminal stage must return review")
 		}
@@ -571,7 +692,24 @@ func (s *LocalRunService) finishOutcome(ctx context.Context, snapshot domain.Run
 	default:
 		return snapshot, errors.New("unsupported stage result")
 	}
-	return s.runtime.FinishStage(ctx, command)
+	if result.Value != nil && s.generation != nil {
+		if err := s.bindSlice2Commit(ctx, snapshot, *result.Value, &command); err != nil {
+			return snapshot, err
+		}
+	}
+	if result.Value != nil {
+		command.Occurrences = execution.occurrences
+	}
+	finished, err := s.runtime.FinishStage(ctx, command)
+	if err != nil {
+		return snapshot, err
+	}
+	// Cache publication is an optional index. A failed index cannot undo an
+	// authoritative committed stage or prevent the graph observing its advance.
+	if result.Value != nil && execution.publishCache != nil {
+		_ = execution.publishCache(ctx)
+	}
+	return finished, nil
 }
 
 func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
@@ -592,6 +730,10 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 	if reconcileErr := s.reconcileForTerminal(ctx, runID); reconcileErr != nil {
 		return snapshot, reconcileErr
 	}
+	snapshot, err = s.runtime.GetRun(ctx, runID)
+	if err != nil {
+		return snapshot, err
+	}
 	if snapshot.ActiveStartedAt != nil {
 		if _, err := s.active.Stop(ctx, runID, snapshot.Version); err != nil {
 			return snapshot, err
@@ -603,20 +745,22 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 	}
 	if snapshot.State == domain.RunRunning {
 		attemptID := s.currentAttempt(runID)
-		if attemptID == "" {
-			if reader, ok := s.runtime.(CurrentStageAttemptReader); ok {
-				if persisted, readErr := reader.CurrentStageAttempt(ctx, runID, snapshot.CurrentStage); readErr == nil && persisted.State == domain.StageAttemptRunning {
-					attemptID = persisted.AttemptID
-				}
+		if reader, ok := s.runtime.(CurrentStageAttemptReader); ok {
+			persisted, readErr := reader.CurrentStageAttempt(ctx, runID, snapshot.CurrentStage)
+			if readErr != nil && !errors.Is(readErr, sqlite.ErrNotFound) {
+				return snapshot, readErr
+			}
+			attemptID = ""
+			if readErr == nil && persisted.State == domain.StageAttemptRunning {
+				attemptID = persisted.AttemptID
 			}
 		}
-		if attemptID == "" {
-			return snapshot, errors.New("running cancellation lacks current attempt")
-		}
-		if _, err := s.runtime.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attemptID, AttemptState: domain.StageAttemptCancelled, RunState: domain.RunCancelled, Cause: causePointer(domain.CauseUserCancel), IdempotencyKey: stableServiceID("cancel-finish", runID, snapshot.Version), At: s.clock.Now().UTC()}); err == nil {
-			return s.runtime.GetRun(ctx, runID)
-		} else {
-			return snapshot, err
+		if attemptID != "" {
+			if _, err := s.runtime.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attemptID, AttemptState: domain.StageAttemptCancelled, RunState: domain.RunCancelled, Cause: causePointer(domain.CauseUserCancel), IdempotencyKey: stableServiceID("cancel-finish", runID, snapshot.Version), At: s.clock.Now().UTC()}); err == nil {
+				return s.runtime.GetRun(ctx, runID)
+			} else {
+				return snapshot, err
+			}
 		}
 	}
 	return s.runtime.FinalizeCancel(ctx, domain.FinalizeCancelCommand{RunID: runID, ExpectedRunVersion: snapshot.Version, ControlRequestID: pending.ID, ReconciliationDigest: domain.SumBytes([]byte("slice1 cancellation reconciliation")), IdempotencyKey: stableServiceID("cancel-finalize", runID, snapshot.Version), At: s.clock.Now().UTC()})
@@ -626,6 +770,11 @@ func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.R
 // exhaustion projection is committed. A non-complete report means exact
 // external ownership is still unresolved, so the run remains non-terminal.
 func (s *LocalRunService) reconcileForTerminal(ctx context.Context, runID domain.RunID) error {
+	if s.generation != nil {
+		if err := s.reconcileSlice2(ctx, runID); err != nil {
+			return err
+		}
+	}
 	if s.reconciler == nil {
 		return nil
 	}
@@ -737,11 +886,15 @@ func (s *LocalRunService) recoverRunning(ctx context.Context, snapshot domain.Ru
 	attempt := s.currentAttempt(snapshot.RunID)
 	if reader, ok := s.runtime.(CurrentStageAttemptReader); ok {
 		persisted, readerErr := reader.CurrentStageAttempt(ctx, snapshot.RunID, snapshot.CurrentStage)
-		if readerErr == nil {
+		if readerErr != nil && !errors.Is(readerErr, sqlite.ErrNotFound) {
+			return snapshot, readerErr
+		}
+		attempt = ""
+		if readerErr == nil && persisted.State == domain.StageAttemptRunning {
 			attempt = persisted.AttemptID
 		}
 	}
-	if attempt == "" {
+	if attempt == "" || s.generation != nil {
 		return snapshot, nil
 	}
 	return s.runtime.InterruptStage(ctx, domain.InterruptStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attempt, Cause: domain.CauseRevisionInvalidated, IdempotencyKey: stableServiceID("interrupt", snapshot.RunID, snapshot.Version), At: s.clock.Now().UTC()})
@@ -774,6 +927,12 @@ func nextStage(stage domain.StageName) domain.StageName {
 		return "exercise"
 	case "exercise":
 		return "checkpoint"
+	case "idea":
+		return "statement"
+	case "statement":
+		return "similarity"
+	case "similarity":
+		return "slice2_checkpoint"
 	default:
 		return ""
 	}
@@ -794,6 +953,22 @@ func stageInputDigest(value any) (domain.Digest, error) {
 		return typed.Digest, nil
 	case domain.Slice1Evidence:
 		return typed.Digest, nil
+	case domain.GenerationRequestSnapshotV1:
+		return typed.Digest()
+	case domain.StatementInput:
+		return typed.Digest()
+	case domain.SimilarityInputV1:
+		return typed.Digest()
+	case SimilarityContent:
+		return typed.Evidence.EvidenceDigest, typed.Decision.Validate()
+	case domain.SolutionDraftInputV1:
+		return typed.Digest()
+	case domain.DataDraftInputV1:
+		return typed.Digest()
+	case domain.DataContent:
+		return typed.ContentDigest, typed.Validate()
+	case domain.SolutionContent:
+		return typed.ContentDigest, typed.Validate()
 	default:
 		return stableValueDigest(value)
 	}

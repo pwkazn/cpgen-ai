@@ -16,6 +16,10 @@ After merge, CPGen validates, canonicalizes, redacts, and hashes the effective c
 
 ## 2. ApplicationConfig
 
+The current local YAML schema is documented in [config/README.md](../../config/README.md). It accepts `storage`, `sqlite`, `runtime`, `fake_workflow` and optional strict `llm`, `similarity`, `workflow` and `sandbox` blocks. [deepseek.example.yaml](../../config/deepseek.example.yaml) remains a provider-only Fake example; [slice2.example.yaml](../../config/slice2.example.yaml) explicitly selects the compiled live preview. [solution.example.yaml](../../config/solution.example.yaml) enables accepted Similarity to continue through Solution generation and real Docker sample verification, with a required local Engine endpoint, absolute lock path and canonical lock digest. Bootstrap checks the actual lock and installed images; configuration validation itself is read-only and offline. Provider blocks alone preserve Fake selection. Both live selectors require frozen provider/decision settings and positive per-exchange cost ceilings. Retry and selection rules remain compiled. Omitting new blocks preserves previous effective bytes and digests. Nulls, duplicate/unknown fields, invalid scalar types and invalid limits are rejected. No environment value is expanded into a snapshot.
+
+`application.BuildLLMConfig` binds the built-in prompt/schema registries, returns explicit output limits, and fixes adapter attempts to one. The optional format-repair allowance is zero or one; its zero default remains omitted from effective JSON. An explicit workflow selector composes the durable preview runtime, while omitted selection retains the Slice 1 Fake pipeline. Live resume/cancellation require the original effective digest. The broader configuration below describes the target design and is not a copy-pasteable local CLI configuration.
+
 ~~~yaml
 schema_version: 1
 
@@ -124,6 +128,8 @@ Validation checks:
 - Docker and artifact cleanup timeouts are bounded.
 
 There is no configuration for a scheduler endpoint, background worker, task queue, or arbitrary stage graph.
+
+LangGraphGo is a pinned build dependency selected by a compiled workflow revision, not a configurable scheduler backend. LangChainGo uses the redacted adapter Config. The local `llm` block supplies request output ceilings and a response envelope cap; typed GenerateRequest carries the stage's admitted limits. The DeepSeek example uses `https://api.deepseek.com` and `deepseek-v4-flash`, with credentials referenced by environment name only. Durable transport retries are owned by CallCoordinator, not by YAML or library retry settings. The preview and Solution selectors are explicitly available through CLI; the complete Data/Judge/Quality/Package selector remains internal until those stages are implemented.
 
 ## 5. Local locking and accounting values
 

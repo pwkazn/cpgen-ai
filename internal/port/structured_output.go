@@ -38,6 +38,7 @@ const (
 	StructuredOutputRepairTooLarge         StructuredOutputErrorCode = "repair_input_too_large"
 	StructuredOutputRepairFragmentRejected StructuredOutputErrorCode = "repair_fragment_rejected"
 	StructuredOutputSchemaUnbound          StructuredOutputErrorCode = "schema_validator_unbound"
+	StructuredOutputDomainInvalid          StructuredOutputErrorCode = "domain_validation_failed"
 )
 
 func (c StructuredOutputErrorCode) Valid() bool {
@@ -48,7 +49,20 @@ func (c StructuredOutputErrorCode) Valid() bool {
 		return true
 	case StructuredOutputRepairFragmentRejected:
 		return true
-	case StructuredOutputSchemaUnbound:
+	case StructuredOutputSchemaUnbound, StructuredOutputDomainInvalid:
+		return true
+	default:
+		return false
+	}
+}
+
+// FormatRepairable is deliberately narrower than Valid. Content semantics,
+// oversize/encoding failures and missing local validators cannot consume the
+// one JSON-format repair allowance.
+func (c StructuredOutputErrorCode) FormatRepairable() bool {
+	switch c {
+	case StructuredOutputInvalidJSON, StructuredOutputDuplicateField, StructuredOutputUnknownField,
+		StructuredOutputSchemaMismatch, StructuredOutputSchemaMissing, StructuredOutputTypeMismatch:
 		return true
 	default:
 		return false
@@ -93,6 +107,8 @@ func (e *StructuredOutputError) Error() string {
 		message = "structured repair fragment was not explicitly trusted"
 	case StructuredOutputSchemaUnbound:
 		message = "structured output schema has no trusted validator"
+	case StructuredOutputDomainInvalid:
+		message = "structured output violates domain constraints"
 	}
 	if e.Path != "" && safeFieldPath(e.Path) {
 		return message + " at field " + e.Path

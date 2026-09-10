@@ -40,8 +40,8 @@ func TestVerifiedImportGrantOrderKeeperAndExport(t *testing.T) {
 	if result.Program == nil || result.Program.Blob.Digest != domain.SumBytes([]byte("binary")) {
 		t.Fatalf("program artifact = %#v", result.Program)
 	}
-	if result.Program.CallID != fixture.calls[3] {
-		t.Fatalf("program CallID = %q, want export call %q", result.Program.CallID, fixture.calls[3])
+	if result.Program.CallID != "call_00000000000000000000000000000099" {
+		t.Fatalf("program CallID = %q, want the artifact writer's physical key", result.Program.CallID)
 	}
 	if !slices.Equal(result.CallTrace.PhysicalAttemptCallIDs, fixture.calls) || result.CallTrace.ResultAttemptCallID == nil || *result.CallTrace.ResultAttemptCallID != fixture.calls[2] {
 		t.Fatalf("call trace = %#v", result.CallTrace)
@@ -119,7 +119,7 @@ type runnerFixture struct {
 	events  *eventLog
 }
 
-func newRunnerFixture(t *testing.T) runnerFixture {
+func newRunnerFixture(t *testing.T, prefixes ...domain.SafeRelPath) runnerFixture {
 	t.Helper()
 	events := &eventLog{}
 	request := compileRequest()
@@ -170,6 +170,10 @@ func newRunnerFixture(t *testing.T) runnerFixture {
 	engine := newRecordingDockerEngine(events)
 	engine.exportFiles = []transfer.StreamFile{{Path: "main", Mode: transfer.FrameModeExecutable, Data: []byte("binary")}}
 	sink := &recordingArtifactSink{events: events}
+	var prefix domain.SafeRelPath
+	if len(prefixes) > 0 {
+		prefix = prefixes[0]
+	}
 	runner, err := docker.NewRunner(docker.RunnerOptions{
 		Engine: engine,
 		Config: docker.Config{
@@ -179,7 +183,8 @@ func newRunnerFixture(t *testing.T) runnerFixture {
 		},
 		Lock: lock, EngineIdentityDigest: identity.EngineIdentityDigest,
 		Blobs: blobs, Artifacts: sink, Watchdog: &recordingWatchdog{events: events},
-		Lifecycle: newRecordingLifecycle(), CallLedger: recordingCallLedger{},
+		ArtifactPrefix: prefix,
+		Lifecycle:      newRecordingLifecycle(), CallLedger: recordingCallLedger{},
 		Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: 5 * time.Second},
 	})
 	if err != nil {
@@ -316,12 +321,41 @@ func (w *recordingArtifactWriter) Finalize(context.Context) (domain.PendingArtif
 	}
 	w.sink.finalized[w.declaration.LogicalPath] = slices.Clone(w.buffer.Bytes())
 	w.sink.mu.Unlock()
+	provenance := w.declaration.Provenance
+	if provenance.InputDigest != nil {
+		value := *provenance.InputDigest
+		provenance.InputDigest = &value // SQLite reconstructs values, not pointers.
+	}
 	return domain.PendingArtifact{
 		Blob: blob, MediaType: w.declaration.MediaType, Role: w.declaration.Role, LogicalPath: w.declaration.LogicalPath,
 		CallID: "call_00000000000000000000000000000099", ReservationID: "reservation_00000000000000000000000000000001",
 		WriterTokenID: "writer_00000000000000000000000000000001", PinID: "pin_00000000000000000000000000000001",
-		PhysicalNewBytes: blob.Size, Provenance: w.declaration.Provenance,
+		PhysicalNewBytes: blob.Size, Provenance: provenance,
 	}, nil
+}
+
+func TestRunnerArtifactsRetainWriterIdentityWithinOperationNamespace(t *testing.T) {
+	f := newRunnerFixture(t, "solution/reference")
+	result, err := f.runner.Compile(context.Background(), f.auth, f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, artifact := range map[domain.SafeRelPath]*domain.PendingArtifact{
+		"solution/reference/program/main":           result.Program,
+		"solution/reference/compile/stdout":         result.Stdout,
+		"solution/reference/compile/stderr":         result.Stderr,
+		"solution/reference/compile/execution.json": result.Execution,
+	} {
+		if artifact == nil || artifact.LogicalPath != path || artifact.CallID != "call_00000000000000000000000000000099" {
+			t.Fatalf("artifact %s: %+v", path, artifact)
+		}
+		if artifact.Provenance.InputDigest == nil || *artifact.Provenance.InputDigest != f.request.SourceBundle.Digest {
+			t.Fatalf("input provenance changed: %+v", artifact.Provenance)
+		}
+	}
+	if result.CallTrace.ResultAttemptCallID == nil || *result.CallTrace.ResultAttemptCallID != f.calls[2] {
+		t.Fatalf("target trace identity changed: %+v", result.CallTrace)
+	}
 }
 
 func (s *recordingArtifactSink) finalizedBytes(path domain.SafeRelPath) []byte {

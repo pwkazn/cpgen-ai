@@ -99,15 +99,26 @@ type MutationRecordRequest struct {
 }
 
 func (v MutationRecordRequest) Validate() error {
+	if err := v.validateEvidence(); err != nil {
+		return err
+	}
+	if err := v.OutputOccurrenceID.Validate(); err != nil {
+		return err
+	}
+	return validateUTCTime("mutation record at", v.At)
+}
+
+func (v MutationRecordRequest) validateEvidence() error {
 	if err := v.Grant.Validate(); err != nil {
 		return err
 	}
 	if err := validateMutationID(v.RecordID); err != nil {
 		return err
 	}
-	if len(v.Operations) == 0 || len(v.Reservations) == 0 {
-		return errors.New("mutation record requires operation and reservation evidence")
+	if len(v.Operations) == 0 || len(v.Operations) > 64 || len(v.Reservations) == 0 || len(v.Reservations) > 512 {
+		return errors.New("mutation record requires bounded operation and reservation evidence")
 	}
+	operations := make(map[CallRecordID]struct{}, len(v.Operations))
 	for _, item := range v.Operations {
 		if err := item.CallRecordID.Validate(); err != nil {
 			return err
@@ -115,7 +126,12 @@ func (v MutationRecordRequest) Validate() error {
 		if err := item.AttemptID.Validate(); err != nil {
 			return err
 		}
+		if _, exists := operations[item.CallRecordID]; exists {
+			return errors.New("mutation record repeats a logical operation")
+		}
+		operations[item.CallRecordID] = struct{}{}
 	}
+	reservations := make(map[ReservationID]struct{}, len(v.Reservations))
 	for _, item := range v.Reservations {
 		if err := item.ReservationID.Validate(); err != nil {
 			return err
@@ -126,11 +142,15 @@ func (v MutationRecordRequest) Validate() error {
 		if err := item.AttemptCallID.Validate(); err != nil {
 			return err
 		}
+		if _, exists := reservations[item.ReservationID]; exists {
+			return errors.New("mutation record repeats a reservation")
+		}
+		reservations[item.ReservationID] = struct{}{}
+		if _, exists := operations[item.CallRecordID]; !exists {
+			return errors.New("mutation reservation has no recorded logical operation")
+		}
 	}
-	if err := v.OutputOccurrenceID.Validate(); err != nil {
-		return err
-	}
-	return validateUTCTime("mutation record at", v.At)
+	return nil
 }
 
 func validateMutationID(value string) error {

@@ -27,6 +27,9 @@ func TestSlice1DockerAB(t *testing.T) {
 	if err := vertical.Validate(); err != nil {
 		t.Fatalf("vertical report: %v", err)
 	}
+	if vertical.Status != probe.VerticalPassed {
+		t.Fatalf("Docker vertical %s: %s (%+v)", vertical.Status, vertical.Reason, vertical.Failure)
+	}
 	seenCalls := make(map[string]struct{})
 	for index, trace := range vertical.CallTraces {
 		if trace.DispatchKind != domain.DispatchDispatched || len(trace.PhysicalAttemptCallIDs) == 0 {
@@ -99,6 +102,12 @@ func loadSlice1DockerCanary(t *testing.T) (dockersandbox.Config, toolchain.Lock,
 		t.Skip("set CPGEN_RUN_DOCKER_CANARY=1 to run the real Docker canary")
 	}
 	lockPath := filepath.Join("..", "..", "config", "toolchains", "docker-v1.lock.json")
+	if selected := os.Getenv("CPGEN_DOCKER_TOOLCHAIN_LOCK"); selected != "" {
+		if !filepath.IsAbs(selected) {
+			t.Fatal("CPGEN_DOCKER_TOOLCHAIN_LOCK must be an absolute path")
+		}
+		lockPath = selected
+	}
 	lockFile, err := os.Open(lockPath)
 	if err != nil {
 		t.Fatalf("open Docker toolchain lock: %v", err)

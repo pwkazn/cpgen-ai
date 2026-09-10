@@ -48,6 +48,13 @@ func NewCacheReuseService(locks *runlock.Manager, cache port.CacheStore, calls p
 }
 
 func (s *CacheService) Reuse(ctx context.Context, request domain.CacheReuseRequest) (CacheReuseResult, error) {
+	return s.ReuseValidated(ctx, request, nil)
+}
+
+// ReuseValidated applies the owning adapter's local output validator after
+// verified Blob reads and before any current-call or reuse record is created.
+// The callback runs under the shared artifact lock, outside a write transaction.
+func (s *CacheService) ReuseValidated(ctx context.Context, request domain.CacheReuseRequest, validate func(domain.CacheCandidate) error) (CacheReuseResult, error) {
 	if err := request.Lookup.Validate(); err != nil {
 		return CacheReuseResult{}, err
 	}
@@ -78,6 +85,11 @@ func (s *CacheService) Reuse(ctx context.Context, request domain.CacheReuseReque
 		if closeErr := reader.Close(); closeErr != nil {
 			_ = s.cache.Invalidate(ctx, request.Lookup.Key, domain.InvalidationCorruptBlob)
 			return CacheReuseResult{}, &CacheVerificationError{Key: request.Lookup.Key, Cause: closeErr}
+		}
+	}
+	if validate != nil {
+		if err := validate(candidate); err != nil {
+			return CacheReuseResult{}, err
 		}
 	}
 	open := request.OpenCall

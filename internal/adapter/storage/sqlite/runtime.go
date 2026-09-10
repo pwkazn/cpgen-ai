@@ -318,8 +318,12 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
+	return s.finishStage(ctx, command, commandDigest, nil, nil)
+}
+
+func (s *Store) finishStage(ctx context.Context, command domain.FinishStageCommand, commandDigest domain.Digest, mutation *domain.MutationStageRecord, verifiedPackage *domain.VerifiedPackageBinding) (domain.RunSnapshot, error) {
 	var result domain.RunSnapshot
-	err = s.immediate(ctx, func(tx *immediateTx) error {
+	err := s.immediate(ctx, func(tx *immediateTx) error {
 		if replayed, err := replayEvent(ctx, tx, command.RunID, command.IdempotencyKey, commandDigest, &result); err != nil || replayed {
 			return err
 		}
@@ -335,6 +339,11 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		}
 		if run.ActiveStartedAt != nil {
 			return wrap(ErrConsistency, "active-time interval must be closed before finishing a stage", nil)
+		}
+		if verifiedPackage != nil {
+			if err := validatePackageCompletionTx(ctx, tx, run, command, *verifiedPackage); err != nil {
+				return err
+			}
 		}
 		pending, err := pendingCancelTx(ctx, tx, command.RunID)
 		if err != nil {
@@ -412,6 +421,11 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		} else if err := releasePendingArtifactTokens(ctx, tx, command.RunID, command.StageName, command.AttemptID, command.At); err != nil {
 			return err
 		}
+		if mutation != nil {
+			if err := finishMutationRecordTx(ctx, tx, command, *mutation); err != nil {
+				return err
+			}
+		}
 		var output, cause, reviewEvidence, reviewPolicy, blockedBinding any
 		if command.OutputDigest != nil {
 			output = string(*command.OutputDigest)
@@ -458,7 +472,7 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 		currentStage, currentOrdinal := command.StageName, stageOrdinal
 		configDigest := run.ConfigDigest
 		cancelSummary := any(nil)
-		if command.AttemptState == domain.StageAttemptSucceeded {
+		if command.AttemptState == domain.StageAttemptSucceeded && verifiedPackage == nil {
 			var nextOrdinal int
 			var nextState string
 			if err := tx.QueryRowContext(ctx, `SELECT ordinal, state FROM stage_records WHERE run_id = ? AND stage_name = ?`,
@@ -482,11 +496,20 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 			}
 		}
 		newVersion := run.Version + 1
+		finalState := command.RunState
+		var finalPackage any
+		if verifiedPackage != nil {
+			occurrence, err := insertVerifiedPackageTx(ctx, tx, command, *verifiedPackage)
+			if err != nil {
+				return err
+			}
+			finalState, finalPackage = domain.RunReady, string(occurrence)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE runs SET state = ?, current_stage = ?, current_stage_ordinal = ?, version = ?,
-				redacted_effective_config_digest = ?, cancel_summary = ?, updated_at = ? WHERE run_id = ?`,
-			string(command.RunState), string(currentStage), currentOrdinal, newVersion,
-			string(configDigest), cancelSummary, formatTime(command.At), string(command.RunID),
+				redacted_effective_config_digest = ?, cancel_summary = ?, final_package_occurrence_id = ?, updated_at = ? WHERE run_id = ?`,
+			string(finalState), string(currentStage), currentOrdinal, newVersion,
+			string(configDigest), cancelSummary, finalPackage, formatTime(command.At), string(command.RunID),
 		); err != nil {
 			return err
 		}
@@ -690,7 +713,16 @@ func (s *Store) FinalizeCancel(ctx context.Context, command domain.FinalizeCance
 		if run.ActiveStartedAt != nil {
 			return wrap(ErrInvalidTransition, "finalize cancel requires closed active-time accounting", nil)
 		}
-		if run.State != domain.RunCreated && run.State != domain.RunBlocked && run.State != domain.RunNeedsReview {
+		var stageState string
+		var currentAttempt sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT state,current_attempt_id FROM stage_records WHERE run_id=? AND stage_name=?`, command.RunID, run.CurrentStage).Scan(&stageState, &currentAttempt); err != nil {
+			return err
+		}
+		// A successful predecessor commits RUNNING with its PENDING successor
+		// before that successor owns an attempt. Finalize that exact gap without
+		// inventing an attempt or bypassing the live-attempt cancellation path.
+		betweenStages := run.State == domain.RunRunning && stageState == string(domain.StagePending) && !currentAttempt.Valid
+		if run.State != domain.RunCreated && run.State != domain.RunBlocked && run.State != domain.RunNeedsReview && !betweenStages {
 			return wrap(ErrInvalidTransition, "finalize cancel requires a paused or interrupted run", nil)
 		}
 		if err := domain.ValidateRunTransition(run.State, domain.RunCancelled); err != nil {
@@ -702,13 +734,6 @@ func (s *Store) FinalizeCancel(ctx context.Context, command domain.FinalizeCance
 		}
 		if pending == nil || pending.ID != command.ControlRequestID {
 			return wrap(ErrConsistency, "finalize cancel does not match the active control request", nil)
-		}
-		var stageState string
-		if err := tx.QueryRowContext(ctx, `
-			SELECT state FROM stage_records WHERE run_id = ? AND stage_name = ?`,
-			string(command.RunID), string(run.CurrentStage),
-		).Scan(&stageState); err != nil {
-			return err
 		}
 		if err := domain.ValidateStageTransition(domain.StageState(stageState), domain.StageCancelled); err != nil {
 			return wrap(ErrInvalidTransition, err.Error(), err)
@@ -894,19 +919,19 @@ type rowQuerier interface {
 func readRun(ctx context.Context, queryer rowQuerier, runID domain.RunID) (domain.RunSnapshot, error) {
 	var result domain.RunSnapshot
 	var runIDRaw, state, requestDigest, configDigest, workflowDigest, currentStage string
-	var activeStarted, heartbeat, cancel sql.NullString
+	var activeStarted, heartbeat, cancel, finalPackage sql.NullString
 	var createdAt, updatedAt string
 	var activeElapsed int64
 	err := queryer.QueryRowContext(ctx, `
 		SELECT run_id, state, version, workflow_revision, schema_version,
 			submitted_request_digest, redacted_effective_config_digest, workflow_digest,
 			current_stage, current_stage_ordinal, created_at, updated_at,
-			active_elapsed_ns, active_started_at, last_accounting_heartbeat_at, cancel_summary
+			active_elapsed_ns, active_started_at, last_accounting_heartbeat_at, cancel_summary, final_package_occurrence_id
 		FROM runs WHERE run_id = ?`, string(runID)).Scan(
 		&runIDRaw, &state, &result.Version, &result.WorkflowRevision, &result.SchemaVersion,
 		&requestDigest, &configDigest, &workflowDigest,
 		&currentStage, &result.CurrentStageOrdinal, &createdAt, &updatedAt,
-		&activeElapsed, &activeStarted, &heartbeat, &cancel,
+		&activeElapsed, &activeStarted, &heartbeat, &cancel, &finalPackage,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.RunSnapshot{}, wrap(ErrNotFound, "run does not exist", err)
@@ -939,6 +964,10 @@ func readRun(ctx context.Context, queryer rowQuerier, runID domain.RunID) (domai
 	}
 	if cancel.Valid {
 		result.CancelSummary = cancel.String
+	}
+	if finalPackage.Valid {
+		value := domain.ArtifactOccurrenceID(finalPackage.String)
+		result.FinalPackageOccurrenceID = &value
 	}
 	if err := result.Validate(); err != nil {
 		return domain.RunSnapshot{}, wrap(ErrConsistency, "stored run projection is invalid", err)

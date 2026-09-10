@@ -12,6 +12,11 @@ import (
 	"cpgen/internal/port"
 )
 
+// errCallReceiptPending is returned only after an adapter has durably sealed
+// its result. Keep the grant and reservations for receipt reconciliation; this
+// error never gives the restarted adapter authority to send another request.
+var errCallReceiptPending = errors.New("durable call receipt awaits local publication")
+
 // CallAdapter separates deterministic call planning from the external dispatch
 // boundary. Port failures are values; errors are reserved for failures that do
 // not produce a usable typed outcome.
@@ -111,15 +116,23 @@ func (c *CallCoordinator[T]) Execute(ctx context.Context, request domain.OpenCal
 			return domain.MeteredOutcome[T]{}, err
 		}
 		execution, executeErr := c.adapter.Execute(ctx, grant)
+		// Once dispatch has been attempted, settlement must survive caller
+		// cancellation. This bounded context authorizes only receipt/ledger work;
+		// planning, new dispatches and retry waits still use the caller context.
+		settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer settleCancel()
 		if executeErr != nil {
+			if errors.Is(executeErr, errCallReceiptPending) {
+				return domain.MeteredOutcome[T]{}, executeErr
+			}
 			failure := &domain.PortFailure{Code: domain.FailureBoundaryUnknown, Class: domain.FailureUnknown}
-			if err := c.complete(ctx, record, grant, domain.PhysicalExecution[T]{
+			if err := c.complete(settleCtx, record, grant, domain.PhysicalExecution[T]{
 				Boundary: domain.BoundaryUnknown, Failure: failure,
 			}); err != nil {
 				return domain.MeteredOutcome[T]{}, errors.Join(fmt.Errorf("execute physical call: %w", executeErr), err)
 			}
 			lastDispatched = callIDPointer(physical.ID)
-			outcome, finishErr := c.finish(ctx, record, request.ExpectedRunVersion, domain.DispatchDispatched, lastDispatched, failure)
+			outcome, finishErr := c.finish(settleCtx, record, request.ExpectedRunVersion, domain.DispatchDispatched, lastDispatched, failure)
 			if finishErr != nil {
 				return domain.MeteredOutcome[T]{}, errors.Join(fmt.Errorf("execute physical call: %w", executeErr), finishErr)
 			}
@@ -130,7 +143,7 @@ func (c *CallCoordinator[T]) Execute(ctx context.Context, request domain.OpenCal
 		}
 		if execution.Boundary == domain.BoundaryCompleted {
 			if physical.State != domain.PhysicalSent {
-				if err := c.ledger.MarkSent(ctx, grant, c.clock.Now()); err != nil {
+				if err := c.ledger.MarkSent(settleCtx, grant, c.clock.Now()); err != nil {
 					return domain.MeteredOutcome[T]{}, err
 				}
 			}
@@ -140,20 +153,21 @@ func (c *CallCoordinator[T]) Execute(ctx context.Context, request domain.OpenCal
 		} else if physical.State == domain.PhysicalSent {
 			return domain.MeteredOutcome[T]{}, errors.New("provider reported no-send after a durable sent boundary")
 		}
-		if err := c.complete(ctx, record, grant, execution); err != nil {
+		if err := c.complete(settleCtx, record, grant, execution); err != nil {
 			return domain.MeteredOutcome[T]{}, err
 		}
 
 		if execution.Value != nil {
-			return c.finishValue(ctx, record, request.ExpectedRunVersion, physical.ID, execution.Value)
+			return c.finishValue(settleCtx, record, request.ExpectedRunVersion, physical.ID, execution.Value)
 		}
 		if execution.Failure.Class != domain.FailureRetryable || execution.Boundary == domain.BoundaryUnknown || index == len(prepared.PhysicalCalls)-1 {
 			dispatch := domain.DispatchNone
 			if lastDispatched != nil {
 				dispatch = domain.DispatchDispatched
 			}
-			return c.finish(ctx, record, request.ExpectedRunVersion, dispatch, lastDispatched, execution.Failure)
+			return c.finish(settleCtx, record, request.ExpectedRunVersion, dispatch, lastDispatched, execution.Failure)
 		}
+		physical.Failure = execution.Failure
 		if err := c.waitForRetry(ctx, record, physical); err != nil {
 			return domain.MeteredOutcome[T]{}, err
 		}
@@ -174,10 +188,16 @@ func (c *CallCoordinator[T]) dispatchGrant(ctx context.Context, record domain.Ca
 }
 
 func (c *CallCoordinator[T]) waitForRetry(ctx context.Context, record domain.CallRecord, physical domain.PhysicalCall) error {
+	delay := record.RetryPolicy.Backoff(physical.RetryOrdinal)
+	if physical.Failure != nil && physical.Failure.RetryAfter != nil {
+		if requested := physical.Failure.RetryAfter.Sub(c.clock.Now()); requested > delay {
+			delay = requested
+		}
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-c.clock.After(record.RetryPolicy.Backoff(physical.RetryOrdinal)):
+	case <-c.clock.After(delay):
 		return nil
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 type PreparedArtifactSession interface {
 	Prepare(context.Context, domain.ArtifactDeclarationID) (port.ArtifactWriter, error)
+	RestartUnsealed(context.Context, domain.ArtifactDeclarationID) (port.ArtifactWriter, error)
 	ReleaseUnused(context.Context) error
 }
 
@@ -44,6 +45,14 @@ func NewPreparedArtifactSession(ledger port.ArtifactLedger, store *blob.Store, p
 }
 
 func (s *preparedArtifactSession) Prepare(ctx context.Context, id domain.ArtifactDeclarationID) (port.ArtifactWriter, error) {
+	return s.prepare(ctx, id, false)
+}
+
+func (s *preparedArtifactSession) RestartUnsealed(ctx context.Context, id domain.ArtifactDeclarationID) (port.ArtifactWriter, error) {
+	return s.prepare(ctx, id, true)
+}
+
+func (s *preparedArtifactSession) prepare(ctx context.Context, id domain.ArtifactDeclarationID, restart bool) (port.ArtifactWriter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -65,14 +74,14 @@ func (s *preparedArtifactSession) Prepare(ctx context.Context, id domain.Artifac
 	if err := tokenIdentity(token); err != nil {
 		return nil, err
 	}
-	if err := s.validatePreparedBinding(declaration); err != nil {
+	if err := s.validatePreparedBinding(declaration, token, restart); err != nil {
 		return nil, err
 	}
 	if token.State == domain.ArtifactWriterPrepared {
 		if err := s.ledger.OpenArtifactWriter(ctx, token.ID); err != nil {
 			return nil, err
 		}
-	} else if token.State != domain.ArtifactWriterSealed {
+	} else if token.State != domain.ArtifactWriterSealed && !(restart && token.State == domain.ArtifactWriterOpen) {
 		return nil, errors.New("artifact declaration writer token is not reusable")
 	}
 	identity := blob.WriterIdentity{CallID: declaration.AttemptCallID, ReservationID: declaration.ReservationID, WriterTokenID: token.ID, PinID: token.PinID}
@@ -83,6 +92,8 @@ func (s *preparedArtifactSession) Prepare(ctx context.Context, id domain.Artifac
 			return nil, errors.New("SEALED artifact writer token has no blob")
 		}
 		inner, err = s.store.ResumeStaged(ctx, artifact, identity, *token.Blob)
+	} else if restart && token.State == domain.ArtifactWriterOpen {
+		inner, err = s.store.RestartUnsealed(ctx, artifact, identity)
 	} else {
 		inner, err = s.store.Prepare(ctx, artifact, identity)
 	}
@@ -96,7 +107,7 @@ func (s *preparedArtifactSession) Prepare(ctx context.Context, id domain.Artifac
 	return wrapper, nil
 }
 
-func (s *preparedArtifactSession) validatePreparedBinding(declaration domain.ArtifactDeclarationRecord) error {
+func (s *preparedArtifactSession) validatePreparedBinding(declaration domain.ArtifactDeclarationRecord, token domain.ArtifactWriterToken, restart bool) error {
 	var foundPhysical *domain.PhysicalCall
 	for index := range s.prepared.PhysicalCalls {
 		if s.prepared.PhysicalCalls[index].ID == declaration.AttemptCallID {
@@ -104,8 +115,11 @@ func (s *preparedArtifactSession) validatePreparedBinding(declaration domain.Art
 			break
 		}
 	}
-	if foundPhysical == nil || foundPhysical.Kind != domain.PhysicalLocalArtifactWrite || foundPhysical.State != domain.PhysicalPrepared {
+	if foundPhysical == nil || foundPhysical.Kind != domain.PhysicalLocalArtifactWrite {
 		return errors.New("artifact declaration is not bound to a prepared local artifact call")
+	}
+	if foundPhysical.State != domain.PhysicalPrepared && !((token.State == domain.ArtifactWriterSealed || (restart && token.State == domain.ArtifactWriterOpen)) && (foundPhysical.State == domain.PhysicalDispatching || foundPhysical.State == domain.PhysicalSent)) {
+		return errors.New("artifact recovery requires a sealed dispatched writer")
 	}
 	for _, reservation := range s.prepared.Reservations {
 		if reservation.ID == declaration.ReservationID {

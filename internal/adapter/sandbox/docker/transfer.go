@@ -149,7 +149,7 @@ func (op *operation) runExport(ctx context.Context, artifacts []*preparedArtifac
 			volumeMount(output.DeterministicName, transferVolumeRoot, true),
 		})
 	}
-	helper, exportCall, err := op.createContainer(ctx, port.ContainerExport, factory)
+	helper, _, err := op.createContainer(ctx, port.ContainerExport, factory)
 	if err != nil {
 		return err
 	}
@@ -211,10 +211,9 @@ func (op *operation) runExport(ctx context.Context, artifacts []*preparedArtifac
 		}
 		if pending.Blob.Digest != file.Digest || pending.Blob.Size != file.Size ||
 			pending.MediaType != artifact.declaration.MediaType || pending.Role != artifact.declaration.Role ||
-			pending.LogicalPath != artifact.declaration.LogicalPath || pending.Provenance != artifact.declaration.Provenance {
+			pending.LogicalPath != artifact.declaration.LogicalPath || !reflect.DeepEqual(pending.Provenance, artifact.declaration.Provenance) {
 			return fmt.Errorf("finalized artifact %q does not match the verified export", artifact.declaration.LogicalPath)
 		}
-		pending.CallID = exportCall
 		if err := pending.Validate(); err != nil {
 			return fmt.Errorf("finalized artifact %q: %w", artifact.declaration.LogicalPath, err)
 		}

@@ -13,6 +13,28 @@
 
 When documents conflict, the newest accepted ADR and its named authoritative design win. ADR-0006 defines Slice 1 lightweight local workflow.
 
+The user revised the MVP priority on 2026-09-09: [complete a usable generation loop first](superpowers/plans/2026-09-09-mvp-generation-loop.md). Similarity ACCEPT continues to Solution/Data/Docker/Judge/Quality/Package; non-accepted business results enter human review. Mutation is deferred for redesign. This scope amendment takes precedence over mutation-first ordering in older plans and component designs.
+
+The [Solution slice](evidence/mvp-solution-foundation.md), [Data execution](evidence/mvp-data-foundation.md), [Judge answers and differential checks](evidence/mvp-judge-foundation.md), and [Quality with package format v2](evidence/mvp-quality-package-foundation.md) now feed [package assembly, atomic READY and CLI export](evidence/mvp-package-commit-foundation.md). The full MVP configuration passes real Docker and independent CLI acceptance for an ordinary C++ problem, including a process exit inside the package transaction and fresh execution from the exported ZIP. Local provider fixtures do not establish external model or Similarity service availability.
+
+The 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the in-process library amendment, pinned dependencies and provider boundary tests. Later checkpoints below complete the preview CLI and durable graph integration.
+
+The subsequent [provider configuration and durable dispatch checkpoint](evidence/slice2-durable-llm-dispatch.md) records LLM-02 and LLM-03a with independent subagent acceptance. The [private result replay checkpoint](evidence/slice2-private-llm-replay.md), [bounded JSON repair checkpoint](evidence/slice2-bounded-json-repair.md) and [private cache checkpoint](evidence/slice2-private-llm-cache.md) complete LLM-03b through LLM-05 with full gates. The [compiled application graph](evidence/slice2-compiled-graph.md) completes WF-01 with full gates. The [development log](development-log.md) records the active work order.
+
+The [strict content drafts](evidence/slice2-content-drafts.md), [active-time LLM ledger bridge](evidence/slice2-active-llm-ledger.md), [typed committed-stage input recovery](evidence/slice2-committed-generation-inputs.md) and [durable content executor](evidence/slice2-generation-executor.md) complete LLM-06a, WF-04a, WF-03a and WF-02a. The [durable Similarity evidence checkpoint](evidence/slice2-durable-similarity.md) covers physical dispatch, private replay and committed reads. [Typed Similarity execution](evidence/slice2-typed-similarity.md) binds the verified Statement chain to per-attempt evidence and a separate checkpoint; full gates pass. These components now drive the accepted preview service below.
+
+The [stage-gap recovery correction](evidence/slice2-stage-gap-recovery.md) addresses cancellation and stale predecessor identity after a stage has committed and before its successor begins.
+
+The [provider reconciliation component](evidence/slice2-provider-reconciliation.md) adds receipt-only terminal cleanup and prevents stage release before provider settlement; full gates pass.
+
+The [explicit live preview](evidence/slice2-live-preview.md) connects frozen configuration, production Bootstrap, typed graph commits, same-attempt process recovery and provider cancellation/budget cleanup. Normal tests/vet, production and supplementary race verification, Linux build and architecture/format/patch checks pass. The default remains Fake, and the preview ends at non-waivable review. Business routing and later quality/package gates remain open.
+
+The [committed Similarity route plan](evidence/slice2-similarity-route-plan.md) completes read-only decision/quota inspection and corrects omitted logical/package budget limits. Full gates pass. Its mutation-aware routing and the old [business routing plan](superpowers/plans/2026-09-09-slice2-business-routing.md) are retained as deferred research; the forward MVP uses committed decisions directly without mutation quota or authorization.
+
+The [mutation core/intent contracts](evidence/slice2-mutation-contracts.md), [artifact and result-ledger hardening](evidence/slice2-artifact-mutation-records.md), [durable candidate collection](evidence/slice2-idea-candidates.md), [atomic mutation completion and result recovery](evidence/slice2-atomic-mutation-stage.md) and [separate mutation provider contract](evidence/slice2-mutation-prompt.md) retain their completed gates. Further mutation development is paused; these checkpoints do not impose prerequisites on Solution or packaging.
+
+The [application fixture preparation change](evidence/application-fixture-preparation.md) passes complete gates and reduces repeated test setup work while preserving database isolation. The [initial typed batch publisher](evidence/slice2-idea-batch-output.md) also passes complete gates, including real process recovery and review cleanup. It does not alter the preview graph.
+
 ## ADR
 
 | ADR | Decision |

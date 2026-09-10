@@ -210,6 +210,36 @@ func TestTargetCreateOptionsBuildsDirectRunWithoutRequestInjection(t *testing.T)
 	})
 }
 
+func TestGeneratorCaseArgumentsAreTypedBoundedAndSnapshotted(t *testing.T) {
+	request := runRequest()
+	seed := ^uint64(0)
+	request.Role, request.Seed = port.RoleGenerator, &seed
+	request.Args.GeneratorCase = &port.GeneratorCaseArgs{Ordinal: 12, Kind: domain.DataCaseStress}
+	lock, identity := toolchainLock(t), planIdentity()
+	plan, err := docker.BuildRunPlan(request, lock, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := docker.RunTarget(request)
+	request.Args.GeneratorCase.Ordinal = 11
+	seed = 1
+	options, err := docker.TargetCreateOptions(workload, lock, identity, plan, "call_00000000000000000000000000000004")
+	if err != nil || !slices.Equal(options.Config.Entrypoint, []string{"/program/main", "--seed=18446744073709551615", "--case=12", "--kind=stress"}) || len(options.Config.Cmd) != 0 {
+		t.Fatalf("case argv=%+v %v", options.Config, err)
+	}
+	for _, args := range []port.GeneratorCaseArgs{{Ordinal: 0, Kind: domain.DataCaseSmall}, {Ordinal: 13, Kind: domain.DataCaseSmall}, {Ordinal: 1, Kind: "small; echo unsafe"}} {
+		request.Args.GeneratorCase = &args
+		if request.Validate() == nil {
+			t.Fatal("unbounded or arbitrary generator arguments admitted")
+		}
+	}
+	request.Args.GeneratorCase = &port.GeneratorCaseArgs{Ordinal: 1, Kind: domain.DataCaseSmall}
+	request.Role, request.Seed = port.RoleValidator, nil
+	if request.Validate() == nil {
+		t.Fatal("validator accepted generator-only arguments")
+	}
+}
+
 func TestTargetCreateOptionsUsesTheLockedGoArgvAsOneArgumentPerEntry(t *testing.T) {
 	request := compileRequest()
 	request.Language = port.LanguageGo

@@ -1,7 +1,6 @@
-// Package config contains the deliberately small, local Slice 1
-// configuration.  It is intentionally a closed schema: adding a provider,
-// worker, or arbitrary Docker option here would make the local executor look
-// like a service boundary that it is not.
+// Package config contains the closed local application configuration.
+// Provider settings alone preserve the Fake workflow. A separate optional
+// compiled workflow selector explicitly enables durable live stage assembly.
 package config
 
 import (
@@ -86,19 +85,25 @@ type Config struct {
 	Runtime      RuntimeConfig      `json:"runtime" yaml:"runtime"`
 	FakeWorkflow FakeWorkflowConfig `json:"fake_workflow" yaml:"fake_workflow"`
 	Paths        Paths              `json:"paths" yaml:"-"`
-
-	digest domain.Digest
+	LLM          *LLMConfig         `json:"llm,omitempty" yaml:"llm,omitempty"`
+	Workflow     *WorkflowConfig    `json:"workflow,omitempty" yaml:"workflow,omitempty"`
+	Similarity   *SimilarityConfig  `json:"similarity,omitempty" yaml:"similarity,omitempty"`
+	Sandbox      *SandboxConfig     `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
 }
 
 // EffectiveConfig is the redacted, canonical configuration persisted with a
 // run and printed by `config effective --redact`.
 type EffectiveConfig struct {
-	SchemaVersion string             `json:"schema_version"`
-	Storage       EffectiveStorage   `json:"storage"`
-	SQLite        EffectiveSQLite    `json:"sqlite"`
-	Runtime       EffectiveRuntime   `json:"runtime"`
-	FakeWorkflow  FakeWorkflowConfig `json:"fake_workflow"`
-	Paths         Paths              `json:"paths"`
+	SchemaVersion string               `json:"schema_version"`
+	Storage       EffectiveStorage     `json:"storage"`
+	SQLite        EffectiveSQLite      `json:"sqlite"`
+	Runtime       EffectiveRuntime     `json:"runtime"`
+	FakeWorkflow  FakeWorkflowConfig   `json:"fake_workflow"`
+	Paths         Paths                `json:"paths"`
+	LLM           *EffectiveLLM        `json:"llm,omitempty"`
+	Workflow      *WorkflowConfig      `json:"workflow,omitempty"`
+	Similarity    *EffectiveSimilarity `json:"similarity,omitempty"`
+	Sandbox       *SandboxConfig       `json:"sandbox,omitempty"`
 }
 
 type EffectiveStorage struct {
@@ -132,6 +137,10 @@ type rawConfig struct {
 	FakeWorkflow struct {
 		Scenario string `yaml:"scenario"`
 	} `yaml:"fake_workflow"`
+	LLM        *rawLLMConfig        `yaml:"llm"`
+	Workflow   *rawWorkflowConfig   `yaml:"workflow"`
+	Similarity *rawSimilarityConfig `yaml:"similarity"`
+	Sandbox    *SandboxConfig       `yaml:"sandbox"`
 }
 
 var defaults = struct {
@@ -178,11 +187,15 @@ func Decode(data []byte) (Config, error) {
 		return Config{}, field("config", fmt.Errorf("decode trailing YAML document: %w", err))
 	}
 	if err := inspectNode(&root, "", map[string]map[string]struct{}{
-		"":              {"storage": {}, "sqlite": {}, "runtime": {}, "fake_workflow": {}},
+		"":              {"storage": {}, "sqlite": {}, "runtime": {}, "fake_workflow": {}, "llm": {}, "workflow": {}, "similarity": {}, "sandbox": {}},
 		"storage":       {"state_root": {}},
 		"sqlite":        {"busy_timeout": {}, "max_readers": {}},
 		"runtime":       {"lock_poll_interval": {}, "control_poll_interval": {}, "accounting_heartbeat": {}, "cleanup_wait": {}},
 		"fake_workflow": {"scenario": {}},
+		"llm":           {"base_url": {}, "model": {}, "api_key_env": {}, "timeout": {}, "max_output_tokens": {}, "max_response_bytes": {}, "max_format_repairs": {}},
+		"workflow":      {"revision": {}, "idea_count": {}, "llm_cost_upper_bound_micro_usd": {}, "similarity_cost_upper_bound_micro_usd": {}},
+		"similarity":    {"endpoint": {}, "api_key_env": {}, "provider_identity": {}, "service_identity": {}, "timeout": {}, "max_response_bytes": {}, "limit": {}, "policy_ref": {}, "acceptance_threshold": {}, "rejection_threshold": {}, "minimum_hits": {}},
+		"sandbox":       {"engine_endpoint": {}, "toolchain_lock_path": {}, "toolchain_lock_digest": {}},
 	}); err != nil {
 		return Config{}, err
 	}
@@ -222,6 +235,19 @@ func Decode(data []byte) (Config, error) {
 	if err != nil {
 		return Config{}, field("runtime.cleanup_wait", err)
 	}
+	result.LLM, err = decodeLLM(raw.LLM)
+	if err != nil {
+		return Config{}, err
+	}
+	result.Workflow, err = decodeWorkflow(raw.Workflow)
+	if err != nil {
+		return Config{}, err
+	}
+	result.Similarity, err = decodeSimilarity(raw.Similarity)
+	if err != nil {
+		return Config{}, err
+	}
+	result.Sandbox = effectiveSandbox(raw.Sandbox)
 	if err := result.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -244,6 +270,14 @@ func parseDuration(raw string, fallback time.Duration) (time.Duration, error) {
 func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config is nil")
+	}
+	if c.LLM != nil {
+		if err := c.LLM.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := c.validateWorkflowDependencies(); err != nil {
+		return err
 	}
 	root, err := canonicalStateRoot(c.Storage.StateRoot)
 	if err != nil {
@@ -285,15 +319,19 @@ func (c *Config) Validate() error {
 		}
 	}
 	c.Paths = derivePaths(root)
-	canonical, err := c.Effective()
-	if err != nil {
-		return err
-	}
-	c.digest = domain.SumBytes(canonical)
-	return nil
+	_, err = c.Effective()
+	return err
 }
 
 func (c Config) Effective() ([]byte, error) {
+	if c.LLM != nil {
+		if err := c.LLM.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if err := c.validateWorkflowDependencies(); err != nil {
+		return nil, err
+	}
 	if c.Paths.StateRoot == "" {
 		root, err := canonicalStateRoot(c.Storage.StateRoot)
 		if err != nil {
@@ -305,7 +343,7 @@ func (c Config) Effective() ([]byte, error) {
 		Storage:      EffectiveStorage{StateRoot: c.Paths.StateRoot},
 		SQLite:       EffectiveSQLite{BusyTimeout: c.SQLite.BusyTimeout.String(), MaxReaders: c.SQLite.MaxReaders},
 		Runtime:      EffectiveRuntime{LockPollInterval: c.Runtime.LockPollInterval.String(), ControlPollInterval: c.Runtime.ControlPollInterval.String(), AccountingHeartbeat: c.Runtime.AccountingHeartbeat.String(), CleanupWait: c.Runtime.CleanupWait.String()},
-		FakeWorkflow: c.FakeWorkflow, Paths: c.Paths}
+		FakeWorkflow: c.FakeWorkflow, Paths: c.Paths, LLM: effectiveLLM(c.LLM), Workflow: effectiveWorkflow(c.Workflow), Similarity: effectiveSimilarity(c.Similarity), Sandbox: effectiveSandbox(c.Sandbox)}
 	encoded, err := json.Marshal(effective)
 	if err != nil {
 		return nil, err
@@ -323,13 +361,12 @@ func (c Config) EffectiveConfig() (EffectiveConfig, error) {
 	if err := c.Validate(); err != nil {
 		return EffectiveConfig{}, err
 	}
-	return EffectiveConfig{SchemaVersion: SchemaVersion, Storage: EffectiveStorage{StateRoot: c.Paths.StateRoot}, SQLite: EffectiveSQLite{BusyTimeout: c.SQLite.BusyTimeout.String(), MaxReaders: c.SQLite.MaxReaders}, Runtime: EffectiveRuntime{LockPollInterval: c.Runtime.LockPollInterval.String(), ControlPollInterval: c.Runtime.ControlPollInterval.String(), AccountingHeartbeat: c.Runtime.AccountingHeartbeat.String(), CleanupWait: c.Runtime.CleanupWait.String()}, FakeWorkflow: c.FakeWorkflow, Paths: c.Paths}, nil
+	return EffectiveConfig{SchemaVersion: SchemaVersion, Storage: EffectiveStorage{StateRoot: c.Paths.StateRoot}, SQLite: EffectiveSQLite{BusyTimeout: c.SQLite.BusyTimeout.String(), MaxReaders: c.SQLite.MaxReaders}, Runtime: EffectiveRuntime{LockPollInterval: c.Runtime.LockPollInterval.String(), ControlPollInterval: c.Runtime.ControlPollInterval.String(), AccountingHeartbeat: c.Runtime.AccountingHeartbeat.String(), CleanupWait: c.Runtime.CleanupWait.String()}, FakeWorkflow: c.FakeWorkflow, Paths: c.Paths, LLM: effectiveLLM(c.LLM), Workflow: effectiveWorkflow(c.Workflow), Similarity: effectiveSimilarity(c.Similarity), Sandbox: effectiveSandbox(c.Sandbox)}, nil
 }
 
 func (c Config) EffectiveDigest() domain.Digest {
-	if c.digest != "" {
-		return c.digest
-	}
+	// Public configuration fields (including the optional provider pointer)
+	// can be edited after Decode. Hash the current snapshot, never stale data.
 	encoded, err := c.Effective()
 	if err != nil {
 		return ""
@@ -450,12 +487,26 @@ func inspectNode(node *yaml.Node, path string, allowed map[string]map[string]str
 		if path != "" {
 			childPath = path + "." + name
 		}
-		if value.Kind == yaml.MappingNode {
+		if value.Tag == "!!null" {
+			return field(childPath, errors.New("null is not permitted"))
+		}
+		if value.Kind == yaml.AliasNode {
+			return field(childPath, errors.New("YAML aliases are not permitted"))
+		}
+		if _, section := allowed[childPath]; section {
 			if err := inspectNode(value, childPath, allowed); err != nil {
 				return err
 			}
-		} else if value.Kind == yaml.AliasNode {
-			return field(childPath, errors.New("YAML aliases are not permitted"))
+		} else if value.Kind != yaml.ScalarNode {
+			return field(childPath, errors.New("must be a scalar"))
+		} else if path == "llm" {
+			if err := inspectLLMScalar(name, value); err != nil {
+				return field(childPath, err)
+			}
+		} else if path == "workflow" || path == "similarity" || path == "sandbox" {
+			if err := inspectWorkflowScalar(path, name, value); err != nil {
+				return field(childPath, err)
+			}
 		}
 	}
 	return nil

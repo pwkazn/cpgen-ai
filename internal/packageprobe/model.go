@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	PackageSchemaVersion          domain.SchemaVersion = "cpgen.package/v1"
-	SamplesSchemaVersion          domain.SchemaVersion = "cpgen.samples/v1"
-	SimilarityReportSchemaVersion domain.SchemaVersion = "cpgen.similarity-report/v1"
-	PrePackageReportSchemaVersion domain.SchemaVersion = "cpgen.prepackage-report/v1"
-	ProvenanceSchemaVersion       domain.SchemaVersion = "cpgen.provenance/v1"
+	PackageSchemaVersion           domain.SchemaVersion = "cpgen.package/v1"
+	GenerationPackageSchemaVersion domain.SchemaVersion = "cpgen.package/v2"
+	SamplesSchemaVersion           domain.SchemaVersion = "cpgen.samples/v1"
+	SimilarityReportSchemaVersion  domain.SchemaVersion = "cpgen.similarity-report/v1"
+	PrePackageReportSchemaVersion  domain.SchemaVersion = "cpgen.prepackage-report/v1"
+	ProvenanceSchemaVersion        domain.SchemaVersion = "cpgen.provenance/v1"
 )
 
 type FileRole string
@@ -35,12 +36,13 @@ const (
 	RoleSimilarityReport FileRole = "similarity_report"
 	RolePrePackageReport FileRole = "prepackage_report"
 	RoleProvenance       FileRole = "provenance"
+	RoleTestPlan         FileRole = "test_plan"
 )
 
 func (r FileRole) Valid() bool {
 	switch r {
 	case RoleStatement, RoleSamples, RoleEditorial, RoleReference, RoleBrute, RoleValidator, RoleChecker,
-		RoleGenerator, RoleTestInput, RoleTestAnswer, RoleSimilarityReport, RolePrePackageReport, RoleProvenance:
+		RoleGenerator, RoleTestInput, RoleTestAnswer, RoleSimilarityReport, RolePrePackageReport, RoleProvenance, RoleTestPlan:
 		return true
 	default:
 		return false
@@ -52,6 +54,7 @@ type ProblemInfo struct {
 	Title               string `json:"title"`
 	Language            string `json:"language"`
 	ProblemSpecRevision int64  `json:"problem_spec_revision"`
+	SolutionLanguage    string `json:"solution_language,omitempty"`
 }
 
 type ProblemLimits struct {
@@ -64,6 +67,7 @@ type CheckerConfig struct {
 	Kind         string             `json:"kind"`
 	Protocol     string             `json:"protocol"`
 	ArtifactPath domain.SafeRelPath `json:"artifact_path"`
+	Comparison   string             `json:"comparison,omitempty"`
 }
 
 type TestGroup struct {
@@ -85,6 +89,7 @@ type ProblemFile struct {
 }
 
 type Problem struct {
+	SchemaVersion           domain.SchemaVersion
 	RunID                   domain.RunID
 	Problem                 ProblemInfo
 	Limits                  ProblemLimits
@@ -146,7 +151,7 @@ func (l ReadLimits) Validate() error {
 }
 
 func (p Problem) Validate(maxPathBytes int) error {
-	if err := validateManifestMetadata(p.RunID, p.Problem, p.Limits, p.Checker, p.ToolchainManifestDigest, p.TestGroups, p.Verification, p.ProvenancePath); err != nil {
+	if err := validateManifestMetadata(p.schemaVersion(), p.RunID, p.Problem, p.Limits, p.Checker, p.ToolchainManifestDigest, p.TestGroups, p.Verification, p.ProvenancePath); err != nil {
 		return err
 	}
 	paths := make([]domain.SafeRelPath, len(p.Files))
@@ -160,20 +165,27 @@ func (p Problem) Validate(maxPathBytes int) error {
 	if err := validatePackagePaths(paths, maxPathBytes); err != nil {
 		return err
 	}
-	if err := validateFileEntries(entries, p.TestGroups, p.Checker, p.Verification, p.ProvenancePath); err != nil {
+	if err := validateFileEntries(p.schemaVersion(), p.Problem, entries, p.TestGroups, p.Checker, p.Verification, p.ProvenancePath); err != nil {
 		return err
 	}
-	return validateEmbeddedDTOs(bytesByPath, p.RunID, p.Problem.ProblemSpecRevision, p.Verification.Profile)
+	return validateEmbeddedDTOs(p.schemaVersion(), bytesByPath, p.RunID, p.Problem.ProblemSpecRevision, p.Verification.Profile, p.ToolchainManifestDigest)
+}
+
+func (p Problem) schemaVersion() domain.SchemaVersion {
+	if p.SchemaVersion == "" {
+		return PackageSchemaVersion
+	}
+	return p.SchemaVersion
 }
 
 func (m Manifest) Validate(maxPathBytes int) error {
-	if m.SchemaVersion != PackageSchemaVersion {
+	if m.SchemaVersion != PackageSchemaVersion && m.SchemaVersion != GenerationPackageSchemaVersion {
 		return fmt.Errorf("package schema must be %q", PackageSchemaVersion)
 	}
 	if err := m.PackageID.Validate(); err != nil {
 		return fmt.Errorf("package ID: %w", err)
 	}
-	if err := validateManifestMetadata(m.RunID, m.Problem, m.Limits, m.Checker, m.ToolchainManifestDigest, m.TestGroups, m.Verification, m.ProvenancePath); err != nil {
+	if err := validateManifestMetadata(m.SchemaVersion, m.RunID, m.Problem, m.Limits, m.Checker, m.ToolchainManifestDigest, m.TestGroups, m.Verification, m.ProvenancePath); err != nil {
 		return err
 	}
 	paths := make([]domain.SafeRelPath, len(m.Files))
@@ -192,7 +204,7 @@ func (m Manifest) Validate(maxPathBytes int) error {
 	if err := validatePackagePaths(paths, maxPathBytes); err != nil {
 		return err
 	}
-	if err := validateFileEntries(m.Files, m.TestGroups, m.Checker, m.Verification, m.ProvenancePath); err != nil {
+	if err := validateFileEntries(m.SchemaVersion, m.Problem, m.Files, m.TestGroups, m.Checker, m.Verification, m.ProvenancePath); err != nil {
 		return err
 	}
 	computed, err := ComputePackageID(m)
@@ -221,18 +233,28 @@ func (p VerifiedProblem) Validate() error {
 	for _, file := range p.Files {
 		bytesByPath[file.Entry.Path] = file.Bytes
 	}
-	return validateEmbeddedDTOs(bytesByPath, p.Manifest.RunID, p.Manifest.Problem.ProblemSpecRevision, p.Manifest.Verification.Profile)
+	return validateEmbeddedDTOs(p.Manifest.SchemaVersion, bytesByPath, p.Manifest.RunID, p.Manifest.Problem.ProblemSpecRevision, p.Manifest.Verification.Profile, p.Manifest.ToolchainManifestDigest)
 }
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var testPathPattern = regexp.MustCompile(`^tests/([A-Za-z0-9_-]+)\.(in|ans)$`)
 
-func validateManifestMetadata(runID domain.RunID, problem ProblemInfo, limits ProblemLimits, checker CheckerConfig, toolchain domain.Digest, groups []TestGroup, verification Verification, provenance domain.SafeRelPath) error {
+func validateManifestMetadata(schema domain.SchemaVersion, runID domain.RunID, problem ProblemInfo, limits ProblemLimits, checker CheckerConfig, toolchain domain.Digest, groups []TestGroup, verification Verification, provenance domain.SafeRelPath) error {
+	if schema != PackageSchemaVersion && schema != GenerationPackageSchemaVersion {
+		return fmt.Errorf("unsupported package schema %q", schema)
+	}
 	if err := runID.Validate(); err != nil {
 		return err
 	}
-	if !slugPattern.MatchString(problem.Slug) || strings.TrimSpace(problem.Title) == "" || problem.Language != "zh-CN" || problem.ProblemSpecRevision <= 0 {
+	if !slugPattern.MatchString(problem.Slug) || strings.TrimSpace(problem.Title) == "" || problem.ProblemSpecRevision <= 0 {
 		return fmt.Errorf("invalid package problem metadata")
+	}
+	if schema == PackageSchemaVersion {
+		if problem.Language != "zh-CN" || problem.SolutionLanguage != "" || checker.Comparison != "" {
+			return fmt.Errorf("legacy package metadata changed")
+		}
+	} else if strings.TrimSpace(problem.Language) == "" || len(problem.Language) > 64 || strings.IndexFunc(problem.Language, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || (problem.SolutionLanguage != "cpp" && problem.SolutionLanguage != "go") || checker.Comparison != "exact-tokens-v1" {
+		return fmt.Errorf("invalid generation package language or comparison")
 	}
 	if limits.TimeMS <= 0 || limits.MemoryMB <= 0 || limits.OutputBytes <= 0 {
 		return fmt.Errorf("package limits must be positive")
@@ -258,12 +280,24 @@ func validateManifestMetadata(runID domain.RunID, problem ProblemInfo, limits Pr
 	return nil
 }
 
-func validateFileEntries(entries []FileEntry, groups []TestGroup, checker CheckerConfig, verification Verification, provenance domain.SafeRelPath) error {
+func validateFileEntries(schema domain.SchemaVersion, problem ProblemInfo, entries []FileEntry, groups []TestGroup, checker CheckerConfig, verification Verification, provenance domain.SafeRelPath) error {
 	required := map[domain.SafeRelPath]FileRole{
 		"statement/zh-CN.md": RoleStatement, "statement/samples.json": RoleSamples,
 		"solution/editorial.md": RoleEditorial, "solution/reference.cpp": RoleReference, "solution/brute.cpp": RoleBrute,
 		"judge/validator.cpp": RoleValidator, checker.ArtifactPath: RoleChecker, "judge/generator.cpp": RoleGenerator,
 		"reports/similarity.json": RoleSimilarityReport, verification.PrePackageReportPath: RolePrePackageReport, provenance: RoleProvenance,
+	}
+	if schema == GenerationPackageSchemaVersion {
+		delete(required, "statement/zh-CN.md")
+		required["statement/statement.md"] = RoleStatement
+		required["data/tests.json"] = RoleTestPlan
+		if problem.SolutionLanguage == "go" {
+			for _, base := range []string{"solution/reference", "solution/brute", "judge/validator", "judge/generator"} {
+				role := required[domain.SafeRelPath(base+".cpp")]
+				delete(required, domain.SafeRelPath(base+".cpp"))
+				required[domain.SafeRelPath(base+".go")] = role
+			}
+		}
 	}
 	tests := map[string]map[string]bool{}
 	seen := map[domain.SafeRelPath]struct{}{}
@@ -364,7 +398,7 @@ type Provenance struct {
 	VerticalDigest domain.Digest        `json:"vertical_digest"`
 }
 
-func validateEmbeddedDTOs(files map[domain.SafeRelPath][]byte, runID domain.RunID, revision int64, profile string) error {
+func validateEmbeddedDTOs(schema domain.SchemaVersion, files map[domain.SafeRelPath][]byte, runID domain.RunID, revision int64, profile string, toolchain domain.Digest) error {
 	var samples SamplesDocument
 	if err := decodeStrict(files["statement/samples.json"], &samples); err != nil || samples.SchemaVersion != SamplesSchemaVersion || len(samples.Samples) == 0 {
 		return fmt.Errorf("invalid samples document: %w", err)
@@ -381,9 +415,13 @@ func validateEmbeddedDTOs(files map[domain.SafeRelPath][]byte, runID domain.RunI
 	}
 	for _, match := range similarity.Matches {
 		parsed, err := url.Parse(match.URL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || match.ID == "" || match.Title == "" || match.Source == "" || match.Score < 0 || match.Score > 1 {
+		urlRequired := schema == PackageSchemaVersion || match.URL != ""
+		if (urlRequired && (err != nil || parsed.Scheme != "https" || parsed.Host == "")) || match.ID == "" || (schema == PackageSchemaVersion && match.Title == "") || match.Source == "" || match.Score < 0 || match.Score > 1 {
 			return fmt.Errorf("similarity report contains unsafe match metadata")
 		}
+	}
+	if schema == GenerationPackageSchemaVersion {
+		return validateGenerationDocuments(files, runID, revision, profile, similarity, toolchain)
 	}
 	var prepackage PrePackageQualityReport
 	if err := decodeStrict(files["reports/prepackage-quality.json"], &prepackage); err != nil || prepackage.SchemaVersion != PrePackageReportSchemaVersion || prepackage.RunID != runID || prepackage.Profile != profile || prepackage.ProblemSpecRevision != revision || prepackage.Status != "PASSED" {

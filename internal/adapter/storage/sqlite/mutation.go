@@ -110,58 +110,65 @@ func (s *Store) RecordMutation(ctx context.Context, request domain.MutationRecor
 	if err := request.Validate(); err != nil {
 		return err
 	}
+	return s.immediate(ctx, func(tx *immediateTx) error {
+		return recordMutationTx(ctx, tx, request)
+	})
+}
+
+func recordMutationTx(ctx context.Context, tx *immediateTx, request domain.MutationRecordRequest) error {
+	if err := request.Validate(); err != nil {
+		return err
+	}
 	commandDigest, _, err := digestJSON(request)
 	if err != nil {
 		return err
 	}
-	return s.immediate(ctx, func(tx *immediateTx) error {
-		var runID, stageName, scopeDigest, sourceBatchDigest, kind, intentDigest string
-		var ordinal int64
-		if err := tx.QueryRowContext(ctx, `SELECT run_id, stage_name, scope_digest, source_batch_digest, ordinal, kind, intent_digest FROM mutation_claims WHERE claim_id = ?`, request.Grant.ClaimID).Scan(&runID, &stageName, &scopeDigest, &sourceBatchDigest, &ordinal, &kind, &intentDigest); errors.Is(err, sql.ErrNoRows) {
-			return wrap(ErrNotFound, "mutation claim does not exist", err)
-		} else if err != nil {
-			return err
-		}
-		if runID != string(request.Grant.RunID) || stageName != string(request.Grant.StageName) || scopeDigest != string(request.Grant.ScopeDigest) || sourceBatchDigest != string(request.Grant.SourceBatchDigest) || ordinal != request.Grant.Ordinal || kind != string(request.Grant.Kind) || intentDigest != string(request.Grant.IntentDigest) {
-			return wrap(ErrConsistency, "mutation grant does not match immutable claim", nil)
-		}
-		grantDigest, err := mutationGrantDigest(request.Grant)
-		if err != nil {
-			return err
-		}
-		if grantDigest != request.Grant.GrantDigest {
-			return wrap(ErrConsistency, "mutation grant digest is invalid", nil)
-		}
-		var storedDigest string
-		recordErr := tx.QueryRowContext(ctx, `SELECT command_digest FROM mutation_records WHERE claim_id = ?`, request.Grant.ClaimID).Scan(&storedDigest)
-		if recordErr == nil {
-			if storedDigest != string(commandDigest) {
-				return wrap(ErrConsistency, "mutation record replay drifted", nil)
-			}
-			return nil
-		}
-		if !errors.Is(recordErr, sql.ErrNoRows) {
-			return recordErr
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_records(record_id, claim_id, run_id, stage_name, scope_digest, source_batch_digest, ordinal, kind, intent_digest, command_digest, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, request.RecordID, request.Grant.ClaimID, request.Grant.RunID, request.Grant.StageName, request.Grant.ScopeDigest, request.Grant.SourceBatchDigest, request.Grant.Ordinal, request.Grant.Kind, request.Grant.IntentDigest, commandDigest, formatTime(request.At)); err != nil {
-			return fmt.Errorf("insert mutation record: %w", err)
-		}
-		for index, item := range request.Operations {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_operations(record_id, operation_ordinal, run_id, stage_name, call_record_id, attempt_id) VALUES (?, ?, ?, ?, ?, ?)`, request.RecordID, index+1, request.Grant.RunID, request.Grant.StageName, item.CallRecordID, item.AttemptID); err != nil {
-				return fmt.Errorf("insert mutation operation: %w", err)
-			}
-		}
-		for index, item := range request.Reservations {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_reservations(record_id, reservation_ordinal, run_id, stage_name, reservation_id, call_record_id, attempt_call_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, request.RecordID, index+1, request.Grant.RunID, request.Grant.StageName, item.ReservationID, item.CallRecordID, item.AttemptCallID); err != nil {
-				return fmt.Errorf("insert mutation reservation: %w", err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_output_occurrences(record_id, run_id, stage_name, occurrence_id) VALUES (?, ?, ?, ?)`, request.RecordID, request.Grant.RunID, request.Grant.StageName, request.OutputOccurrenceID); err != nil {
-			return fmt.Errorf("insert mutation output: %w", err)
+	var runID, stageName, scopeDigest, sourceBatchDigest, kind, intentDigest string
+	var ordinal, limit int64
+	if err := tx.QueryRowContext(ctx, `SELECT run_id, stage_name, scope_digest, source_batch_digest, ordinal, kind, intent_digest, limit_snapshot FROM mutation_claims WHERE claim_id = ?`, request.Grant.ClaimID).Scan(&runID, &stageName, &scopeDigest, &sourceBatchDigest, &ordinal, &kind, &intentDigest, &limit); errors.Is(err, sql.ErrNoRows) {
+		return wrap(ErrNotFound, "mutation claim does not exist", err)
+	} else if err != nil {
+		return err
+	}
+	if runID != string(request.Grant.RunID) || stageName != string(request.Grant.StageName) || scopeDigest != string(request.Grant.ScopeDigest) || sourceBatchDigest != string(request.Grant.SourceBatchDigest) || ordinal != request.Grant.Ordinal || kind != string(request.Grant.Kind) || intentDigest != string(request.Grant.IntentDigest) || limit != request.Grant.LimitSnapshot {
+		return wrap(ErrConsistency, "mutation grant does not match immutable claim", nil)
+	}
+	grantDigest, err := mutationGrantDigest(request.Grant)
+	if err != nil {
+		return err
+	}
+	if grantDigest != request.Grant.GrantDigest {
+		return wrap(ErrConsistency, "mutation grant digest is invalid", nil)
+	}
+	var storedDigest string
+	recordErr := tx.QueryRowContext(ctx, `SELECT command_digest FROM mutation_records WHERE claim_id = ?`, request.Grant.ClaimID).Scan(&storedDigest)
+	if recordErr == nil {
+		if storedDigest != string(commandDigest) {
+			return wrap(ErrConsistency, "mutation record replay drifted", nil)
 		}
 		return nil
-	})
+	}
+	if !errors.Is(recordErr, sql.ErrNoRows) {
+		return recordErr
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_records(record_id, claim_id, run_id, stage_name, scope_digest, source_batch_digest, ordinal, kind, intent_digest, command_digest, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, request.RecordID, request.Grant.ClaimID, request.Grant.RunID, request.Grant.StageName, request.Grant.ScopeDigest, request.Grant.SourceBatchDigest, request.Grant.Ordinal, request.Grant.Kind, request.Grant.IntentDigest, commandDigest, formatTime(request.At)); err != nil {
+		return fmt.Errorf("insert mutation record: %w", err)
+	}
+	for index, item := range request.Operations {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_operations(record_id, operation_ordinal, run_id, stage_name, call_record_id, attempt_id) VALUES (?, ?, ?, ?, ?, ?)`, request.RecordID, index+1, request.Grant.RunID, request.Grant.StageName, item.CallRecordID, item.AttemptID); err != nil {
+			return fmt.Errorf("insert mutation operation: %w", err)
+		}
+	}
+	for index, item := range request.Reservations {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_reservations(record_id, reservation_ordinal, run_id, stage_name, reservation_id, call_record_id, attempt_call_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, request.RecordID, index+1, request.Grant.RunID, request.Grant.StageName, item.ReservationID, item.CallRecordID, item.AttemptCallID); err != nil {
+			return fmt.Errorf("insert mutation reservation: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_record_output_occurrences(record_id, run_id, stage_name, occurrence_id) VALUES (?, ?, ?, ?)`, request.RecordID, request.Grant.RunID, request.Grant.StageName, request.OutputOccurrenceID); err != nil {
+		return fmt.Errorf("insert mutation output: %w", err)
+	}
+	return nil
 }
 
 func mutationGrantDigest(grant domain.MutationGrant) (domain.Digest, error) {

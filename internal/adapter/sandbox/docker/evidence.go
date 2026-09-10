@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"cpgen/internal/domain"
@@ -109,7 +110,8 @@ func (r *Runner) prepareProcessArtifacts(ctx context.Context, op *operation, pre
 		SchemaVersion: domain.DomainSchemaVersion, Producer: ExecutionProtocolDockerDirectV2, InputDigest: &inputDigest,
 	}
 	prepare := func(declaration port.ArtifactDeclaration) (*preparedArtifact, error) {
-		if err := declaration.Validate(); err != nil {
+		declaration, err := r.scopedArtifactDeclaration(declaration)
+		if err != nil {
 			return nil, err
 		}
 		writer, err := r.artifacts.Prepare(ctx, declaration)
@@ -144,6 +146,13 @@ func (r *Runner) prepareProcessArtifacts(ctx context.Context, op *operation, pre
 	return &processArtifacts{stdout: stdout, stderr: stderr, execution: execution}, nil
 }
 
+func (r *Runner) scopedArtifactDeclaration(declaration port.ArtifactDeclaration) (port.ArtifactDeclaration, error) {
+	if r.artifactPrefix != "" {
+		declaration.LogicalPath = domain.SafeRelPath(string(r.artifactPrefix) + "/" + string(declaration.LogicalPath))
+	}
+	return declaration, declaration.Validate()
+}
+
 func (a *processArtifacts) limiters() (*outputLimiter, *outputLimiter, error) {
 	stdout, err := newOutputLimiter(a.stdout.writer, a.stdout.declaration.MaxBytes, func() {})
 	if err != nil {
@@ -160,10 +169,10 @@ func (a *processArtifacts) finalize(ctx context.Context, record ExecutionRecord)
 	if err := record.Validate(); err != nil {
 		return err
 	}
-	if _, err := finalizePreparedArtifact(ctx, a.stdout, record.TargetCallID); err != nil {
+	if _, err := finalizePreparedArtifact(ctx, a.stdout); err != nil {
 		return err
 	}
-	if _, err := finalizePreparedArtifact(ctx, a.stderr, record.TargetCallID); err != nil {
+	if _, err := finalizePreparedArtifact(ctx, a.stderr); err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(record)
@@ -176,19 +185,20 @@ func (a *processArtifacts) finalize(ctx context.Context, record ExecutionRecord)
 	if _, err := a.execution.writer.Write(encoded); err != nil {
 		return fmt.Errorf("write execution record: %w", err)
 	}
-	_, err = finalizePreparedArtifact(ctx, a.execution, record.TargetCallID)
+	_, err = finalizePreparedArtifact(ctx, a.execution)
 	return err
 }
 
-func finalizePreparedArtifact(ctx context.Context, artifact *preparedArtifact, callID domain.AttemptCallID) (*domain.PendingArtifact, error) {
+func finalizePreparedArtifact(ctx context.Context, artifact *preparedArtifact) (*domain.PendingArtifact, error) {
 	pending, err := artifact.writer.Finalize(ctx)
 	if err != nil {
 		return nil, err
 	}
 	artifact.finalized = true
-	pending.CallID = callID
+	// Artifact calls belong to their writer/reservation. The target container
+	// identity is recorded separately in ExecutionRecord and CallTrace.
 	if pending.MediaType != artifact.declaration.MediaType || pending.Role != artifact.declaration.Role ||
-		pending.LogicalPath != artifact.declaration.LogicalPath || pending.Provenance != artifact.declaration.Provenance {
+		pending.LogicalPath != artifact.declaration.LogicalPath || !reflect.DeepEqual(pending.Provenance, artifact.declaration.Provenance) {
 		return nil, fmt.Errorf("finalized artifact %q does not match its declaration", artifact.declaration.LogicalPath)
 	}
 	if err := pending.Validate(); err != nil {

@@ -15,6 +15,22 @@ import (
 // are selectors only; callers cannot supply an arbitrary graph.
 const Slice2WorkflowRevision = "slice2.idea.statement.similarity.v1"
 
+// Slice2CheckpointWorkflowRevision retains committed similarity evidence before
+// the unfinished quality/package boundary. The previous revision is immutable.
+const Slice2CheckpointWorkflowRevision = "slice2.idea.statement.similarity.checkpoint.v1"
+
+// SolutionWorkflowRevision extends the accepted evidence boundary toward
+// verified solutions. It remains an unfinished slice and cannot produce READY.
+const SolutionWorkflowRevision = "slice3.idea.statement.similarity.solution.checkpoint.v1"
+
+// MVPWorkflowRevision freezes the forward loop under development. It is not
+// a public config selector until Data/Judge/Quality/Package are implemented.
+const MVPWorkflowRevision = "mvp.idea.statement.similarity.solution.data.judge.package.v1"
+
+func HasSolutionStages(revision string) bool {
+	return revision == SolutionWorkflowRevision || revision == MVPWorkflowRevision
+}
+
 type Slice2Pipeline struct {
 	idea            Step[domain.GenerationRequestSnapshotV1, domain.IdeaBatch]
 	statement       Step[domain.StatementInput, domain.ProblemSpec]
@@ -266,7 +282,7 @@ func (p Slice2Pipeline) Run(ctx context.Context, view domain.RunView, snapshot d
 	if err := snapshot.Validate(); err != nil {
 		return empty, err
 	}
-	if snapshot.RequestDigest != view.RequestDigest() || snapshot.SchemaVersion != string(view.SchemaVersion()) {
+	if snapshot.RequestDigest != view.RequestDigest() || snapshot.Request.SchemaVersion != string(view.SchemaVersion()) {
 		return empty, errors.New("slice2 snapshot is not bound to RunView")
 	}
 	ideaResult, err := p.idea.Run(ctx, view, snapshot)
@@ -399,6 +415,9 @@ func logicalSimilarityID(view domain.RunView, problem domain.ProblemSpec) string
 // work against a stale stage. A full Run call is intentionally only valid at
 // the first stage; resumed callers use the typed stage methods below.
 func validateSlice2View(view domain.RunView, expected domain.StageName) error {
+	if view.SchemaVersion() != domain.RequestSchemaV1 {
+		return errors.New("slice2 run view request schema mismatch")
+	}
 	if view.WorkflowRevision() != Slice2WorkflowRevision {
 		return errors.New("slice2 run view workflow revision mismatch")
 	}
@@ -412,6 +431,9 @@ func validateSlice2View(view domain.RunView, expected domain.StageName) error {
 }
 
 func validateSlice2RevalidationView(view domain.RunView, expected domain.StageName) error {
+	if view.SchemaVersion() != domain.RequestSchemaV1 {
+		return errors.New("slice2 run view request schema mismatch")
+	}
 	if view.WorkflowRevision() != Slice2WorkflowRevision {
 		return errors.New("slice2 run view workflow revision mismatch")
 	}
@@ -439,7 +461,7 @@ func (p Slice2Pipeline) RunIdea(ctx context.Context, view domain.RunView, input 
 	if err := input.Validate(); err != nil {
 		return empty, err
 	}
-	if input.RequestDigest != view.RequestDigest() || input.SchemaVersion != string(view.SchemaVersion()) {
+	if input.RequestDigest != view.RequestDigest() || input.Request.SchemaVersion != string(view.SchemaVersion()) {
 		return empty, errors.New("idea input is not bound to RunView")
 	}
 	if input.Request.BudgetLimits != view.Budget().Limits {

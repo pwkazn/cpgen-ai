@@ -524,6 +524,35 @@ func TestGenerationRequestModeAndTagPolicy(t *testing.T) {
 	}
 }
 
+func TestGenerationRandomRequestRoundTripsThroughRunAdmission(t *testing.T) {
+	r := testGenerationRequest()
+	r.Mode, r.Brief, r.Seed = RequestModeRandom, "", nil
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := r.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := r.ToRunRequest()
+	if err != nil {
+		t.Fatalf("valid random request cannot enter run persistence: %v", err)
+	}
+	restored, err := GenerationRequestFromRunRequest(run)
+	if err != nil || !reflect.DeepEqual(restored, r) {
+		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+	again, err := restored.CanonicalJSON()
+	if err != nil || !bytes.Equal(raw, again) {
+		t.Fatal("random admission rewrote submitted content")
+	}
+	for _, invalid := range []RunRequest{func() RunRequest { v := run; v.Mode = RequestModeManual; return v }(), func() RunRequest { v := run; v.SchemaVersion = "cpgen.request/v2"; return v }(), func() RunRequest { v := run; v.Mode = "generate"; return v }()} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("blank brief accepted outside admitted random/v1: %+v", invalid)
+		}
+	}
+}
+
 func TestSnapshotDigestEqualsUnmodifiedSubmittedRequest(t *testing.T) {
 	r := testGenerationRequest()
 	r.Brief = " Cafe\u0301 "

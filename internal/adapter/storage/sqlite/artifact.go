@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -28,7 +29,7 @@ func attachPendingOccurrences(ctx context.Context, tx *immediateTx, command doma
 			}
 		}
 	}
-	return nil
+	return finishAttachedLLMResponseCalls(ctx, tx, command)
 }
 
 func attachNewWriteOccurrence(ctx context.Context, tx *immediateTx, command domain.FinishStageCommand, pending domain.PendingArtifact) error {
@@ -72,7 +73,7 @@ func attachNewWriteOccurrence(ctx context.Context, tx *immediateTx, command doma
 		declarationID, pending.WriterTokenID, pending.ReservationID, pending.PinID, pending.Blob.Digest, pending.Blob.Size, pending.Role, pending.LogicalPath, pending.MediaType, payload, domain.SumBytes(payload), formatTime(command.At)); err != nil {
 		return fmt.Errorf("insert new artifact occurrence: %w", err)
 	}
-	if err := settleArtifactReservation(ctx, tx, pending.ReservationID, physicalNewBytes, command.At); err != nil {
+	if err := settleArtifactReservation(ctx, tx, pending.ReservationID, pending.WriterTokenID, physicalNewBytes, command.At); err != nil {
 		return err
 	}
 	return movePinToReleasable(ctx, tx, pending.PinID, command.At)
@@ -107,16 +108,44 @@ func attachCacheReuseOccurrence(ctx context.Context, tx *immediateTx, command do
 	return nil
 }
 
-func settleArtifactReservation(ctx context.Context, tx *immediateTx, id domain.ReservationID, value int64, at time.Time) error {
+func settleArtifactReservation(ctx context.Context, tx *immediateTx, id domain.ReservationID, writer domain.ArtifactWriterTokenID, value int64, at time.Time) error {
 	if value < 0 {
 		return errors.New("artifact physical bytes must not be negative")
 	}
 	var runID, dimension, state string
 	var upper int64
-	if err := tx.QueryRowContext(ctx, `SELECT run_id, dimension, upper_bound, state FROM budget_reservations WHERE reservation_id = ?`, id).Scan(&runID, &dimension, &upper, &state); err != nil {
+	var settled sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT run_id, dimension, upper_bound, state, settled_value FROM budget_reservations WHERE reservation_id = ?`, id).Scan(&runID, &dimension, &upper, &state, &settled); err != nil {
 		return err
 	}
-	if dimension != string(domain.BudgetArtifactPhysicalNewBytes) || state != string(domain.ReservationReserved) || value > upper {
+	if dimension != string(domain.BudgetArtifactPhysicalNewBytes) || value > upper {
+		return wrap(ErrConsistency, "artifact reservation is not available for settlement", nil)
+	}
+	if state == string(domain.ReservationSettled) {
+		// A caller may finish its local output operation before committing the
+		// stage. Reuse only an exact successful receipt bound to this finalized
+		// writer and authoritative physical byte count; never charge it twice.
+		var matches bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM artifact_writer_tokens token
+			JOIN artifact_declarations decl ON decl.declaration_id=token.declaration_id
+			JOIN blob_pins pin ON pin.pin_id=token.pin_id
+			JOIN physical_calls physical ON physical.attempt_call_id=decl.attempt_call_id AND physical.call_record_id=decl.call_record_id
+			JOIN call_records call ON call.call_record_id=physical.call_record_id
+			WHERE token.writer_token_id=? AND decl.reservation_id=? AND token.state='FINALIZED' AND pin.state='ACTIVE'
+			AND pin.physical_new_bytes=? AND physical.physical_kind='LOCAL_ARTIFACT_WRITE'
+			AND physical.state='COMPLETED' AND physical.outcome_kind='SUCCESS' AND physical.response_digest=token.final_digest
+			AND call.state='TERMINAL'
+		)`, writer, id, value).Scan(&matches)
+		if err != nil {
+			return err
+		}
+		if !settled.Valid || settled.Int64 != value || !matches {
+			return wrap(ErrConsistency, "settled artifact receipt differs from finalized output", nil)
+		}
+		return nil
+	}
+	if state != string(domain.ReservationReserved) {
 		return wrap(ErrConsistency, "artifact reservation is not available for settlement", nil)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE budget_accounts SET reserved_value = reserved_value - ?, consumed_value = consumed_value + ?, account_version = account_version + 1 WHERE run_id = ? AND dimension = ? AND reserved_value >= ? AND ? <= limit_value - consumed_value`, upper, value, runID, dimension, upper, value)
@@ -155,6 +184,9 @@ func movePinToReleasable(ctx context.Context, tx *immediateTx, id domain.BlobPin
 }
 
 func releasePendingArtifactTokens(ctx context.Context, tx *immediateTx, runID domain.RunID, stage domain.StageName, attempt domain.AttemptID, at time.Time) error {
+	if err := requireTerminalPrivateResponseParents(ctx, tx, runID, stage, attempt); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT token.writer_token_id FROM artifact_writer_tokens token JOIN artifact_declarations decl ON decl.declaration_id = token.declaration_id WHERE token.run_id = ? AND decl.stage_name = ? AND decl.attempt_id = ? AND token.state IN ('PREPARED','OPEN','SEALED','FINALIZED') AND NOT (token.state = 'FINALIZED' AND EXISTS (SELECT 1 FROM artifact_occurrences occurrence WHERE occurrence.writer_token_id = token.writer_token_id))`, runID, stage, attempt)
 	if err != nil {
 		return err
@@ -192,7 +224,7 @@ func releasePendingArtifactTokens(ctx context.Context, tx *immediateTx, runID do
 			}
 		}
 	}
-	return nil
+	return finishDiscardedLLMResponses(ctx, tx, runID, stage, attempt, at)
 }
 
 // CreateArtifactDeclaration persists the immutable binding between a local
@@ -211,7 +243,21 @@ func (s *Store) CreateArtifactDeclaration(ctx context.Context, declaration domai
 		return errors.New("artifact declaration clock returned zero time")
 	}
 	return s.immediate(ctx, func(tx *immediateTx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO artifact_declarations(
+		stored, err := readArtifactDeclaration(ctx, tx, declaration.ID)
+		if err == nil {
+			storedPayload, marshalErr := json.Marshal(stored.Provenance)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if stored.RunID != declaration.RunID || stored.StageName != declaration.StageName || stored.AttemptID != declaration.AttemptID || stored.CallRecordID != declaration.CallRecordID || stored.AttemptCallID != declaration.AttemptCallID || stored.ReservationID != declaration.ReservationID || stored.ReservationSubkey != declaration.ReservationSubkey || stored.MediaType != declaration.MediaType || stored.Role != declaration.Role || stored.LogicalPath != declaration.LogicalPath || stored.MaxBytes != declaration.MaxBytes || !bytes.Equal(storedPayload, payload) {
+				return wrap(ErrConsistency, "artifact declaration identity was reused with different content", nil)
+			}
+			return nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO artifact_declarations(
 			declaration_id, run_id, stage_name, attempt_id, call_record_id, attempt_call_id, physical_kind,
 			reservation_id, reservation_dimension, reservation_subkey, role, media_type, logical_path, max_bytes,
 			provenance_json, declaration_digest, created_at)

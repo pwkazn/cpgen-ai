@@ -2,11 +2,25 @@
 
 Status: Current under ADR-0006
 
+Real Idea/Statement assembly uses strict versioned content drafts and local domain binding. Models do not calculate domain hashes or choose request/resource identities. Built-in historical prompt versions remain available for receipt validation; the new draft prompts and their one-call format repairs have separate exact schema/template references. See [content draft evidence](../evidence/slice2-content-drafts.md).
+
 ## 1. Boundary
 
 Model calls are ordinary stage-local effects through MeteredLLM. The coordinator and stage code depend on a provider-neutral interface; provider fields remain inside adapters. Model output is always a candidate that deterministic validation may reject.
 
 The model port cannot access SQLite, artifact directories, Docker, run locks, or unrestricted logs.
+
+The 2026-09-08 ADR-0006 amendment selects LangChainGo `v0.1.14`, confined to `internal/agent`, with `port.MeteredLLM` unchanged. `NewLangChain` shares the existing HTTP adapter's endpoint, canonical identity, prompt/schema registry, error classification and strict response validation. Contract tests compare both adapters before application wiring changes.
+
+The library's HTTP doer is restricted to one physical request per invocation. CPGen restores the admitted top_p value (dropped by this library version), selects max_tokens explicitly, rejects other semantic request rewrites, and forwards only canonical CPGen headers/body to the policy-controlled transport. Ambient OpenAI environment configuration cannot override the configured provider or add organization headers. SDK error strings and lossy response DTOs are never persisted; the original capped bytes determine validation and missing-usage accounting. Explicit non-completion finish reasons, including length and content_filter, reject even syntactically valid JSON.
+
+The standalone adapter does not provide durable metering by itself. The LLM-03 dispatch checkpoint adds `port.PhysicalLLM` and `application.LLMCalls`: planning validates the same request and endpoint policies without I/O; one `GeneratePhysical` call performs at most one HTTP exchange and returns accounting even on failure. CallCoordinator reserves the complete retry plan, supplies physical identities, settles each response and returns the database CallTrace. Logical response usage sums settled reservations across attempts. Missing usage and cost without verified pricing are charged at their explicit reservation ceilings; this is conservative accounting, not a provider invoice.
+
+Only a newly issued grant from a PREPARED row authorizes a send. Resuming DISPATCHING/SENT without a sealed receipt resolves to UNKNOWN without another HTTP request. `NewReplayableLLMCalls` reserves private response artifact slots before provider dispatch and publishes a request-bound receipt through the existing Blob writer/pin protocol. Recovery finishes SEALED publication, verifies bytes and revalidates the strict schema before restoring provider accounting. A sealed publication failure keeps its reservations for local reconciliation. The executor must hold the run lock and shared artifact-maintenance lock. The ledger-only constructor retains `ErrLLMReplayUnavailable`; neither constructor recreates completed responses with another paid request.
+
+Private receipt bodies contain structured output, allowlisted metadata and accounting; credentials and prompt variables are excluded. The returned `RawBlob` is pending occurrence evidence for atomic stage commit, not a package export. Unused slots release byte reservations; finalized receipts remain pinned until attachment. Local publication receives its own artifact grant and reaches a terminal producing call atomically with stage attachment and byte settlement. Rejected-stage cleanup charges already-published physical bytes and releases the private pin. Full verification status is tracked in [replay evidence](../evidence/slice2-private-llm-replay.md) and the later cache checkpoint. Bounded JSON repair and private cache provenance are implemented as described below. Explicit preview, Solution and full MVP selectors now wire real stages through the CLI; omitted selection retains Fake behavior. See [MVP acceptance](../evidence/mvp-package-commit-foundation.md).
+
+After a dispatch attempt, receipt settlement uses a bounded five-second context that survives caller cancellation. SQLite accepts a stale receipt version only when the run advanced exactly once due to a matching pending cancel, and the same stage/attempt remains RUNNING; other version conflicts remain errors. Planning, authorization and retry waits retain the caller's cancellation context. Retry waits honor the later of persisted backoff and the adapter's Retry-After value, capped separately at one minute.
 
 ## 2. Request and response contracts
 
@@ -60,7 +74,11 @@ A provider claiming schema success does not bypass local validation. Invalid out
 
 ## 5. Stage-local repair and retry
 
-A stage policy may make a bounded repair call when validation errors are safe to disclose. The repair request includes only canonical error codes and the minimum invalid fragment needed for correction.
+`application.StructuredLLMCalls` permits at most one configured JSON-format repair. Before the original call it binds the complete repair policy, compiled prompt version and implementation revision into the provider policy digest, and preflights both prompt/schema bindings. Recovery with a different allowance or prompt is rejected. Configuration defaults to zero repairs and accepts only zero or one.
+
+The repair request includes the original task variables and canonical local error codes. It never includes rejected model output, provider-controlled field paths or fragments. Eligible errors are JSON syntax, duplicate/unknown fields, schema version and typed decoding failures. Domain-semantic rejection, HTTP/envelope failures, truncation, oversized output, invalid UTF-8 and missing local validators do not trigger format repair.
+
+Eligible validation failures are persisted as bounded `cpgen.llm-validation/v1` private receipts containing code-only diagnostics and accounting. `ReadFormatRepair` verifies the receipt against the exact terminal physical failure before it can authorize repair planning. The one repair has its own deterministic logical identity and full durable transport plan; it cannot recursively repair its own rejection. `StructuredLLMResult` returns each call's trace and artifact separately and sums settled usage across both calls. The final response keeps the producing call's trace and usage. A successful stage must attach both validation evidence and repaired output in its atomic occurrence commit.
 
 Transient transport failures may be retried within the same foreground stage attempt and budget. Every physical call gets a CallTrace record while the logical idempotency key stays stable. Retry stops on success, blocking, review, permanent failure, cancellation, or budget exhaustion.
 
@@ -93,6 +111,10 @@ A cache hit must:
 - pass the same local schema and domain validation.
 
 Private prompts or responses are never placed in a shared cache partition.
+
+`application.StructuredLLMCache` implements a private, same-run response cache. It normalizes logical call identity while retaining the original provider request policy and all semantic inputs. Only stage-committed successful output can be published; a repaired success is verified through its original rejection and deterministic repair call. The source is the terminal local artifact-producing call, and its private receipt retains the exact original provider call.
+
+`CacheService.ReuseValidated` performs the owning adapter's strict validation before creating current-call provenance. A hit returns a zero-usage response with a CACHE_HIT trace and `PendingCacheReuse`, with no new writer token or provider physical calls. Later attempts in the same run are allowed by migration 21; cross-run sources remain forbidden. Cache keys are immutable and private entries have no configured TTL in this bridge. Missing/corrupt files, invalidated entries and changed policies cannot silently provide an output. The application factory still needs to compose this bridge with generation and stage commits.
 
 ## 8. Provenance and privacy
 

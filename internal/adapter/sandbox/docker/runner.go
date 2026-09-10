@@ -86,10 +86,13 @@ type RunnerOptions struct {
 	EngineIdentityDigest domain.Digest
 	Blobs                port.VerifiedBlobReader
 	Artifacts            port.MeteredArtifactSink
-	Watchdog             WatchdogController
-	Limits               ControlLimits
-	Lifecycle            port.SandboxLifecycleRecorder
-	CallLedger           port.CallLedger
+	// ArtifactPrefix isolates files from multiple operations in one stage.
+	// Empty preserves the historical probe's paths.
+	ArtifactPrefix domain.SafeRelPath
+	Watchdog       WatchdogController
+	Limits         ControlLimits
+	Lifecycle      port.SandboxLifecycleRecorder
+	CallLedger     port.CallLedger
 	// Clock supplies the persisted operation time. Replays use the timestamp
 	// already sealed in SandboxExecution; new executions use this clock rather
 	// than a synthetic far-future timestamp.
@@ -103,6 +106,7 @@ type Runner struct {
 	engineIdentity domain.Digest
 	blobs          port.VerifiedBlobReader
 	artifacts      port.MeteredArtifactSink
+	artifactPrefix domain.SafeRelPath
 	watchdog       WatchdogController
 	limits         ControlLimits
 	lifecycle      port.SandboxLifecycleRecorder
@@ -132,6 +136,11 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	if err := options.Limits.Validate(); err != nil {
 		return nil, err
 	}
+	if options.ArtifactPrefix != "" {
+		if err := options.ArtifactPrefix.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	if options.Clock == nil {
 		options.Clock = clock.Real{}
 	}
@@ -146,7 +155,8 @@ func NewRunner(options RunnerOptions) (*Runner, error) {
 	return &Runner{
 		engine: options.Engine, config: options.Config, lock: lockCopy, engineIdentity: options.EngineIdentityDigest,
 		blobs: options.Blobs, artifacts: options.Artifacts, watchdog: options.Watchdog, limits: options.Limits,
-		lifecycle: options.Lifecycle, callLedger: options.CallLedger, clock: options.Clock,
+		artifactPrefix: options.ArtifactPrefix,
+		lifecycle:      options.Lifecycle, callLedger: options.CallLedger, clock: options.Clock,
 	}, nil
 }
 
@@ -1006,6 +1016,10 @@ func (r *Runner) prepareCompileArtifact(ctx context.Context, op *operation, requ
 		MediaType: "application/vnd.cpgen.executable", Role: domain.ArtifactProgram, LogicalPath: "program/main", MaxBytes: request.Limits.OutputBytes,
 		Provenance: domain.ProvenanceCandidate{SchemaVersion: domain.DomainSchemaVersion, Producer: ExecutionProtocolDockerDirectV2, InputDigest: &digest},
 	}
+	declaration, err := r.scopedArtifactDeclaration(declaration)
+	if err != nil {
+		return nil, err
+	}
 	writer, err := r.artifacts.Prepare(ctx, declaration)
 	if err != nil {
 		return nil, err
@@ -1022,6 +1036,10 @@ func (r *Runner) prepareRunArtifacts(ctx context.Context, op *operation, request
 		declaration := port.ArtifactDeclaration{
 			MediaType: "application/octet-stream", Role: domain.ArtifactOutput, LogicalPath: output.Path, MaxBytes: output.MaxBytes,
 			Provenance: domain.ProvenanceCandidate{SchemaVersion: domain.DomainSchemaVersion, Producer: ExecutionProtocolDockerDirectV2, InputDigest: &request.Program.Digest},
+		}
+		declaration, err := r.scopedArtifactDeclaration(declaration)
+		if err != nil {
+			return nil, 0, err
 		}
 		writer, err := r.artifacts.Prepare(ctx, declaration)
 		if err != nil {

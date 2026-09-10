@@ -198,7 +198,16 @@ func (r CompileRequest) Validate() error {
 	return r.ExpectedOutput.Validate()
 }
 
-type RoleArgs struct{}
+type RoleArgs struct {
+	GeneratorCase *GeneratorCaseArgs `json:"generator_case,omitempty"`
+}
+
+// GeneratorCaseArgs extends the seed-only legacy protocol with two closed
+// application-owned arguments. It never admits arbitrary argv or shell text.
+type GeneratorCaseArgs struct {
+	Ordinal int                 `json:"ordinal"`
+	Kind    domain.DataCaseKind `json:"kind"`
+}
 
 type InputMount struct {
 	Path domain.SafeRelPath `json:"path"`
@@ -281,6 +290,11 @@ func (r RunRequest) Validate() error {
 	}
 	if r.Role != RoleGenerator && r.Seed != nil {
 		return fmt.Errorf("seed is only valid for generator runs")
+	}
+	if args := r.Args.GeneratorCase; args != nil {
+		if r.Role != RoleGenerator || args.Ordinal < 1 || args.Ordinal > 12 || (args.Kind != domain.DataCaseSmall && args.Kind != domain.DataCaseBoundary && args.Kind != domain.DataCaseStress) {
+			return fmt.Errorf("generator case arguments require a bounded ordinal and supported kind")
+		}
 	}
 	return nil
 }

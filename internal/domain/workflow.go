@@ -247,8 +247,13 @@ type RunRequest struct {
 }
 
 func (v RunRequest) Validate() error {
-	if strings.TrimSpace(v.SchemaVersion) == "" || strings.TrimSpace(v.Mode) == "" || strings.TrimSpace(v.Brief) == "" || strings.TrimSpace(v.Language) == "" || strings.TrimSpace(v.Difficulty) == "" || strings.TrimSpace(v.SolutionLanguage) == "" || strings.TrimSpace(v.VerificationProfile) == "" {
+	if strings.TrimSpace(v.SchemaVersion) == "" || strings.TrimSpace(v.Mode) == "" || strings.TrimSpace(v.Language) == "" || strings.TrimSpace(v.Difficulty) == "" || strings.TrimSpace(v.SolutionLanguage) == "" || strings.TrimSpace(v.VerificationProfile) == "" {
 		return errors.New("run request has an empty required field")
+	}
+	// The admitted random/v1 mode can have no submitted hint. Preserve those
+	// exact bytes through persistence instead of inserting a synthetic brief.
+	if strings.TrimSpace(v.Brief) == "" && !(v.SchemaVersion == RequestSchemaV1 && v.Mode == RequestModeRandom) {
+		return errors.New("run request brief is required outside random/v1 mode")
 	}
 	if v.TimeLimitMilliseconds <= 0 || v.MemoryLimitMegabytes <= 0 {
 		return errors.New("run request limits must be positive")
@@ -397,25 +402,34 @@ func canonicalJSON(value []byte) error {
 }
 
 type RunSnapshot struct {
-	RunID                     RunID         `json:"run_id"`
-	State                     RunState      `json:"state"`
-	Version                   int64         `json:"version"`
-	WorkflowRevision          string        `json:"workflow_revision"`
-	SchemaVersion             SchemaVersion `json:"schema_version"`
-	RequestDigest             Digest        `json:"request_digest"`
-	ConfigDigest              Digest        `json:"config_digest"`
-	WorkflowDigest            Digest        `json:"workflow_digest"`
-	CurrentStage              StageName     `json:"current_stage"`
-	CurrentStageOrdinal       int           `json:"current_stage_ordinal"`
-	CreatedAt                 time.Time     `json:"created_at"`
-	UpdatedAt                 time.Time     `json:"updated_at"`
-	ActiveElapsed             time.Duration `json:"active_elapsed"`
-	ActiveStartedAt           *time.Time    `json:"active_started_at,omitempty"`
-	LastAccountingHeartbeatAt *time.Time    `json:"last_accounting_heartbeat_at,omitempty"`
-	CancelSummary             string        `json:"cancel_summary,omitempty"`
+	RunID                     RunID                 `json:"run_id"`
+	State                     RunState              `json:"state"`
+	Version                   int64                 `json:"version"`
+	WorkflowRevision          string                `json:"workflow_revision"`
+	SchemaVersion             SchemaVersion         `json:"schema_version"`
+	RequestDigest             Digest                `json:"request_digest"`
+	ConfigDigest              Digest                `json:"config_digest"`
+	WorkflowDigest            Digest                `json:"workflow_digest"`
+	CurrentStage              StageName             `json:"current_stage"`
+	CurrentStageOrdinal       int                   `json:"current_stage_ordinal"`
+	CreatedAt                 time.Time             `json:"created_at"`
+	UpdatedAt                 time.Time             `json:"updated_at"`
+	ActiveElapsed             time.Duration         `json:"active_elapsed"`
+	ActiveStartedAt           *time.Time            `json:"active_started_at,omitempty"`
+	LastAccountingHeartbeatAt *time.Time            `json:"last_accounting_heartbeat_at,omitempty"`
+	CancelSummary             string                `json:"cancel_summary,omitempty"`
+	FinalPackageOccurrenceID  *ArtifactOccurrenceID `json:"final_package_occurrence_id,omitempty"`
 }
 
 func (v RunSnapshot) Validate() error {
+	if (v.State == RunReady) != (v.FinalPackageOccurrenceID != nil) {
+		return errors.New("READY requires its verified package occurrence")
+	}
+	if v.FinalPackageOccurrenceID != nil {
+		if err := v.FinalPackageOccurrenceID.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := v.RunID.Validate(); err != nil {
 		return err
 	}

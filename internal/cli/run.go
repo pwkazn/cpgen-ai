@@ -243,6 +243,8 @@ func runRunCommand(args []string, app *application.Application, stdout, stderr i
 		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, 0)
 	case "events":
 		return runEvents(args[1:], app, stdout, stderr)
+	case "export":
+		return runPackageExport(args[1:], app, stdout, stderr)
 	case "resume":
 		if len(args) != 2 {
 			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run resume RUN_ID"))
@@ -716,7 +718,8 @@ Usage:
   cpgen --config PATH config validate|effective --redact
   cpgen --config PATH generate --request PATH
   cpgen --config PATH run list|show|events|resume|cancel
+  cpgen --config PATH run export RUN_ID --output PATH
   cpgen --config PATH review show|revise|retry|waive|reject
 
-The Slice 1 stateful executor is local and foreground-only.`)
+The stateful executor is local and foreground-only.`)
 }

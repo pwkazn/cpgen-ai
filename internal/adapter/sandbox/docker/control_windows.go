@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/Microsoft/go-winio"
@@ -290,13 +291,32 @@ func detachWatchdogCommand(command *exec.Cmd) {
 
 func cleanupWatchdogControl(directory, controlPath string) error {
 	var failures []error
-	if err := os.Remove(controlPath); err != nil && !os.IsNotExist(err) {
+	if err := removeWatchdogControlPath(controlPath); err != nil {
 		failures = append(failures, err)
 	}
-	if err := os.Remove(directory); err != nil && !os.IsNotExist(err) {
+	if err := removeWatchdogControlPath(directory); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
+}
+
+// Both the owner and detached service clean up after CLEANED/EOF. Windows can
+// report ACCESS_DENIED for an object another process has already marked for
+// deletion until its final handle closes. Retry only these transient errors,
+// for a bounded interval, and keep every persistent failure visible. No other
+// paths or directory contents are removed.
+func removeWatchdogControlPath(path string) error {
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		if (!errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION)) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 var watchdogControlMu sync.Mutex

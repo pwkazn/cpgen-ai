@@ -6,6 +6,8 @@ Status: Current under ADR-0006
 
 This design defines the concrete typed CPGen pipeline, durable stage boundaries, stage-local retry, manual resume, review, cancellation, and downstream invalidation. The coordinator is a foreground CLI component for one host.
 
+The 2026-09-09 user scope revision prioritizes the forward MVP: committed valid Similarity ACCEPT continues to Solution/Data/Docker/Judge/Quality/Package; non-accepted business results stop for human review. Automatic mutation and solution-content repair loops are deferred. Existing transport retry, JSON-format repair, dependency recovery and explicit human review remain separate. Follow the [current delivery plan](../superpowers/plans/2026-09-09-mvp-generation-loop.md); older mutation sequencing below is not an MVP prerequisite.
+
 ## 2. Identities and revisions
 
 A run persists:
@@ -35,6 +37,10 @@ The Phase 1 constructor assembles these versioned stages:
 8. Package
 
 Slice 1 uses a deterministic Fake constructor with a small subset of stages to prove persistence and restart. Later slices replace or extend that constructor with real stage implementations.
+
+The ADR-0006 library amendment permits LangGraphGo `v0.8.5` assembly in `internal/application` only. The graph has one active node at a time; graph types do not enter stage contracts. CPGen owns conditional repair bounds, review and stop decisions. Default graph node retries, checkpoints, callbacks and tracing remain disabled. Every node must propagate commit errors and check cancellation before external work. Successful library termination at an unfinished slice boundary is not READY.
+
+Graph progress is reconstructed from the compatible compiled workflow revision, stage/input/config/schema bindings and verified stored outputs. SQLite remains authoritative; no graph.json store or unchecked automatic checkpoint callback is used. `compiledRunGraph` now drives the existing Slice 1 lifecycle through fixed application nodes; it checks complete persisted stage selectors before mutation and advances only after the checked stage commit. WF-03a verifies committed Idea/Statement input recovery and WF-02a composes their durable typed execution in application components. The remaining WF-02 through WF-05 work connects these components, durable Similarity and recovery/control to the run service. The CLI continues to select Fake stages until those integration tests pass.
 
 A stage is parameterized by concrete Go input and output values. It receives an immutable RunView, a copied input, and a narrow set of metered ports. It never receives persistence, the process lock, raw Docker, unrestricted Blob writing, or mutable coordinator state.
 

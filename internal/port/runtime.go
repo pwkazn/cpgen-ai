@@ -9,6 +9,7 @@ import (
 type RuntimeStore interface {
 	CreateRun(context.Context, domain.CreateRunRequest) (domain.RunSnapshot, error)
 	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)
+	StageSequence(context.Context, domain.RunID) ([]domain.StageName, error)
 	ListRuns(context.Context, domain.RunFilter) ([]domain.RunSummary, error)
 	Events(context.Context, domain.RunID, int64) ([]domain.RunEvent, error)
 	BeginStage(context.Context, domain.BeginStageCommand) (domain.StageAttempt, error)

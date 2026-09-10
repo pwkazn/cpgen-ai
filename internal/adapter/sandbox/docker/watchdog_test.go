@@ -119,7 +119,11 @@ func TestWatchdogInProcessControllerCanRearmImmediately(t *testing.T) {
 
 func TestWatchdogControlACLAndDetachedChildOwnerEOF(t *testing.T) {
 	base := t.TempDir()
-	listener, _, directory, err := prepareWatchdogControl(base, "0123456789abcdef0123456789abcdef")
+	nonce, err := randomControlNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, _, directory, err := prepareWatchdogControl(base, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,7 +18,7 @@ import (
 	"cpgen/internal/workflow"
 )
 
-// Application is the complete local Slice 1 composition. There is no
+// Application is the local foreground workflow composition. There is no
 // server, worker pool, or background workflow daemon hidden behind it.
 type Application struct {
 	Runs        RunService
@@ -57,8 +57,9 @@ type StorageFactory func(context.Context, config.Config) (StorageResources, erro
 func RegisterStorageFactory(StorageFactory) {}
 
 // Bootstrap creates the private local application from a validated config.
-// The pipeline is deliberately Fake-only until Task 10's explicit Docker
-// harness is selected by the caller.
+// The default remains the Fake pipeline. An explicit compiled workflow selector
+// composes durable generation and, for the Solution revision, a pinned local
+// Docker engine with detached cleanup. Each revision keeps its own boundary.
 func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 	if ctx == nil {
 		return nil, errors.New("bootstrap context is nil")
@@ -122,21 +123,26 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap artifact maintenance: %w", err)
 	}
-	pipeline, err := workflow.NewSlice1Pipeline(
-		fake.NewPrepareStep(workflow.PrepareCapabilities{}),
-		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
-		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap fake pipeline: %w", err)
-	}
 	reconciler := &localSandboxReconciler{runtime: resources.SandboxRuntime}
-	runs, err := NewRunService(RunServiceConfig{
-		Runtime: resources.Runtime, Reviews: resources.Reviews, Locks: locks, Pipeline: pipeline,
-		Clock: clock.Real{}, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat,
-		Reconciler: reconciler, EffectiveConfigJSON: effectiveJSON,
-		EffectiveConfigDigest: cfg.EffectiveDigest(), Scenario: cfg.FakeWorkflow.Scenario,
-	})
+	var runs *LocalRunService
+	if cfg.Workflow != nil {
+		runs, err = bootstrapSlice2RunService(ctx, cfg, store, blobs, locks, reconciler, effectiveJSON)
+	} else {
+		pipeline, pipelineErr := workflow.NewSlice1Pipeline(
+			fake.NewPrepareStep(workflow.PrepareCapabilities{}),
+			fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
+			fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+		)
+		if pipelineErr != nil {
+			return nil, fmt.Errorf("bootstrap fake pipeline: %w", pipelineErr)
+		}
+		runs, err = NewRunService(RunServiceConfig{
+			Runtime: resources.Runtime, Reviews: resources.Reviews, Locks: locks, Pipeline: pipeline,
+			Clock: clock.Real{}, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat,
+			Reconciler: reconciler, EffectiveConfigJSON: effectiveJSON,
+			EffectiveConfigDigest: cfg.EffectiveDigest(), Scenario: cfg.FakeWorkflow.Scenario,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap run service: %w", err)
 	}

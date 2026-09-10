@@ -6,6 +6,8 @@ Status: Current
 
 CPGen turns a structured competitive-programming request into an auditable problem package. Generative models propose candidates; deterministic code, compilation, execution, judging, similarity policy, and package gates decide whether those candidates are acceptable.
 
+Current MVP scope (user revision, 2026-09-09): a valid Similarity ACCEPT continues through Solution, Data, Docker/Judge, Quality and Package; non-accepted business results enter human review. Automatic Idea mutation and business repair are deferred for redesign after the usable forward loop. Existing transport recovery, bounded JSON-format repair and deterministic package/quality gates remain required. The [current delivery plan](docs/superpowers/plans/2026-09-09-mvp-generation-loop.md) supersedes mutation-first ordering in older documents.
+
 Phase 1 is a modular local application:
 
 - one host and one private project workspace;
@@ -59,6 +61,8 @@ The coordinator owns:
 - stopping at BLOCKED, NEEDS_REVIEW, READY, FAILED, or CANCELLED.
 
 It does not implement generic scheduling, replay, timers, or distributed ownership.
+
+Under the 2026-09-08 ADR-0006 amendment, LangGraphGo is permitted only for fixed serial graph assembly in `internal/application`. SQLite remains authoritative: a node must check the stage/evidence commit before advancing, and recovery reads the existing projection and verified occurrences. Automatic graph checkpoints and a parallel graph.json store are excluded. LangChainGo stays in `internal/agent`; provider and scheduler library types never enter domain, port or stage code. The current CLI still uses the Slice 1 Fake constructor while durable integration is completed.
 
 ### 4.3 Typed stages
 
@@ -213,7 +217,7 @@ Slice 1 proves:
 - watchdog death, deadline, and exact-resource reconciliation;
 - no external I/O during SQLite write transactions.
 
-Release gates include full Go tests, vet, race tests, Go 1.24 compatibility, Linux cross-build, Docker-required safety tests where available, and the architecture consistency script.
+Release gates include full Go tests, vet, race tests, Go 1.25.0 compatibility, Linux cross-build, Docker-required safety tests where available, and the architecture consistency script. go.mod pins LangChainGo v0.1.14 and LangGraphGo v0.8.5; CI tests the minimum Go version and the current stable toolchain.
 
 ## 15. Delivery slices
 

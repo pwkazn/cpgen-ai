@@ -1,11 +1,8 @@
 package packageprobe
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"slices"
 	"sort"
 
@@ -19,7 +16,7 @@ func NewManifest(problem Problem, entries []FileEntry) (Manifest, error) {
 	files := slices.Clone(entries)
 	sort.Slice(files, func(left, right int) bool { return files[left].Path < files[right].Path })
 	manifest := Manifest{
-		SchemaVersion: PackageSchemaVersion, RunID: problem.RunID, Problem: problem.Problem,
+		SchemaVersion: problem.schemaVersion(), RunID: problem.RunID, Problem: problem.Problem,
 		Limits: problem.Limits, Checker: problem.Checker, ToolchainManifestDigest: problem.ToolchainManifestDigest,
 		TestGroups: cloneGroups(problem.TestGroups), Files: files, Verification: problem.Verification, ProvenancePath: problem.ProvenancePath,
 	}
@@ -70,16 +67,5 @@ func DecodeManifest(data []byte) (Manifest, error) {
 }
 
 func decodeStrict(data []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return fmt.Errorf("JSON contains a trailing value")
-	} else if !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
+	return domain.DecodeStrictJSON(data, destination)
 }

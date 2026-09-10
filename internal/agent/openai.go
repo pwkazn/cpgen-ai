@@ -29,6 +29,7 @@ const (
 	defaultMaxAttempts     = 2
 	defaultRetryBaseDelay  = 100 * time.Millisecond
 	defaultRetryMaxDelay   = 2 * time.Second
+	maxProviderRetryAfter  = time.Minute
 	defaultCompletionPath  = "/chat/completions"
 	maxProviderModelLength = 256
 )
@@ -283,6 +284,9 @@ type OpenAICompatible struct {
 	config   Config
 	endpoint *url.URL
 	client   *http.Client
+	// exchange is adapter-local; all request identity, policy, retry and strict
+	// response validation remain shared across the two protocol implementations.
+	exchange func(context.Context, []byte, string, string) ([]byte, int, string, time.Duration, bool, error)
 }
 
 type policyTransport struct {
@@ -436,68 +440,16 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 	if a == nil || a.client == nil || a.endpoint == nil {
 		return empty, &Error{Code: ErrorConfiguration}
 	}
-	if err := request.Validate(); err != nil {
-		return empty, &Error{Code: ErrorConfiguration}
-	}
 	if err := ctx.Err(); err != nil {
 		return empty, &Error{Code: ErrorCanceled, UnwrapCause: err}
 	}
-	if err := a.checkEndpointPolicy(); err != nil {
+	definition, err := a.generationDefinition(request)
+	if err != nil {
 		return empty, err
-	}
-	var definition port.PromptVersion
-	var resolveErr error
-	if a.config.PromptResolver != nil {
-		definition, resolveErr = a.config.PromptResolver(request)
-		if resolveErr == nil {
-			resolveErr = definition.Validate()
-			if resolveErr == nil && (definition.Step != request.Prompt.Step || definition.Version != request.Prompt.Version) {
-				resolveErr = errors.New("prompt definition differs")
-			}
-			if resolveErr == nil && definition.InputSchemaVersion != request.Prompt.InputSchemaVersion {
-				resolveErr = errors.New("prompt input schema differs")
-			}
-			definitionPolicy := definition.MigrationPolicy
-			if definitionPolicy == "" {
-				definitionPolicy = "NONE"
-			}
-			requestPolicy := request.Prompt.MigrationPolicy
-			if requestPolicy == "" {
-				requestPolicy = "NONE"
-			}
-			if resolveErr == nil && definitionPolicy != requestPolicy {
-				resolveErr = errors.New("prompt migration policy differs")
-			}
-			if resolveErr == nil && definition.OutputSchema != request.Schema {
-				resolveErr = errors.New("prompt output schema differs")
-			}
-			templateDigest := request.Prompt.TemplateDigest
-			if templateDigest == "" {
-				templateDigest = request.Prompt.Digest
-			}
-			if resolveErr == nil && definition.TemplateDigest != templateDigest {
-				resolveErr = errors.New("prompt template digest differs")
-			}
-		}
-	} else {
-		definition, resolveErr = a.config.PromptRegistry.ResolveRequest(request)
-	}
-	if resolveErr != nil {
-		return empty, &Error{Code: ErrorConfiguration}
-	}
-	if a.config.SchemaRegistry == nil {
-		return empty, &Error{Code: ErrorConfiguration}
 	}
 	validator := func(raw []byte) error {
 		return a.config.SchemaRegistry.Validate(raw, request.Schema, request.MaxOutput.Bytes)
 	}
-	if !validLogicalOperationKey(request.LogicalIdempotencyKey) || request.ProviderPolicyDigest == "" || request.PrivacyClassification == "" {
-		return empty, &Error{Code: ErrorConfiguration}
-	}
-	if err := request.ProviderPolicyDigest.Validate(); err != nil {
-		return empty, &Error{Code: ErrorConfiguration}
-	}
-
 	body, requestDigest, err := a.requestBody(request, definition)
 	if err != nil {
 		return empty, &Error{Code: ErrorConfiguration}
@@ -585,6 +537,68 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 	return empty, &Error{Code: ErrorTransport}
 }
 
+// generationDefinition preserves the request, endpoint, prompt and schema
+// admission checks for both standalone and durable single-request entry points.
+func (a *OpenAICompatible) generationDefinition(request port.GenerateRequest) (port.PromptVersion, error) {
+	if err := request.Validate(); err != nil {
+		return port.PromptVersion{}, &Error{Code: ErrorConfiguration}
+	}
+	if err := a.checkEndpointPolicy(); err != nil {
+		return port.PromptVersion{}, err
+	}
+	var definition port.PromptVersion
+	var resolveErr error
+	if a.config.PromptResolver != nil {
+		definition, resolveErr = a.config.PromptResolver(request)
+		if resolveErr == nil {
+			resolveErr = definition.Validate()
+			if resolveErr == nil && (definition.Step != request.Prompt.Step || definition.Version != request.Prompt.Version) {
+				resolveErr = errors.New("prompt definition differs")
+			}
+			if resolveErr == nil && definition.InputSchemaVersion != request.Prompt.InputSchemaVersion {
+				resolveErr = errors.New("prompt input schema differs")
+			}
+			definitionPolicy := definition.MigrationPolicy
+			if definitionPolicy == "" {
+				definitionPolicy = "NONE"
+			}
+			requestPolicy := request.Prompt.MigrationPolicy
+			if requestPolicy == "" {
+				requestPolicy = "NONE"
+			}
+			if resolveErr == nil && definitionPolicy != requestPolicy {
+				resolveErr = errors.New("prompt migration policy differs")
+			}
+			if resolveErr == nil && definition.OutputSchema != request.Schema {
+				resolveErr = errors.New("prompt output schema differs")
+			}
+			templateDigest := request.Prompt.TemplateDigest
+			if templateDigest == "" {
+				templateDigest = request.Prompt.Digest
+			}
+			if resolveErr == nil && definition.TemplateDigest != templateDigest {
+				resolveErr = errors.New("prompt template digest differs")
+			}
+		}
+	} else {
+		definition, resolveErr = a.config.PromptRegistry.ResolveRequest(request)
+	}
+	if resolveErr != nil {
+		return port.PromptVersion{}, &Error{Code: ErrorConfiguration}
+	}
+	if a.config.SchemaRegistry == nil || a.config.SchemaRegistry.ValidateBinding(request.Schema) != nil {
+		return port.PromptVersion{}, &Error{Code: ErrorConfiguration}
+	}
+	if !validLogicalOperationKey(request.LogicalIdempotencyKey) || request.ProviderPolicyDigest == "" || request.PrivacyClassification == "" {
+		return port.PromptVersion{}, &Error{Code: ErrorConfiguration}
+	}
+	if err := request.ProviderPolicyDigest.Validate(); err != nil {
+		return port.PromptVersion{}, &Error{Code: ErrorConfiguration}
+	}
+
+	return definition, nil
+}
+
 func (a *OpenAICompatible) requestBody(request port.GenerateRequest, definition port.PromptVersion) ([]byte, domain.Digest, error) {
 	variables, err := canonicalJSON(request.Variables)
 	if err != nil {
@@ -662,6 +676,13 @@ func canonicalPromptRef(ref port.PromptRef) port.PromptRef {
 }
 
 func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, idempotencyKey string) ([]byte, int, string, time.Duration, bool, error) {
+	if a.exchange != nil {
+		return a.exchange(ctx, body, apiKey, idempotencyKey)
+	}
+	return a.doHTTPRequest(ctx, body, apiKey, idempotencyKey)
+}
+
+func (a *OpenAICompatible) doHTTPRequest(ctx context.Context, body []byte, apiKey, idempotencyKey string) ([]byte, int, string, time.Duration, bool, error) {
 	requestContext, cancel := context.WithTimeout(ctx, a.config.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestContext, http.MethodPost, a.endpoint.String(), bytes.NewReader(body))
@@ -672,6 +693,9 @@ func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, i
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Idempotency-Key", idempotencyKey)
+	// net/http can otherwise replay an idempotent POST on a reused broken
+	// connection. Only the explicit metered attempt loop may initiate retries.
+	req.GetBody = nil
 	resp, err := a.client.Do(req)
 	if err != nil {
 		if errors.Is(err, ErrConfirmedNoSend) {
@@ -728,6 +752,11 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 	if err := decoder.Decode(&decoded); err != nil || len(decoded.Choices) == 0 {
 		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
 	}
+	// Syntactically valid content may still be incomplete or filtered. Never
+	// turn a provider's explicit non-completion into an accepted candidate.
+	if reason := decoded.Choices[0].FinishReason; reason != "" && reason != "stop" {
+		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
+	}
 	content := bytes.TrimSpace(decoded.Choices[0].Message.Content)
 	if len(content) == 0 {
 		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
@@ -742,10 +771,10 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 	}
 	structured := []byte(contentText)
 	if err := port.ValidateStructuredOutput(structured, request.Schema.SchemaVersion, request.MaxOutput.Bytes); err != nil {
-		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
+		return port.GenerateResponse{}, structuredProtocolError(err)
 	}
 	if err := validator(structured); err != nil {
-		return port.GenerateResponse{}, &Error{Code: ErrorProtocol}
+		return port.GenerateResponse{}, structuredProtocolError(err)
 	}
 	usage, usageSource := conservativeUsage(decoded.Usage, len(requestBody), request.MaxOutput.Tokens)
 	responseDigest := domain.SumBytes(structured)
@@ -782,6 +811,16 @@ func (a *OpenAICompatible) decodeResponse(raw, requestBody []byte, request port.
 	return response, nil
 }
 
+func structuredProtocolError(err error) error {
+	var failure *port.StructuredOutputError
+	result := &Error{Code: ErrorProtocol}
+	if errors.As(err, &failure) && failure.Code.Valid() {
+		// Parser paths may contain provider-owned keys. Preserve only the code.
+		result.UnwrapCause = &port.StructuredOutputError{Code: failure.Code}
+	}
+	return result
+}
+
 func conservativeUsage(usage *providerUsage, requestBytes int, maxOutput int64) (port.Usage, string) {
 	if usage != nil && usage.PromptTokens != nil && usage.CompletionTokens != nil && *usage.PromptTokens >= 0 && *usage.CompletionTokens >= 0 {
 		return port.Usage{InputTokens: *usage.PromptTokens, OutputTokens: *usage.CompletionTokens}, "provider_verified"
@@ -802,7 +841,7 @@ func conservativeUsage(usage *providerUsage, requestBytes int, maxOutput int64) 
 // usage object on a successful response is treated as verified.
 func usageForAttempt(raw []byte, status, requestBytes int, maxOutput int64) attemptUsage {
 	var usage *providerUsage
-	if status >= http.StatusOK && status < http.StatusMultipleChoices && len(raw) > 0 && json.Valid(raw) && !hasDuplicateJSONFields(raw) {
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && len(raw) > 0 && utf8.Valid(raw) && json.Valid(raw) && !hasDuplicateJSONFields(raw) {
 		var envelope struct {
 			Usage *providerUsage `json:"usage,omitempty"`
 		}
@@ -933,12 +972,12 @@ func parseRetryAfter(raw string, now time.Time) time.Duration {
 		return 0
 	}
 	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds >= 0 {
-		if seconds > int64(defaultRetryMaxDelay/time.Second) {
-			return defaultRetryMaxDelay
+		if seconds > int64(maxProviderRetryAfter/time.Second) {
+			return maxProviderRetryAfter
 		}
 		delay := time.Duration(seconds) * time.Second
-		if delay > defaultRetryMaxDelay {
-			return defaultRetryMaxDelay
+		if delay > maxProviderRetryAfter {
+			return maxProviderRetryAfter
 		}
 		return delay
 	}
@@ -947,8 +986,8 @@ func parseRetryAfter(raw string, now time.Time) time.Duration {
 		if delay < 0 {
 			return 0
 		}
-		if delay > defaultRetryMaxDelay {
-			return defaultRetryMaxDelay
+		if delay > maxProviderRetryAfter {
+			return maxProviderRetryAfter
 		}
 		return delay
 	}

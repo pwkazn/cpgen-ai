@@ -13,6 +13,8 @@ Status: Current under ADR-0006
 
 Ordinary tests are offline, deterministic, and parallel-safe. Time, randomness, IDs, and provider responses are injected.
 
+Application business fixtures may copy an empty fully migrated database created once by the real migrator in the current test process. Each copy uses an exclusive new path and still passes through normal OpenWithClock validation. Runs, transactions, connections and mutable rows are never shared. Database reopening, production Bootstrap and SQLite migration/upgrade tests continue to use their original real initialization paths. Verify control-state isolation and refusal to overwrite existing databases when changing this fixture helper.
+
 ## 2. Slice 0 evidence retained
 
 Completed Slice 0 tests remain release evidence for:

@@ -99,6 +99,8 @@ Expiry, policy mismatch, corrupt Blob evidence, or a newer incompatible capabili
 
 ## 8. Decision rules
 
+Current MVP routing amendment (2026-09-09): only a verified ACCEPT may continue to Solution. REJECT, the review band and a completed business decision with insufficient evidence enter NEEDS_REVIEW, without mutation or automatic evidence recheck. Provider/transport failures still use the existing typed BLOCKED/recovery path. The following decision values remain evidence classifications; they are not mutation dispatch authorization. See the [forward-loop plan](../superpowers/plans/2026-09-09-mvp-generation-loop.md).
+
 A versioned policy maps evidence to:
 
 - ACCEPT below the acceptance threshold with required coverage;

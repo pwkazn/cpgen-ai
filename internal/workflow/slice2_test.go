@@ -17,6 +17,20 @@ type slice2IdeaStep struct {
 	batch domain.IdeaBatch
 }
 
+func TestSlice2UsesPersistedRequestSchemaForRunView(t *testing.T) {
+	snapshot, pipeline, view := newSlice2Fixture(t, false)
+	persisted, err := domain.NewRunView(domain.RunViewData{
+		RunID: view.RunID(), AttemptID: view.AttemptID(), WorkflowRevision: view.WorkflowRevision(), SchemaVersion: domain.RequestSchemaV1,
+		RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest(), WorkflowDigest: view.WorkflowDigest(), State: view.State(), CurrentStage: view.CurrentStage(), Version: view.Version(), Budget: view.Budget(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := pipeline.RunIdea(context.Background(), persisted, snapshot); err != nil || result.Value == nil {
+		t.Fatalf("persisted request schema rejected: result=%+v error=%v", result, err)
+	}
+}
+
 func (slice2IdeaStep) Name() domain.StageName { return "idea" }
 
 func (slice2IdeaStep) PolicyDigest() domain.Digest {
@@ -138,7 +152,7 @@ func newSlice2Fixture(t *testing.T, blocked bool) (domain.GenerationRequestSnaps
 	view, err := domain.NewRunView(domain.RunViewData{
 		RunID:            domain.RunID("run_0123456789abcdef0123456789abcdef"),
 		WorkflowRevision: workflow.Slice2WorkflowRevision,
-		SchemaVersion:    domain.SchemaVersion(snapshot.SchemaVersion),
+		SchemaVersion:    domain.RequestSchemaV1,
 		RequestDigest:    snapshot.RequestDigest,
 		ConfigDigest:     domain.SumBytes([]byte("config")),
 		WorkflowDigest:   domain.SumBytes([]byte(workflow.Slice2WorkflowRevision)),

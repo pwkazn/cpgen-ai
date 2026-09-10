@@ -2,6 +2,8 @@
 
 Status: Current under ADR-0006
 
+Implementation note (2026-09-09): `cpgen.package/v2` now provides the generation package model below through the existing `packageprobe` builder/reader. Its layout uses `statement/statement.md`, `solution/{reference,brute}.{cpp,go}`, `judge/{generator,validator}.{cpp,go}`, the fixed `judge/checker.cpp`, `data/tests.json`, paired `tests/*.in` / `tests/*.ans`, and package-safe reports. V1 retains its historical probe layout. The dedicated M26 package ledger, current-evidence assembly, canonical ZIP export and atomic READY transaction are implemented and pass real Docker plus independent CLI crash/export/revalidation acceptance. Format validation is supplemented by same-run committed Quality proof. See [package acceptance evidence](../evidence/mvp-package-commit-foundation.md).
+
 ## 1. Principles
 
 A package is a deterministic immutable tree assembled from verified run-scoped artifact occurrences. Stage code cannot copy arbitrary workspace files. All paths, roles, media types, digests, provenance, and gate results are declared and audited.

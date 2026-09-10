@@ -79,6 +79,21 @@ func (r *SchemaValidatorRegistry) Register(definition SchemaValidatorDefinition)
 	return nil
 }
 
+// ValidateBinding admits an exact schema reference before paid dispatch. It
+// performs no decoding and never invokes a validator with a fabricated output.
+func (r *SchemaValidatorRegistry) ValidateBinding(schema OutputSchemaRef) error {
+	if r == nil || schema.Validate() != nil {
+		return &StructuredOutputError{Code: StructuredOutputSchemaUnbound}
+	}
+	r.mu.RLock()
+	definition, exists := r.entries[schema.Digest]
+	r.mu.RUnlock()
+	if !exists || definition.Schema != schema || definition.Validate == nil {
+		return &StructuredOutputError{Code: StructuredOutputSchemaUnbound}
+	}
+	return nil
+}
+
 // Validate first checks the generic response boundary, then dispatches to the
 // validator selected by the exact schema digest. Non-typed callback failures
 // are sanitized before leaving this package.
@@ -103,7 +118,7 @@ func (r *SchemaValidatorRegistry) Validate(raw []byte, schema OutputSchemaRef, m
 		if errors.As(err, &typed) {
 			return err
 		}
-		return &StructuredOutputError{Code: StructuredOutputTypeMismatch}
+		return &StructuredOutputError{Code: StructuredOutputDomainInvalid}
 	}
 	return nil
 }

@@ -32,7 +32,8 @@ var historicalMigrationOneSQL []byte
 // TestMigrationSimultaneousFirstOpenIsIdempotent catches reading migration
 // history before writer serialization and applying DDL from a stale snapshot.
 func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	path := filepath.Join(t.TempDir(), "workflow.db")
 	preflight, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
 	if err != nil {
@@ -47,6 +48,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	}
 	arrived := make(chan struct{}, 2)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorkers := func() { releaseOnce.Do(func() { close(release) }) }
 	hook := func() {
 		arrived <- struct{}{}
 		<-release
@@ -54,12 +57,26 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	results := make(chan error, 2)
 	stores := make(chan *Store, 2)
 	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		releaseWorkers()
+		workers.Wait()
+		close(stores)
+		for store := range stores {
+			if err := store.Close(); err != nil {
+				t.Errorf("close simultaneous store: %v", err)
+			}
+		}
+	})
 	workers.Add(2)
 	for range 2 {
 		go func() {
 			defer workers.Done()
 			store, err := Open(ctx, Config{
-				Path: path, BusyTimeout: 5 * time.Second, MaxReaders: 2,
+				// This verifies migration serialization, not a five-second
+				// execution deadline. Instrumented table rebuilds can exceed
+				// that deadline while the other opener holds the writer lock.
+				Path: path, BusyTimeout: 30 * time.Second, MaxReaders: 2,
 				migrationStartHook: hook,
 			})
 			if store != nil {
@@ -72,21 +89,16 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 		select {
 		case <-arrived:
 		case <-time.After(10 * time.Second):
-			close(release)
 			t.Fatal("simultaneous open did not reach migration boundary")
 		}
 	}
-	close(release)
+	releaseWorkers()
 	workers.Wait()
 	close(results)
-	close(stores)
 	for err := range results {
 		if err != nil {
 			t.Fatalf("simultaneous Open: %v", err)
 		}
-	}
-	for store := range stores {
-		defer store.Close()
 	}
 	check, err := Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1})
 	if err != nil {
@@ -97,8 +109,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	if err := check.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration history: %v", err)
 	}
-	if count != 18 {
-		t.Fatalf("migration rows = %d, want 18", count)
+	if count != 26 {
+		t.Fatalf("migration rows = %d, want 26", count)
 	}
 }
 
@@ -178,7 +190,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 	if err != nil {
 		t.Fatalf("upgrade historical M4 database: %v", err)
 	}
-	assertMigrationHistory(t, store, 18)
+	assertMigrationHistory(t, store, 26)
 	for _, name := range []string{"call_records_terminal_matrix_insert", "physical_calls_terminal_parent_update"} {
 		var count int
 		if err := store.db.QueryRowContext(ctx,
@@ -197,7 +209,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 		t.Fatalf("reopen upgraded M4 database: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 18)
+	assertMigrationHistory(t, reopened, 26)
 }
 
 // TestMigrationFreshOpenAppliesForwardWorkflowMigration catches fresh stores
@@ -210,7 +222,7 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 18)
+	assertMigrationHistory(t, store, 26)
 	assertForwardWorkflowSchema(t, store)
 }
 
@@ -319,7 +331,7 @@ func TestMigrationUpgradesM14VolumeWithoutPhysicalCallID(t *testing.T) {
 		t.Fatalf("upgrade M14 database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 18)
+	assertMigrationHistory(t, store, 26)
 	var phase string
 	var gotDigest sql.NullString
 	if err := store.db.QueryRowContext(ctx, `SELECT phase, physical_call_id FROM sandbox_resources WHERE resource_id=?`, resourceID).Scan(&phase, &gotDigest); err != nil {
@@ -425,8 +437,9 @@ func TestMigrationNineBackfillsPhysicalBytesByHistoricalPinIdentity(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	store := &Store{db: db, config: Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1}, clock: clock.Real{}}
-	if err := store.migrate(ctx); err != nil {
+	// This deliberately partial fixture isolates M9's owner backfill. Full
+	// upgrades with valid writer/occurrence references are exercised separately.
+	if _, err := db.ExecContext(ctx, migrations[8].sql); err != nil {
 		_ = db.Close()
 		t.Fatalf("upgrade historical M8 database: %v", err)
 	}
@@ -510,7 +523,7 @@ func TestMigrationTenBindsAndProtectsPublicationOwner(t *testing.T) {
 			t.Fatalf("seed pin %s: %v", pin, err)
 		}
 	}
-	for _, migration := range migrations[8:] {
+	for _, migration := range migrations[8:10] {
 		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
 			_ = db.Close()
 			t.Fatalf("apply migration %d: %v", migration.version, err)
@@ -555,7 +568,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("upgrade historical database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 18)
+	assertMigrationHistory(t, store, 26)
 	assertForwardWorkflowSchema(t, store)
 
 	for table, want := range fixture.rowCounts {
@@ -650,7 +663,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("idempotent reopen after upgrade: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 18)
+	assertMigrationHistory(t, reopened, 26)
 }
 
 // TestCreateRunReplaysLegacyCreateAfterHistoricalMigration catches rejecting
@@ -802,7 +815,7 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertMigrationHistory(t, store, 18)
+	assertMigrationHistory(t, store, 26)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -815,8 +828,8 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 18 {
-		t.Fatalf("migration count = %d, want 18", count)
+	if count != 26 {
+		t.Fatalf("migration count = %d, want 26", count)
 	}
 }
 

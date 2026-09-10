@@ -146,19 +146,21 @@ type helperProcess struct {
 // copy goroutine is still draining output during readiness failures.
 type synchronizedBuffer struct {
 	mu sync.Mutex
-	bytes.Buffer
+	// Do not embed Buffer: promotion of ReadFrom lets io.Copy bypass Write's
+	// mutex while a readiness failure reads live subprocess diagnostics.
+	buffer bytes.Buffer
 }
 
 func (b *synchronizedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
 
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Buffer.String()
+	return b.buffer.String()
 }
 
 // TestSlice1IntegrationHelper is the only test entry point executed in a
@@ -901,6 +903,8 @@ func startIntegrationHelper(t *testing.T, env integrationEnvironment, action str
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Register before waiting so readiness failures cannot orphan the helper.
+	t.Cleanup(func() { helper.kill(t) })
 	ready := make(chan error, 1)
 	go func() {
 		reader := bufio.NewReader(stdout)
@@ -925,7 +929,7 @@ func startIntegrationHelper(t *testing.T, env integrationEnvironment, action str
 		if err != nil {
 			t.Fatalf("helper %s did not become ready: %v; stderr=%q", action, err, helper.stderr.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatalf("helper %s readiness timed out; stderr=%q", action, helper.stderr.String())
 	}
 	if cmd.ProcessState != nil {

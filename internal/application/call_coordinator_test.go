@@ -368,10 +368,23 @@ type coordinatorFixture struct {
 }
 
 func newCoordinatorFixture(t *testing.T, suffix string, limits domain.BudgetLimits) coordinatorFixture {
+	return newCoordinatorFixtureWithStages(t, suffix, limits, []domain.StageName{"prepare"})
+}
+
+func newCoordinatorFixtureWithStages(t *testing.T, suffix string, limits domain.BudgetLimits, stages []domain.StageName) coordinatorFixture {
+	t.Helper()
+	return newCoordinatorFixtureWithStageInput(t, suffix, limits, stages, domain.SumBytes([]byte("input")))
+}
+
+func newCoordinatorFixtureWithStageInput(t *testing.T, suffix string, limits domain.BudgetLimits, stages []domain.StageName, inputDigest domain.Digest) coordinatorFixture {
+	return newCoordinatorFixtureAt(t, suffix, limits, stages, inputDigest, time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC))
+}
+
+func newCoordinatorFixtureAt(t *testing.T, suffix string, limits domain.BudgetLimits, stages []domain.StageName, inputDigest domain.Digest, at time.Time) coordinatorFixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "coordinator.db")
-	clock := newRecordingClock(time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC))
-	store, err := sqlite.OpenWithClock(context.Background(), sqlite.Config{Path: path, BusyTimeout: time.Second, MaxReaders: 4}, clock)
+	clock := newRecordingClock(at)
+	store, err := openFreshApplicationSQLite(t, sqlite.Config{Path: path, BusyTimeout: time.Second, MaxReaders: 4}, clock)
 	if err != nil {
 		t.Fatalf("open coordinator store: %v", err)
 	}
@@ -384,7 +397,7 @@ func newCoordinatorFixture(t *testing.T, suffix string, limits domain.BudgetLimi
 		RunID: runID, SubmittedRequestJSON: requestJSON, SubmittedRequestDigest: domain.SumBytes(requestJSON),
 		EffectiveSeed: 7, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: domain.SumBytes(configJSON),
 		WorkflowRevision: "slice1/v1", SchemaVersion: "cpgen.request/v1", WorkflowDigest: domain.SumBytes([]byte("workflow")),
-		BudgetLimits: limits, StageSequence: []domain.StageName{"prepare"}, CreatedAt: clock.Now(),
+		BudgetLimits: limits, StageSequence: stages, CreatedAt: clock.Now(),
 		IdempotencyKey: coordinatorID("create", "coordinator "+suffix),
 	})
 	if err != nil || created.Version != 1 {
@@ -392,7 +405,7 @@ func newCoordinatorFixture(t *testing.T, suffix string, limits domain.BudgetLimi
 	}
 	_, err = store.BeginStage(context.Background(), domain.BeginStageCommand{
 		RunID: runID, ExpectedRunVersion: 1, StageName: "prepare", AttemptID: attemptID,
-		InputDigest: domain.SumBytes([]byte("input")), IdempotencyKey: coordinatorID("begin", "coordinator "+suffix), At: clock.Now(),
+		InputDigest: inputDigest, IdempotencyKey: coordinatorID("begin", "coordinator "+suffix), At: clock.Now(),
 	})
 	if err != nil {
 		t.Fatalf("BeginStage: %v", err)

@@ -277,12 +277,13 @@ const (
 	PhysicalSimilarityRequest     PhysicalCallKind = "SIMILARITY_REQUEST"
 	PhysicalDockerEnginePing      PhysicalCallKind = "DOCKER_ENGINE_PING"
 	PhysicalDockerContainerCreate PhysicalCallKind = "DOCKER_CONTAINER_CREATE"
+	PhysicalDockerVolumeCreate    PhysicalCallKind = "DOCKER_VOLUME_CREATE"
 	PhysicalLocalArtifactWrite    PhysicalCallKind = "LOCAL_ARTIFACT_WRITE"
 )
 
 func (v PhysicalCallKind) Valid() bool {
 	switch v {
-	case PhysicalLLMRequest, PhysicalSimilarityRequest, PhysicalDockerEnginePing, PhysicalDockerContainerCreate, PhysicalLocalArtifactWrite:
+	case PhysicalLLMRequest, PhysicalSimilarityRequest, PhysicalDockerEnginePing, PhysicalDockerContainerCreate, PhysicalDockerVolumeCreate, PhysicalLocalArtifactWrite:
 		return true
 	default:
 		return false

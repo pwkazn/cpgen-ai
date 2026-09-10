@@ -12,6 +12,8 @@ Authoritative sources are ADR-0006, the lightweight local workflow design, ARCHI
 
 ## 2. Scope
 
+Scope amendment from the user, 2026-09-09: prioritize Similarity ACCEPT → Solution → Data → Docker/Judge → Quality → Package, and non-accepted business results → human review. Automatic mutation and business repair are deferred for redesign after a usable loop. Existing mutation-ledger/provenance descriptions remain historical contracts, not MVP delivery prerequisites. Follow the [current execution plan](../plans/2026-09-09-mvp-generation-loop.md).
+
 The MVP includes:
 
 - strict request, configuration, and domain values;
@@ -142,7 +144,7 @@ Required proof includes:
 - live Docker kill, watchdog EOF, and exact-resource reconciliation;
 - review and cancellation lifecycle;
 - package gate completeness and same-run READY;
-- full Go tests, vet, race tests, Go 1.24, Linux cross-build, and architecture consistency.
+- full Go tests, vet, race tests, Go 1.25.0 compatibility under the 2026-09-08 ADR-0006 amendment, Linux cross-build, and architecture consistency.
 
 ## 10. Acceptance
 

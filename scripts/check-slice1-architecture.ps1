@@ -70,6 +70,26 @@ function Get-Lines {
     return @(Get-Content -LiteralPath $absolutePath)
 }
 
+# Keep the library amendment coupled to the durable authority contract.
+# Historical Slice 0/1 verification files deliberately remain outside this set.
+$libraryContracts = @{
+    'docs/adr/0006-lightweight-local-workflow.md' = @('LangGraphGo', 'LangChainGo', 'internal/application', 'internal/agent', 'SQLite remains authoritative')
+    'ARCHITECTURE.md' = @('LangGraphGo', 'LangChainGo', 'SQLite remains authoritative', 'Go 1.25.0')
+    'docs/design/workflow.md' = @('LangGraphGo', 'internal/application', 'SQLite remains authoritative')
+    'docs/design/llm.md' = @('LangChainGo', 'internal/agent', 'CallCoordinator')
+    'go.mod' = @('go 1.25.0', 'github.com/tmc/langchaingo v0.1.14', 'github.com/smallnest/langgraphgo v0.8.5')
+}
+foreach ($path in $libraryContracts.Keys) {
+    $lines = Get-Lines -Path $path
+    if ($null -eq $lines) { continue }
+    $text = $lines -join "`n"
+    foreach ($phrase in $libraryContracts[$path]) {
+        if ($text -notmatch [regex]::Escape($phrase)) {
+            Add-Failure -Path $path -Line 1 -Phrase $phrase -Reason 'missing library integration contract'
+        }
+    }
+}
+
 foreach ($path in $contractPaths) {
     $lines = Get-Lines -Path $path
     if ($null -eq $lines) {

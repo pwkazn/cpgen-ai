@@ -6,7 +6,7 @@ Date: 2026-08-31
 
 ## 1. Decision
 
-Phase 1 uses one foreground Go CLI executor per run on a single host, a local SQLite database, private content-addressed artifact storage, and the existing detached Docker watchdog. Different runs may use separate CLI processes concurrently. It does not require Temporal, LangGraph, AutoGen, CrewAI, a daemon, a task queue, or any other workflow-hosting service.
+Phase 1 uses one foreground Go CLI executor per run on a single host, a local SQLite database, private content-addressed artifact storage, and the existing detached Docker watchdog. Different runs may use separate CLI processes concurrently. It does not require Temporal, hosted LangGraph, AutoGen, CrewAI, a daemon, a task queue, or any workflow-hosting service. The 2026-09-08 ADR-0006 amendment admits LangGraphGo only for fixed serial assembly inside `internal/application` and LangChainGo only inside `internal/agent`; SQLite and CPGen domain ledgers retain all durable authority.
 
 The normative contract is: one foreground executor per run, a per-run process lock, a fixed pipeline, and no workflow-hosting service.
 
@@ -268,7 +268,7 @@ Slice 1 must prove the reduced design rather than the discarded general engine:
 - Blob traversal/corruption/dedup/crash tests;
 - real Docker kill tests while target runs, after target stops before export, and during cleanup;
 - watchdog death/EOF and narrow startup reconciliation tests;
-- full `go test`, `go vet`, `go test -race`, Go 1.24, and Linux cross-build gates.
+- full `go test`, `go vet`, `go test -race`, Go 1.25.0 compatibility (after the 2026-09-08 library amendment), and Linux cross-build gates.
 
 Tests for lease expiry, fencing epoch, observation floors, generic recovery intents, dynamic DAG scheduling, or workflow visibility are explicitly out of scope.
 

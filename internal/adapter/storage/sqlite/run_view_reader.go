@@ -10,8 +10,9 @@ import (
 )
 
 // BudgetSnapshot exposes a read-only projection for the immutable RunView.
-// The account rows remain authoritative; the limits are reconstructed from
-// those same rows instead of from a coordinator-maintained cache.
+// Physical account rows remain authoritative for metered dimensions. Package
+// size and logical mutation allowance come from the immutable run columns in
+// the same read; neither is represented by a physical budget account.
 func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.BudgetSnapshot, error) {
 	if err := runID.Validate(); err != nil {
 		return domain.BudgetSnapshot{}, err
@@ -22,18 +23,22 @@ func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.
 	}
 	defer connection.Close()
 	rows, err := connection.QueryContext(ctx, `
-		SELECT request_snapshot_digest, dimension, limit_value, reserved_value, consumed_value, account_version
-		FROM budget_accounts WHERE run_id = ? ORDER BY dimension`, string(runID))
+		SELECT account.request_snapshot_digest, account.dimension, account.limit_value, account.reserved_value, account.consumed_value, account.account_version,
+		       run.max_package_bytes, run.max_mutations_per_stage, run.submitted_request_digest
+		FROM budget_accounts account JOIN runs run ON run.run_id=account.run_id WHERE account.run_id = ? ORDER BY account.dimension`, string(runID))
 	if err != nil {
 		return domain.BudgetSnapshot{}, err
 	}
 	defer rows.Close()
 	result := domain.BudgetSnapshot{Remaining: make(map[domain.BudgetDimension]int64)}
 	for rows.Next() {
-		var requestDigest, raw string
+		var requestDigest, submittedDigest, raw string
 		var limit, reserved, consumed, version int64
-		if err := rows.Scan(&requestDigest, &raw, &limit, &reserved, &consumed, &version); err != nil {
+		if err := rows.Scan(&requestDigest, &raw, &limit, &reserved, &consumed, &version, &result.Limits.MaxPackageBytes, &result.Limits.MaxMutationsPerStage, &submittedDigest); err != nil {
 			return domain.BudgetSnapshot{}, err
+		}
+		if requestDigest != submittedDigest {
+			return domain.BudgetSnapshot{}, wrap(ErrConsistency, "budget account request binding differs from its run", nil)
 		}
 		dimension := domain.BudgetDimension(raw)
 		account := domain.BudgetAccount{RunID: runID, RequestSnapshotDigest: domain.Digest(requestDigest), Dimension: dimension, Limit: limit, Reserved: reserved, Consumed: consumed, Version: version}

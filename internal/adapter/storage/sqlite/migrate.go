@@ -99,7 +99,7 @@ func (s *Store) migrate(ctx context.Context) error {
 					return err
 				}
 			}
-			if _, err := tx.ExecContext(ctx, item.sql); err != nil {
+			if err := executeMigration(ctx, tx, item); err != nil {
 				return fmt.Errorf("execute migration %d: %w", item.version, err)
 			}
 			appliedAt := s.clock.Now().UTC()
@@ -116,6 +116,41 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+func executeMigration(ctx context.Context, tx *immediateTx, item migration) (err error) {
+	if item.version == 20 || item.version == 21 || item.version == 25 || item.version == 26 {
+		// Connection PRAGMAs are not rolled back with schema changes. Restore
+		// legacy rename behavior even if rebuilding a referenced table fails.
+		defer func() {
+			resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_, resetErr := tx.ExecContext(resetCtx, "PRAGMA legacy_alter_table = OFF")
+			err = errors.Join(err, resetErr)
+		}()
+	}
+	_, err = tx.ExecContext(ctx, item.sql)
+	if err == nil && (item.version == 25 || item.version == 26) {
+		// Rebuilding physical_calls crosses both sides of its cycle with
+		// terminal call_records. SQLite can retain a deferred DROP violation
+		// after the replacement table restores every key. Check the complete
+		// final FK graph before clearing that transient counter; foreign_keys
+		// remains enabled throughout and a real violation aborts the upgrade.
+		rows, checkErr := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+		if checkErr != nil {
+			return checkErr
+		}
+		hasViolation := rows.Next()
+		checkErr = errors.Join(rows.Err(), rows.Close())
+		if checkErr != nil {
+			return checkErr
+		}
+		if hasViolation {
+			return errors.New("table rebuild migration would leave foreign key violations")
+		}
+		_, err = tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = OFF")
+	}
+	return err
 }
 
 func prepareM16VolumeCompatibility(ctx context.Context, tx *immediateTx) error {

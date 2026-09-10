@@ -1,0 +1,36 @@
+# Ordinary problem workflow: accepted Similarity -> Solution -> Data -> Judge
+# -> Quality -> verified Package/READY. Other business decisions require review.
+# Replace paths, endpoints, identities and the all-zero toolchain lock digest.
+storage:
+  state_root: D:/cpgen-private/mvp
+workflow:
+  revision: mvp.idea.statement.similarity.solution.data.judge.package.v1
+  idea_count: 2
+  llm_cost_upper_bound_micro_usd: 100000
+  similarity_cost_upper_bound_micro_usd: 100000
+llm:
+  base_url: https://provider.example.com/v1
+  model: replace-with-supported-model
+  api_key_env: CPGEN_LLM_API_KEY
+  timeout: 60s
+  max_output_tokens: 8192
+  max_response_bytes: 1048576
+  max_format_repairs: 0
+similarity:
+  endpoint: https://similarity.example.com/search
+  api_key_env: CPGEN_SIMILARITY_API_KEY
+  provider_identity: replace-with-provider-identity
+  service_identity: replace-with-index-revision
+  timeout: 30s
+  max_response_bytes: 1048576
+  limit: 20
+  policy_ref: similarity-policy/v1
+  acceptance_threshold: 0.5
+  rejection_threshold: 0.8
+  minimum_hits: 1
+sandbox:
+  # Linux: unix:///var/run/docker.sock
+  engine_endpoint: npipe:////./pipe/docker_engine
+  toolchain_lock_path: D:/cpgen-private/toolchains/docker-v1.lock.json
+  # Placeholder: replace with the canonical digest printed by cpgen-image-lock.
+  toolchain_lock_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

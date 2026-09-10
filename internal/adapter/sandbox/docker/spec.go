@@ -50,6 +50,14 @@ func CompileTarget(request port.CompileRequest) TargetWorkload {
 
 func RunTarget(request port.RunRequest) TargetWorkload {
 	clone := request
+	if request.Seed != nil {
+		seed := *request.Seed
+		clone.Seed = &seed
+	}
+	if request.Args.GeneratorCase != nil {
+		args := *request.Args.GeneratorCase
+		clone.Args.GeneratorCase = &args
+	}
 	clone.Files = slices.Clone(request.Files)
 	clone.Outputs = slices.Clone(request.Outputs)
 	if request.Stdin != nil {
@@ -141,6 +149,9 @@ func TargetCreateOptions(workload TargetWorkload, lock toolchain.Lock, identity 
 		command = []string{"/program/main"}
 		if request.Seed != nil {
 			command = append(command, "--seed="+strconv.FormatUint(*request.Seed, 10))
+		}
+		if args := request.Args.GeneratorCase; args != nil {
+			command = append(command, "--case="+strconv.Itoa(args.Ordinal), "--kind="+string(args.Kind))
 		}
 		environment = runtimeEnvironment()
 		image = lock.Runtime

@@ -85,6 +85,48 @@ func (s *Store) Prepare(ctx context.Context, declaration port.ArtifactDeclaratio
 	return &writer{store: s, declaration: declaration, identity: identity, file: file, tempPath: tempPath, hash: sha256.New()}, nil
 }
 
+// RestartUnsealed discards only this writer's private staging slot. The caller
+// must hold its foreground owner lock and prove a durable OPEN (never SEALED)
+// token. Deterministic host bytes may then be written using the same identity;
+// this is not recovery of an unknown external response or executable output.
+func (s *Store) RestartUnsealed(ctx context.Context, declaration port.ArtifactDeclaration, identity WriterIdentity) (port.ArtifactWriter, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := declaration.Validate(); err != nil {
+		return nil, err
+	}
+	if err := identity.Validate(); err != nil {
+		return nil, err
+	}
+	if s == nil || s.temporary == "" {
+		return nil, errors.New("blob store is nil")
+	}
+	path := s.stagingPath(identity.WriterTokenID)
+	file, err := openRegularAt(s.temporary, path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err == nil {
+		info, statErr := file.Stat()
+		if statErr != nil {
+			return nil, errors.Join(statErr, file.Close())
+		}
+		count, known := stagedLinkCount(file, info)
+		closeErr := file.Close()
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if !info.Mode().IsRegular() || (known && count != 1) {
+			return nil, errors.New("unsealed staging slot is not an unpublished private file")
+		}
+		if err := removePrivateFile(s.temporary, path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return s.Prepare(ctx, declaration, identity)
+}
+
 // ResumeStaged reconstructs the filesystem half of a durable SEALED token.
 // The token id determines the staging path, so this operation is safe across
 // process restarts and never adopts an unrelated temporary file.

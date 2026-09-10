@@ -1,0 +1,19 @@
+# Admission smoke request: zero provider budgets intentionally pause at Idea
+# without network access. Positive provider budgets authorize real requests.
+schema_version: cpgen.request/v1
+mode: manual
+brief: Generate a graph traversal problem.
+tags: [graphs]
+normalized_tags: [graphs]
+language: en
+difficulty: hard
+required_features: []
+forbidden_features: []
+time_limit_milliseconds: 2000
+memory_limit_megabytes: 512
+solution_language: cpp
+seed: 9007199254740993
+verification_profile: default
+export_targets: [internal]
+budget_limits:
+  max_active_time_milliseconds: 60000

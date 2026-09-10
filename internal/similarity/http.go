@@ -256,6 +256,16 @@ type EvidenceOutcome struct {
 	Value     *Evidence
 	Failure   *domain.PortFailure
 	CallTrace domain.CallTrace
+	// Internal physical receipt fields never enter package-safe evidence or
+	// the compatibility JSON surface. No raw third-party body is retained.
+	responseDigest *domain.Digest
+	costVerified   bool
+}
+
+func withHTTPResponseReceipt(outcome EvidenceOutcome, raw []byte) EvidenceOutcome {
+	digest := domain.SumBytes(raw)
+	outcome.responseDigest = &digest
+	return outcome
 }
 
 func (o EvidenceOutcome) Validate() error {
@@ -359,11 +369,11 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 				}
 				continue
 			}
-			return a.failureOutcome(logicalID, traceIDs, adapterErr), nil
+			return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, adapterErr), body), nil
 		}
 		wire, usage, usageSource, parseErr := decodeResponse(body, requestBytes, maxHits)
 		if parseErr != nil {
-			return a.failureOutcome(logicalID, traceIDs, parseErr), nil
+			return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, parseErr), body), nil
 		}
 		trace := dispatchedTrace(logicalID, traceIDs)
 		provider := wire.ProviderIdentity
@@ -377,17 +387,18 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 		for i, rawHit := range wire.Hits {
 			hit, hitErr := wireHitToHit(rawHit)
 			if hitErr != nil {
-				return a.failureOutcome(logicalID, traceIDs, &Error{Code: ErrorProtocol, cause: fmt.Errorf("hit %d: %w", i, hitErr)}), nil
+				return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, &Error{Code: ErrorProtocol, cause: fmt.Errorf("hit %d: %w", i, hitErr)}), body), nil
 			}
 			hits = append(hits, hit)
 		}
 		observedAt := a.now()
 		evidence, evidenceErr := NewEvidenceWithServiceIdentity(request, provider, a.config.ServiceIdentity, hits, observedAt, usage, usageSource, wire.ModelVersion, wire.IndexVersion, CacheProvenance{Kind: CacheLive}, trace)
 		if evidenceErr != nil {
-			return a.failureOutcome(logicalID, traceIDs, &Error{Code: ErrorProtocol, cause: evidenceErr}), nil
+			return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, &Error{Code: ErrorProtocol, cause: evidenceErr}), body), nil
 		}
 		result := EvidenceOutcome{Value: &evidence, CallTrace: trace}
-		return result, nil
+		result.costVerified = usageSource == UsageProviderVerified && wire.Usage != nil && wire.Usage.CostMicroUSD != nil
+		return withHTTPResponseReceipt(result, body), nil
 	}
 	return empty, &Error{Code: ErrorTransport}
 }

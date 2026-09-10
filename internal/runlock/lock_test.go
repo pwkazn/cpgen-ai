@@ -31,7 +31,9 @@ func testRunID(suffix string) domain.RunID {
 // implementation that fails to exclude conflicting guards.
 func TestLockContentionAndSharedAccess(t *testing.T) {
 	t.Parallel()
-	m, _ := newManager(t, time.Millisecond)
+	// Separate the configured retry interval from scheduling/OS overhead so
+	// race instrumentation cannot turn this into a one-millisecond benchmark.
+	m, _ := newManager(t, 10*time.Second)
 	id := testRunID("d")
 	exclusive, err := m.TryAcquireRun(id, runlock.Exclusive)
 	if err != nil {
@@ -45,7 +47,7 @@ func TestLockContentionAndSharedAccess(t *testing.T) {
 	if _, err := m.TryAcquireRun(id, runlock.Exclusive); !errors.Is(err, runlock.ErrBusy) {
 		t.Fatalf("second exclusive conflict = %v, want ErrBusy", err)
 	}
-	if elapsed := time.Since(started); elapsed >= time.Millisecond {
+	if elapsed := time.Since(started); elapsed >= time.Second {
 		t.Fatalf("TryAcquire polled instead of making one attempt: %v", elapsed)
 	}
 	if _, err := m.TryAcquireRun(id, runlock.Shared); !errors.Is(err, runlock.ErrBusy) {

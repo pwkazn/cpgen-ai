@@ -38,10 +38,14 @@ func insertInitialBudgetAccounts(ctx context.Context, tx *immediateTx, runID dom
 }
 
 func (s *Store) OpenCall(ctx context.Context, request domain.OpenCallRequest) (domain.CallRecord, error) {
+	return s.openCall(ctx, request, false)
+}
+
+func (s *Store) openCall(ctx context.Context, request domain.OpenCallRequest, retainRequest bool) (domain.CallRecord, error) {
 	if err := request.Validate(); err != nil {
 		return domain.CallRecord{}, err
 	}
-	commandDigest, _, err := digestJSON(request)
+	commandDigest, commandJSON, err := digestJSON(request)
 	if err != nil {
 		return domain.CallRecord{}, err
 	}
@@ -56,6 +60,9 @@ func (s *Store) OpenCall(ctx context.Context, request domain.OpenCallRequest) (d
 				return wrap(ErrConsistency, "logical call idempotency key was reused with different content", nil)
 			}
 			result, err = readCallRecord(ctx, tx, domain.CallRecordID(storedID))
+			if err == nil && retainRequest {
+				err = retainCallOpen(ctx, tx, request, commandDigest, commandJSON)
+			}
 			return err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -82,6 +89,9 @@ func (s *Store) OpenCall(ctx context.Context, request domain.OpenCallRequest) (d
 			return err
 		}
 		result, err = readCallRecord(ctx, tx, request.ID)
+		if err == nil && retainRequest {
+			err = retainCallOpen(ctx, tx, request, commandDigest, commandJSON)
+		}
 		return err
 	})
 	return result, err
@@ -331,7 +341,9 @@ func (s *Store) MarkSent(ctx context.Context, grant domain.DispatchGrant, sentAt
 			}
 			return nil
 		}
-		if err := validateMeteringContext(ctx, tx, grant.RunID, grant.ExpectedRunVersion, grant.StageName, grant.AttemptID); err != nil {
+		// This records an already observed send; it grants no new dispatch.
+		// Preserve the same running-attempt and grant checks during cancellation.
+		if err := validateMeteringSettlementContext(ctx, tx, grant.RunID, grant.ExpectedRunVersion, grant.StageName, grant.AttemptID); err != nil {
 			return err
 		}
 		if physical.State != domain.PhysicalDispatching || sentAt.Before(grant.DispatchStartedAt) {
@@ -427,10 +439,14 @@ func (s *Store) CompletePhysical(ctx context.Context, request domain.CompletePhy
 }
 
 func (s *Store) FinishCall(ctx context.Context, request domain.FinishCallRequest) (domain.CallTrace, error) {
+	return s.finishCall(ctx, request, false)
+}
+
+func (s *Store) finishCall(ctx context.Context, request domain.FinishCallRequest, retainRequest bool) (domain.CallTrace, error) {
 	if err := request.Validate(); err != nil {
 		return domain.CallTrace{}, err
 	}
-	commandDigest, _, err := digestJSON(request)
+	commandDigest, commandJSON, err := digestJSON(request)
 	if err != nil {
 		return domain.CallTrace{}, err
 	}
@@ -450,13 +466,33 @@ func (s *Store) FinishCall(ctx context.Context, request domain.FinishCallRequest
 				return wrap(ErrConsistency, "logical completion idempotency was reused with different content", nil)
 			}
 			trace, err = callTraceForRecord(ctx, tx, request.CallRecordID)
-			return err
-		}
-		if err := validateMeteringContext(ctx, tx, request.RunID, request.ExpectedRunVersion, request.StageName, request.AttemptID); err != nil {
+			if err == nil && retainRequest {
+				err = retainCallFinish(ctx, tx, request, commandDigest, commandJSON)
+			}
 			return err
 		}
 		if call.RunID != request.RunID || call.StageName != request.StageName || call.AttemptID != request.AttemptID || call.State == domain.CallRecordTerminal {
 			return wrap(ErrConsistency, "logical completion does not match an active call", nil)
+		}
+		// Finishing a prepared call only records receipts and releases unused
+		// reservations. An OPEN call with no physical rows may also close as
+		// NO_DISPATCH during cancellation. Opening/planning/dispatch and actual
+		// cache reuse retain the cancellation-rejecting guard.
+		validate := validateMeteringContext
+		if call.State == domain.CallRecordPrepared {
+			validate = validateMeteringSettlementContext
+		} else if call.State == domain.CallRecordOpen && request.DispatchKind == domain.DispatchNone {
+			var physicalCount int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM physical_calls WHERE call_record_id = ?`, call.ID).Scan(&physicalCount); err != nil {
+				return err
+			}
+			if physicalCount != 0 {
+				return wrap(ErrConsistency, "open no-send cleanup has physical call rows", nil)
+			}
+			validate = validateMeteringSettlementContext
+		}
+		if err := validate(ctx, tx, request.RunID, request.ExpectedRunVersion, request.StageName, request.AttemptID); err != nil {
+			return err
 		}
 		var inflight int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM physical_calls
@@ -504,6 +540,9 @@ func (s *Store) FinishCall(ctx context.Context, request domain.FinishCallRequest
 			return wrap(ErrConsistency, "terminal logical call projection is invalid", err)
 		}
 		trace, err = callTraceForRecord(ctx, tx, request.CallRecordID)
+		if err == nil && retainRequest {
+			err = retainCallFinish(ctx, tx, request, commandDigest, commandJSON)
+		}
 		return err
 	})
 	return trace, err
@@ -523,7 +562,21 @@ func validateMeteringContextMode(ctx context.Context, tx *immediateTx, runID dom
 		return err
 	}
 	if run.Version != expectedVersion {
-		return wrap(ErrVersionConflict, "metering expected run version does not match", nil)
+		// The only tolerated version advance is exactly the pending cancel
+		// submitted against this version. Same-stage/current-attempt checks below
+		// still apply. All new-effect paths require an exact current version.
+		cancelAdvance := false
+		if !rejectCancel && run.Version > expectedVersion && run.Version-expectedVersion == 1 {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM control_requests
+				WHERE run_id = ? AND kind = 'CANCEL' AND state = 'PENDING' AND expected_run_version = ?`, runID, expectedVersion).Scan(&count); err != nil {
+				return err
+			}
+			cancelAdvance = count == 1
+		}
+		if !cancelAdvance {
+			return wrap(ErrVersionConflict, "metering expected run version does not match", nil)
+		}
 	}
 	if run.State != domain.RunRunning || run.CurrentStage != stage {
 		return wrap(ErrInvalidTransition, "metering requires the current RUNNING stage", nil)

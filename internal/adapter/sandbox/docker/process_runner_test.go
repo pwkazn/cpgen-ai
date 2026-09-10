@@ -25,13 +25,13 @@ func TestRunnerCapturesBoundedAttachAndHostExecutionEvidence(t *testing.T) {
 	if err := result.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if result.Stdout == nil || result.Stdout.Blob.Digest != domain.SumBytes(fixture.engine.targetStdout) || result.Stdout.CallID != fixture.calls[2] {
+	if result.Stdout == nil || result.Stdout.Blob.Digest != domain.SumBytes(fixture.engine.targetStdout) || result.Stdout.CallID != "call_00000000000000000000000000000099" {
 		t.Fatalf("stdout artifact = %#v", result.Stdout)
 	}
-	if result.Stderr == nil || result.Stderr.Blob.Digest != domain.SumBytes(fixture.engine.targetStderr) || result.Stderr.CallID != fixture.calls[2] {
+	if result.Stderr == nil || result.Stderr.Blob.Digest != domain.SumBytes(fixture.engine.targetStderr) || result.Stderr.CallID != "call_00000000000000000000000000000099" {
 		t.Fatalf("stderr artifact = %#v", result.Stderr)
 	}
-	if result.Execution == nil || result.Execution.Role != domain.ArtifactEvidence || result.Execution.CallID != fixture.calls[2] {
+	if result.Execution == nil || result.Execution.Role != domain.ArtifactEvidence || result.Execution.CallID != "call_00000000000000000000000000000099" {
 		t.Fatalf("execution artifact = %#v", result.Execution)
 	}
 	if result.Details["process_outcome"] != string(domain.ProcessExited) {

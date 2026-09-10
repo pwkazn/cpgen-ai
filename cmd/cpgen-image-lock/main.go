@@ -21,9 +21,10 @@ import (
 type dockerRunner func(context.Context, ...string) (string, error)
 
 type dependencies struct {
-	projectRoot string
-	docker      dockerRunner
-	goos        string
+	projectRoot   string
+	docker        dockerRunner
+	buildTransfer func(context.Context, string, string) error
+	goos          string
 }
 
 func main() {
@@ -33,9 +34,10 @@ func main() {
 		os.Exit(1)
 	}
 	os.Exit(runWithDependencies(os.Args[1:], os.Stdout, os.Stderr, dependencies{
-		projectRoot: projectRoot,
-		docker:      runDocker,
-		goos:        runtime.GOOS,
+		projectRoot:   projectRoot,
+		docker:        runDocker,
+		buildTransfer: buildTransferBinary,
+		goos:          runtime.GOOS,
 	}))
 }
 
@@ -47,7 +49,7 @@ func runWithDependencies(args []string, stdout, stderr io.Writer, deps dependenc
 		fmt.Fprintln(stderr, "usage: cpgen-image-lock --output PATH")
 		return 2
 	}
-	if deps.projectRoot == "" || deps.docker == nil {
+	if deps.projectRoot == "" || deps.docker == nil || deps.buildTransfer == nil {
 		fmt.Fprintln(stderr, "image-lock dependencies are not configured")
 		return 1
 	}
@@ -125,6 +127,13 @@ func buildImages(ctx context.Context, deps dependencies, endpoint string) ([3]do
 		return ids, err
 	}
 	defer os.RemoveAll(temporaryDirectory)
+	transferContext := filepath.Join(temporaryDirectory, "transfer")
+	if err := os.Mkdir(transferContext, 0o700); err != nil {
+		return ids, err
+	}
+	if err := deps.buildTransfer(ctx, deps.projectRoot, filepath.Join(transferContext, "cpgen-transfer")); err != nil {
+		return ids, fmt.Errorf("build trusted transfer helper: %w", err)
+	}
 	roles := []string{"builder", "runtime", "transfer"}
 	for index, role := range roles {
 		dockerfile := filepath.Join(deps.projectRoot, "build", "docker", role, "Dockerfile")
@@ -135,10 +144,14 @@ func buildImages(ctx context.Context, deps dependencies, endpoint string) ([3]do
 			return ids, fmt.Errorf("Dockerfile %s: %w", dockerfile, err)
 		}
 		iidPath := filepath.Join(temporaryDirectory, role+".iid")
+		buildContext := deps.projectRoot
+		if role == "transfer" {
+			buildContext = transferContext
+		}
 		if _, err := deps.docker(ctx,
 			"--host", endpoint,
 			"build", "--pull=false", "--network=none", "--provenance=false",
-			"--file", dockerfile, "--iidfile", iidPath, deps.projectRoot,
+			"--file", dockerfile, "--iidfile", iidPath, buildContext,
 		); err != nil {
 			return ids, fmt.Errorf("%s image: %w", role, err)
 		}
