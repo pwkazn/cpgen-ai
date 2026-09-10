@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	"cpgen/internal/port"
 )
 
 func TestDispatchCoordinatorRetriesCompletedFailureAndReturnsDatabaseTrace(t *testing.T) {
@@ -593,4 +595,32 @@ func stringPointer(value string) *string { return &value }
 func coordinatorID(prefix, material string) string {
 	digest := string(domain.SumBytes([]byte(material)))
 	return prefix + "_" + digest[7:39]
+}
+
+type prepareFailureLedger struct {
+	port.CallLedger
+	failure error
+}
+
+func (l prepareFailureLedger) PrepareCalls(context.Context, domain.PrepareCallsRequest) (domain.PreparedCalls, error) {
+	return domain.PreparedCalls{}, l.failure
+}
+
+func TestDispatchCoordinatorPreservesPreparationFailureWithoutDispatch(t *testing.T) {
+	for _, failure := range []error{sqlite.ErrVersionConflict, errors.New("preparation storage failure")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			fixture := newCoordinatorFixture(t, "e1", domain.BudgetLimits{MaxLLMCalls: 2})
+			adapter := &scriptedCallAdapter[string]{plan: domain.CallPlanDecision{Plan: &domain.CallPlan{
+				Digest: domain.SumBytes([]byte("prepare failure")), Calls: []domain.PhysicalCallPlan{coordinatorPhysicalPlan(1, 1)},
+			}}}
+			coordinator, err := application.NewCallCoordinator[string](prepareFailureLedger{fixture.store, failure}, adapter, fixture.clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := coordinator.Execute(context.Background(), fixture.openRequest(1))
+			if !errors.Is(err, failure) || outcome.Value != nil || adapter.executeCount() != 0 {
+				t.Fatalf("preparation failure was lost or dispatched: outcome=%+v err=%v sends=%d", outcome, err, adapter.executeCount())
+			}
+		})
+	}
 }

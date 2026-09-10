@@ -47,7 +47,8 @@ func (c *CallCoordinator[T]) Execute(ctx context.Context, request domain.OpenCal
 	}
 	var prepared domain.PreparedCalls
 	if record.State == domain.CallRecordOpen {
-		decision, err := c.adapter.Plan(ctx, record)
+		var decision domain.CallPlanDecision
+		decision, err = c.adapter.Plan(ctx, record)
 		if err != nil {
 			return domain.MeteredOutcome[T]{}, fmt.Errorf("plan logical call: %w", err)
 		}

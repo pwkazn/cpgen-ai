@@ -323,7 +323,10 @@ func TestSlice2RunServiceOwnerObservesExternalCancelDuringProviderRequest(t *tes
 	// race instrumentation is substantially slower on shared CI runners.
 	ctx, stop := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer stop()
-	owner := slice2FixtureService(t, f, 10*time.Millisecond)
+	// Use the normal accounting cadence. The provider-start channel fixes the
+	// cancellation boundary; a 100 Hz heartbeat is unrelated to this contract.
+	// Version-conflict retries are exercised separately with injected conflicts.
+	owner := slice2FixtureService(t, f)
 	type completion struct {
 		snapshot domain.RunSnapshot
 		err      error
@@ -341,7 +344,7 @@ func TestSlice2RunServiceOwnerObservesExternalCancelDuringProviderRequest(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := slice2FixtureService(t, f, 10*time.Millisecond)
+	other := slice2FixtureService(t, f)
 	for tries := 0; tries < 16; tries++ {
 		_, err = other.Cancel(ctx, domain.CancelRequest{ID: "control_00000000000000000000000000002604", RunID: f.runID, ExpectedRunVersion: current.Version, Reason: "cancel active owner", IdempotencyKey: coordinatorID("cancel", "live-owner"), At: f.clock.Now()})
 		if !errors.Is(err, sqlite.ErrVersionConflict) {
