@@ -129,7 +129,8 @@ manifest digest 进入编译缓存、运行 provenance 和 Package manifest。
 - 使用最大/极端测试组，不读取普通 run cache 的性能数据。
 - 采用所选 verification profile 的 CPU、内存和输出裕量。
 - 记录宿主/内核/Docker/profile/toolchain 指纹。
-- `mvp` 结果不承诺与任意 OJ 精确等价；`release` 使用独立 verification run。
+- CPU 时间可判定是不可豁免的 TLE 前提：正式 Resource Gate 只接受带 `CPUTimeLimit`、非空权威 `cpu_time_ms` 及对应 measurement evidence 的运行记录。Docker `--cpus` 仅为 CPU 配额，不能单独满足此条件；wall-clock timeout 仅用于安全停止。
+- `mvp` 可保留为编译、样例和 Differential Gate 的功能性执行 profile，但 `cpu_time_ms=null` 时必须使 Resource Gate `BLOCKED(capability_missing=cpu_time_measurement)`，不得将 wall-time timeout 映射为题目 CPU-TLE 或提交为最终性能验证。`release` 使用独立 verification run，并提供 CPU-time measurement capability canary。
 
 ### 5.5 Checker QA
 
