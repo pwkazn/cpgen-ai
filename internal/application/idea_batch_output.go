@@ -67,9 +67,9 @@ func (s *GenerationExecutor) CollectIdeaCandidatesWithOutput(ctx context.Context
 	if err != nil {
 		return result, err
 	}
-	session := &privateResponseSession{ledger: ledger, blobs: s.config.Blobs, clock: s.config.Clock, open: open,
+	session := &privateResponseSession{ledger: ledger, blobs: s.config.Blobs, clock: s.config.Clock, privateResponseBinding: privateResponseBinding{open: open,
 		binding: domain.SumBytes(binding), maxBytes: int64(len(raw)), callID: domain.CallRecordID(coordinatorMutationID("callrec", "idea-batch-output", parent.ID)),
-		prefix: "idea-batch-output", mediaType: "application/vnd.cpgen.idea-batch+json", pathPrefix: "private/idea-batches/", schema: ideaBatchOutputSchema, role: domain.ArtifactOutput}
+		prefix: "idea-batch-output", mediaType: "application/vnd.cpgen.idea-batch+json", pathPrefix: "private/idea-batches/", schema: ideaBatchOutputSchema, role: domain.ArtifactOutput}}
 	failure, err := session.prepare(ctx)
 	if err != nil {
 		return result, err

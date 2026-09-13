@@ -1,4 +1,4 @@
-package workflow
+package fake
 
 import "cpgen/internal/port"
 

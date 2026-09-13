@@ -18,9 +18,13 @@ import (
 // and provider execution stay in their typed adapters. Prefix and schema values
 // are selected by compiled constructors, preserving historical receipt IDs.
 type privateResponseSession struct {
-	ledger                        LLMArtifactLedger
-	blobs                         *blob.Store
-	clock                         clock.Clock
+	privateResponseBinding
+	ledger LLMArtifactLedger
+	blobs  *blob.Store
+	clock  clock.Clock
+}
+
+type privateResponseBinding struct {
 	open                          domain.OpenCallRequest
 	binding                       domain.Digest
 	maxBytes                      int64
@@ -28,6 +32,12 @@ type privateResponseSession struct {
 	prefix, mediaType, pathPrefix string
 	schema                        domain.SchemaVersion
 	role                          domain.ArtifactRole
+}
+
+type PrivateReceiptReadStore interface {
+	LoadCall(context.Context, domain.CallRecordID) (domain.PreparedCalls, error)
+	ReadArtifactWriter(context.Context, domain.ArtifactDeclarationID) (domain.ArtifactDeclarationRecord, domain.ArtifactWriterToken, error)
+	ReadPendingArtifact(context.Context, domain.ArtifactDeclarationID) (domain.PendingArtifact, error)
 }
 
 func releasePrivateResponseSlots(ctx context.Context, session *privateResponseSession, reconcile bool) error {
@@ -49,7 +59,7 @@ func releasePrivateResponseSlots(ctx context.Context, session *privateResponseSe
 	return session.ledger.ReleaseUnwrittenArtifactReservations(ctx, session.artifactOpen())
 }
 
-func (s *privateResponseSession) declaration(ordinal int64) domain.ArtifactDeclarationRecord {
+func (s privateResponseBinding) declaration(ordinal int64) domain.ArtifactDeclarationRecord {
 	role := s.role
 	if role == "" {
 		role = domain.ArtifactEvidence
@@ -62,7 +72,7 @@ func (s *privateResponseSession) declaration(ordinal int64) domain.ArtifactDecla
 		Provenance: domain.ProvenanceCandidate{SchemaVersion: s.schema, Producer: string(s.schema), InputDigest: &s.binding}, CreatedAt: s.open.At}
 }
 
-func (s *privateResponseSession) artifactOpen() domain.OpenCallRequest {
+func (s privateResponseBinding) artifactOpen() domain.OpenCallRequest {
 	open := s.open
 	open.ID, open.IdempotencyKey = s.callID, coordinatorMutationID("open", s.callID)
 	open.LogicalOperationID, open.Provider, open.RequestDigest = s.prefix+":"+string(s.open.ID), "private-blob", s.binding
@@ -113,11 +123,11 @@ func (s *privateResponseSession) prepare(ctx context.Context) (*domain.PortFailu
 	return nil, nil
 }
 
-func (s *privateResponseSession) boundDeclaration(ctx context.Context, grant domain.DispatchGrant) (domain.ArtifactDeclarationRecord, domain.PreparedCalls, error) {
+func (s privateResponseBinding) boundDeclaration(ctx context.Context, ledger PrivateReceiptReadStore, grant domain.DispatchGrant) (domain.ArtifactDeclarationRecord, domain.PreparedCalls, error) {
 	if grant.CallRecordID != s.open.ID || grant.RunID != s.open.RunID || grant.StageName != s.open.StageName || grant.AttemptID != s.open.AttemptID || grant.Ordinal < 1 || grant.Ordinal > s.open.RetryPolicy.MaxAttempts || grant.AttemptCallID != domain.AttemptCallID(coordinatorMutationID("call", s.open.ID, grant.Ordinal)) {
 		return domain.ArtifactDeclarationRecord{}, domain.PreparedCalls{}, errors.New("response artifact scope differs from dispatch")
 	}
-	prepared, err := s.ledger.LoadCall(ctx, s.callID)
+	prepared, err := ledger.LoadCall(ctx, s.callID)
 	if err != nil {
 		return domain.ArtifactDeclarationRecord{}, prepared, err
 	}
@@ -128,7 +138,7 @@ func (s *privateResponseSession) boundDeclaration(ctx context.Context, grant dom
 }
 
 func (s *privateResponseSession) writer(ctx context.Context, grant domain.DispatchGrant) (port.ArtifactWriter, error) {
-	decl, prepared, err := s.boundDeclaration(ctx, grant)
+	decl, prepared, err := s.privateResponseBinding.boundDeclaration(ctx, s.ledger, grant)
 	if err != nil {
 		return nil, err
 	}
@@ -196,12 +206,29 @@ func (s *privateResponseSession) markPublished(ctx context.Context, ordinal int6
 // never authorizes a provider exchange. Typed callers validate the receipt's
 // schema, provider result and request binding before marking it published.
 func (s *privateResponseSession) readReceipt(ctx context.Context, grant domain.DispatchGrant) ([]byte, domain.PendingArtifact, bool, error) {
+	return s.privateResponseBinding.readReceipt(ctx, s.ledger, s.blobs, grant, func(decl domain.ArtifactDeclarationRecord, prepared domain.PreparedCalls) error {
+		session, err := NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
+		if err != nil {
+			return err
+		}
+		writer, err := session.Prepare(ctx, decl.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Finalize(ctx); err != nil {
+			return fmt.Errorf("%w: %w", errCallReceiptPending, err)
+		}
+		return nil
+	})
+}
+
+func (s privateResponseBinding) readReceipt(ctx context.Context, ledger PrivateReceiptReadStore, blobs port.VerifiedBlobReader, grant domain.DispatchGrant, finalize func(domain.ArtifactDeclarationRecord, domain.PreparedCalls) error) ([]byte, domain.PendingArtifact, bool, error) {
 	var empty domain.PendingArtifact
-	decl, prepared, err := s.boundDeclaration(ctx, grant)
+	decl, prepared, err := s.boundDeclaration(ctx, ledger, grant)
 	if err != nil {
 		return nil, empty, false, err
 	}
-	stored, token, err := s.ledger.ReadArtifactWriter(ctx, decl.ID)
+	stored, token, err := ledger.ReadArtifactWriter(ctx, decl.ID)
 	if errors.Is(err, sqlite.ErrNotFound) {
 		return nil, empty, false, nil
 	}
@@ -215,26 +242,22 @@ func (s *privateResponseSession) readReceipt(ctx context.Context, grant domain.D
 		return nil, empty, false, nil
 	}
 	if token.State == domain.ArtifactWriterSealed {
-		session, err := NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
-		if err != nil {
-			return nil, empty, false, err
+		if finalize == nil {
+			return nil, empty, false, errors.New("committed receipt has an unfinished writer")
 		}
-		writer, err := session.Prepare(ctx, decl.ID)
-		if err != nil {
+		if err := finalize(decl, prepared); err != nil {
 			return nil, empty, false, err
-		}
-		if _, err := writer.Finalize(ctx); err != nil {
-			return nil, empty, false, fmt.Errorf("%w: %w", errCallReceiptPending, err)
 		}
 	}
-	pending, err := s.ledger.ReadPendingArtifact(ctx, decl.ID)
+
+	pending, err := ledger.ReadPendingArtifact(ctx, decl.ID)
 	if err != nil {
 		return nil, empty, false, err
 	}
 	if pending.Blob.Size > s.maxBytes {
 		return nil, empty, false, errors.New("private response artifact exceeds bound")
 	}
-	reader, err := s.blobs.OpenVerified(ctx, pending.Blob)
+	reader, err := blobs.OpenVerified(ctx, pending.Blob)
 	if err != nil {
 		return nil, empty, false, err
 	}

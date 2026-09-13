@@ -4,7 +4,17 @@ Status: Current under ADR-0006
 
 Slice 1 checkpoint: **complete**. Slice 2 foundations, durable typed providers, stage-gap recovery, terminal reconciliation and explicit live preview composition pass their gates on `codex/phase2`. The preview preserves original attempts across process crashes and stops at non-waivable review; omitted workflow selection retains Fake behavior. The ordinary C++ forward generation loop passes real Docker and independent CLI acceptance with local provider fixtures. Mutation is deferred for redesign and is not a prerequisite.
 
-## Current priority — 2026-09-09 user revision
+## Current priority — architecture rework after user rejection
+
+The first R1–R4 implementation passed behavioral tests but added too many objects and configuration layers. Its [rework record](docs/evidence/architecture-follow-up-2026-09-14.md) is the current implementation reference.
+
+- [x] Remove wrapper lifecycle/recovery objects, the recovery registration map, mirror evidence interfaces and one-use stage configurations.
+- [x] Use one coordinator for runtime state, direct stage readers and flat resource composition; consolidate files by responsibility.
+- [x] Preserve the fixed loop, offline reads, exact evidence checks, original identities and atomic READY.
+- [x] Complete rework full race, Go 1.25 and real Docker recovery/cancellation/export checks; full normal tests, Linux build, vet and architecture checks also pass.
+- [ ] Separately design frozen toolchain lock snapshots; missing original lock files still prevent verified export.
+
+## Completed ordinary-problem loop — 2026-09-09 user revision
 
 Follow the [MVP generation-loop plan](docs/superpowers/plans/2026-09-09-mvp-generation-loop.md). ACCEPT continues to Solution; REJECT, review-band and insufficient business evidence enter human review. Existing dependency-failure recovery and bounded JSON-format repair remain separate.
 
@@ -15,7 +25,7 @@ Follow the [MVP generation-loop plan](docs/superpowers/plans/2026-09-09-mvp-gene
 
 The historical preview keeps its review boundary. [solution.example.yaml](config/solution.example.yaml) enables the forward Solution slice with a pinned local Docker engine and toolchain. The internal MVP now has [real Data execution](docs/evidence/mvp-data-foundation.md), [Judge checks](docs/evidence/mvp-judge-foundation.md) and [Quality plus package format v2](docs/evidence/mvp-quality-package-foundation.md). The [full MVP configuration](config/mvp.example.yaml) now passes ordinary C++ end-to-end acceptance with local provider fixtures and real Docker. External service availability, SPJ, generic untrusted import execution and Go end-to-end acceptance remain separate follow-up work.
 
-Integration checkpoint 2026-09-08: [verification evidence](docs/evidence/slice2-library-integration.md), [plan.md — LLM adapter](plan.md#32-llm-适配器实现方案) and [workflow scheduler](plan.md#42-workflow-调度器实现方案). ADR-0006 now admits the in-process libraries while preserving the accepted execution/storage contract. This checkpoint does not complete Slice 2 or enable real-provider CLI execution.
+Historical integration checkpoint 2026-09-08: [verification evidence](docs/evidence/slice2-library-integration.md), [plan.md — LLM adapter](plan.md#32-llm-适配器实现方案) and [workflow scheduler](plan.md#42-workflow-调度器实现方案). That checkpoint admitted the in-process libraries while preserving the accepted execution/storage contract. Its completion limits describe that date; current execution status is given above. The 2026-09-13 amendment replaces LangGraph assembly with a checked local stage loop.
 
 ## Rules
 

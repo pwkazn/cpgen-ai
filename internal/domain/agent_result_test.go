@@ -8,7 +8,7 @@ import (
 )
 
 func TestAgentResultAllowsExactlyOneOutcome(t *testing.T) {
-	value := domain.Slice1Prepared{Digest: domain.SumBytes([]byte("prepared"))}
+	value := domain.FakePrepared{Digest: domain.SumBytes([]byte("prepared"))}
 	result := domain.Success(value)
 	if err := result.Validate(); err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestAgentResultConstructorsCoverTypedOutcomes(t *testing.T) {
 		DependencyDigest: domain.SumBytes([]byte("dependency")), PolicyDigest: domain.SumBytes([]byte("policy")),
 		ErrorDigest: domain.SumBytes([]byte("error")), RetryAfter: testTime(), CreatedAt: testTime(),
 	}
-	if err := domain.Blocked[domain.Slice1Prepared](checkpoint).Validate(); err != nil {
+	if err := domain.Blocked[domain.FakePrepared](checkpoint).Validate(); err != nil {
 		t.Fatal(err)
 	}
 }

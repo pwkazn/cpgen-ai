@@ -16,7 +16,9 @@ Phase 1 uses one foreground Go CLI process for each active run on one host. A de
 
 The compiled Go binary owns a concrete typed stage sequence. SQLite stores current run and stage projections plus CPGen ledgers for budgets, calls, artifacts, cache, sandbox resources, reviews, and packages. External work occurs outside database write transactions.
 
-ADR-0006 permits LangGraphGo v0.8.5 only for in-process fixed graph assembly in the application layer and LangChainGo v0.1.14 inside the provider adapter. SQLite remains authoritative for progress; library types do not enter domain/port/stage contracts.
+Run inspection and package export use local storage assembly without Docker preflight or provider transports. Export still verifies the committed evidence chain and needs the original toolchain lock file for historical runs; missing lock content is rejected.
+
+ADR-0006 uses a local fixed loop in the application layer and LangChainGo v0.1.14 inside the provider adapter. SQLite remains authoritative for progress; each stage transition is checked after commit. Provider library types do not enter domain/port/stage contracts. The [architecture simplification plan](docs/superpowers/plans/2026-09-13-architecture-simplification.md) records the initial refactor; the [architecture rework record](docs/evidence/architecture-follow-up-2026-09-14.md) records the subsequent reduction of wrapper objects, mirror interfaces and duplicated composition.
 
 The detached Docker watchdog and exact resource identities remain mandatory. Restart is manual and reconciles only the current domain stage and its persisted effects.
 

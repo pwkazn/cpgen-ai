@@ -205,7 +205,7 @@ func assertJudgeCommittedReadsRejectSubstitution(t *testing.T, ctx context.Conte
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"judge/dataset.json", "judge/generated/001.out", "judge/samples/001.out"} {
 		changed := generationConfig
-		changed.Store = alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
+		changed.Store = &alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
 			if stage.Attempt.StageName != "judge" {
 				return
 			}
@@ -225,7 +225,7 @@ func assertJudgeCommittedReadsRejectSubstitution(t *testing.T, ctx context.Conte
 		if err != nil {
 			t.Fatal(err)
 		}
-		solution, err := application.NewSolutionExecutor(similarity)
+		solution, err := application.NewSolutionExecutor(similarity, generation)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func assertJudgeCommittedReadsRejectSubstitution(t *testing.T, ctx context.Conte
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := data.ReadJudgeVerification(ctx, runID); err == nil {
+		if _, err := data.Reader().ReadJudgeVerification(ctx, runID); err == nil {
 			t.Fatalf("Judge accepted missing committed artifact %s", path)
 		}
 	}

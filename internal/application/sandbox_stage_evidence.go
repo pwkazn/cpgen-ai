@@ -70,7 +70,7 @@ func (r *sandboxStageEvidence) pending(p *domain.PendingArtifact) error {
 	return err
 }
 
-func (r *sandboxStageEvidence) result(config DockerSandboxConfig, request, result any) error {
+func (r *sandboxStageEvidence) result(config SandboxReadPolicy, request, result any) error {
 	var kind domain.CallKind
 	var pending []*domain.PendingArtifact
 	switch request.(type) {
@@ -95,7 +95,7 @@ func (r *sandboxStageEvidence) result(config DockerSandboxConfig, request, resul
 	default:
 		return errors.New("unsupported sandbox evidence request")
 	}
-	identity, planIdentity, err := sandboxOperationIdentity(config, kind, request)
+	identity, planIdentity, err := sandboxReadOperationIdentity(config, kind, request)
 	if err != nil {
 		return err
 	}

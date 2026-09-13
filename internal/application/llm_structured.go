@@ -41,13 +41,8 @@ func NewStructuredLLMCalls(calls *LLMCalls, policy FormatRepairPolicy) (*Structu
 	if calls == nil || calls.artifacts == nil {
 		return nil, errors.New("structured LLM calls require private durable response storage")
 	}
-	if policy.MaxRepairs < 0 || policy.MaxRepairs > 1 {
-		return nil, errors.New("JSON format repair permits zero or one repair")
-	}
-	if policy.MaxRepairs == 1 {
-		if err := policy.Prompt.Validate(); err != nil {
-			return nil, err
-		}
+	if err := policy.Validate(); err != nil {
+		return nil, err
 	}
 	return &StructuredLLMCalls{calls: calls, policy: policy}, nil
 }
@@ -130,11 +125,15 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 }
 
 func (s *StructuredLLMCalls) bind(open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, error) {
+	return bindStructuredRequest(s.calls.provider, s.policy, open, request)
+}
+
+func bindStructuredRequest(provider LLMReadPolicy, policy FormatRepairPolicy, open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, error) {
 	if err := open.Validate(); err != nil {
 		return open, request, err
 	}
 	request.Variables = append(json.RawMessage(nil), request.Variables...)
-	plan, err := s.calls.provider.PlanGenerate(request)
+	plan, err := provider.PlanGenerate(request)
 	if err != nil {
 		return open, request, err
 	}
@@ -145,18 +144,22 @@ func (s *StructuredLLMCalls) bind(open domain.OpenCallRequest, request port.Gene
 		Revision string             `json:"revision"`
 		Provider domain.Digest      `json:"provider"`
 		Repair   FormatRepairPolicy `json:"repair"`
-	}{"cpgen.structured-llm/v1", request.ProviderPolicyDigest, s.policy})
+	}{"cpgen.structured-llm/v1", request.ProviderPolicyDigest, policy})
 	if err != nil {
 		return open, request, err
 	}
 	request.ProviderPolicyDigest = domain.SumBytes(raw)
 	open.PolicyDigest = request.ProviderPolicyDigest
-	plan, err = s.calls.provider.PlanGenerate(request)
+	plan, err = provider.PlanGenerate(request)
 	open.RequestDigest = plan.RequestDigest
 	return open, request, err
 }
 
 func (s *StructuredLLMCalls) repairRequest(open domain.OpenCallRequest, original port.GenerateRequest, repair port.RepairInput) (domain.OpenCallRequest, port.GenerateRequest, error) {
+	return buildRepairRequest(s.calls.provider, s.policy, open, original, repair)
+}
+
+func buildRepairRequest(provider LLMReadPolicy, policy FormatRepairPolicy, open domain.OpenCallRequest, original port.GenerateRequest, repair port.RepairInput) (domain.OpenCallRequest, port.GenerateRequest, error) {
 	if !validPrivateFormatRepair(&repair, original.Schema.SchemaVersion) {
 		return open, original, errors.New("format repair input is not an allowed diagnostic")
 	}
@@ -169,7 +172,7 @@ func (s *StructuredLLMCalls) repairRequest(open domain.OpenCallRequest, original
 		return open, original, err
 	}
 	request := original
-	request.Prompt = s.policy.Prompt
+	request.Prompt = policy.Prompt
 	request.Variables = variables
 	request.LogicalIdempotencyKey = coordinatorMutationID("format-repair", open.ID, open.PolicyDigest, 1)
 	open.ID = domain.CallRecordID(coordinatorMutationID("callrec", open.ID, "format-repair", open.PolicyDigest, 1))
@@ -177,7 +180,7 @@ func (s *StructuredLLMCalls) repairRequest(open domain.OpenCallRequest, original
 	open.IdempotencyKey = coordinatorMutationID("open", "format-repair", open.ID)
 	// Preserve At: the ledger's idempotency binding includes the original
 	// timestamp, so a restart must not supply a new wall-clock value.
-	plan, err := s.calls.provider.PlanGenerate(request)
+	plan, err := provider.PlanGenerate(request)
 	if err != nil {
 		return open, request, err
 	}
@@ -220,6 +223,18 @@ func (s *StructuredLLMCalls) appendResult(ctx context.Context, result *Structure
 				return errors.New("structured LLM settled usage overflows")
 			}
 			*target += value
+		}
+	}
+	return nil
+}
+
+func (policy FormatRepairPolicy) Validate() error {
+	if policy.MaxRepairs < 0 || policy.MaxRepairs > 1 {
+		return errors.New("JSON format repair permits zero or one repair")
+	}
+	if policy.MaxRepairs == 1 {
+		if err := policy.Prompt.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil

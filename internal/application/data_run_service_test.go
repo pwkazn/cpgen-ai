@@ -23,7 +23,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 	base := newDockerSandboxTestConfig(t, ctx)
 	for _, mode := range []string{"pass", "wrong_answer", "invalid_generated", "nondeterministic", "differential_wa", "reference_tle"} {
 		t.Run(mode, func(t *testing.T) {
-			f, _ := newSolutionExecutorFixtureForWorkflow(t, false, dataDockerOutputs(t, mode), workflow.MVPWorkflowRevision)
+			f, _ := newSolutionExecutorFixtureForWorkflow(t, false, dataDockerOutputs(t, mode), workflow.GenerationRevision)
 			generationConfig := f.executorConfig
 			generationConfig.Clock = clock.Real{}
 			var gap *dataReportGapStore
@@ -41,7 +41,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			solution, err := application.NewSolutionExecutor(evidence)
+			solution, err := application.NewSolutionExecutor(evidence, generation)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +82,9 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 					t.Fatalf("data report recovery replaced the original attempt: %+v %v", after, readErr)
 				}
 				if !errors.Is(err, errJudgeReportGap) || !gap.judgeFired.Load() || result.CurrentStage != "judge" {
-					t.Fatalf("missing Judge report interruption: %+v %v", result, err)
+					dataReport, dataReportErr := data.Reader().ReadVerification(ctx, result.RunID)
+					report, reportErr := data.Reader().ReadJudgeVerification(ctx, result.RunID)
+					t.Fatalf("missing Judge report interruption: %+v %v; data reason=%q, data report error=%v; judge reason=%q, judge report error=%v", result, err, dataReport.Reason, dataReportErr, report.Reason, reportErr)
 				}
 				before, readErr = f.store.CurrentStageAttempt(ctx, result.RunID, "judge")
 				if readErr != nil {
@@ -133,10 +135,10 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 			if mode == "pass" {
 				wantState = domain.RunReady
 			}
-			if err != nil || result.State != wantState || result.ActiveStartedAt != nil || result.WorkflowRevision != workflow.MVPWorkflowRevision {
+			if err != nil || result.State != wantState || result.ActiveStartedAt != nil || result.WorkflowRevision != workflow.GenerationRevision {
 				t.Fatalf("forward data run: %+v %v", result, err)
 			}
-			input, err := data.ReadInput(ctx, result.RunID)
+			input, err := data.Reader().ReadInput(ctx, result.RunID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,7 +154,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 				if input.Value == nil {
 					t.Fatalf("passing Solution did not admit data: %+v", input)
 				}
-				content, err := data.ReadDraft(ctx, result.RunID)
+				content, err := data.Reader().ReadDraft(ctx, result.RunID)
 				if err != nil || content.ValidateInput(*input.Value) != nil || len(content.Plan.Cases) != 4 || content.Plan.EffectiveSeed != seed {
 					t.Fatalf("committed data: %+v %v", content, err)
 				}
@@ -164,7 +166,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				reloaded, err := data.ReadDraft(ctx, result.RunID)
+				reloaded, err := data.Reader().ReadDraft(ctx, result.RunID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -172,7 +174,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 				if string(raw) != string(again) {
 					t.Fatal("reconstructed plan changed source bytes or seeds")
 				}
-				report, err := data.ReadVerification(ctx, result.RunID)
+				report, err := data.Reader().ReadVerification(ctx, result.RunID)
 				if err != nil || report.Passed != (mode == "pass" || mode == "differential_wa" || mode == "reference_tle") {
 					t.Fatalf("actual data verification: %+v %v", report, err)
 				}
@@ -182,11 +184,11 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 						t.Fatalf("validated dataset: %+v %v", manifest, err)
 					}
 					assertDataCommittedReadsRejectSubstitution(t, ctx, f, generationConfig, similarityConfig, base, result.RunID)
-					judgeInput, err := data.ReadJudgeInput(ctx, result.RunID)
+					judgeInput, err := data.Reader().ReadJudgeInput(ctx, result.RunID)
 					if err != nil {
 						t.Fatal(err)
 					}
-					judgeReport, err := data.ReadJudgeVerification(ctx, result.RunID)
+					judgeReport, err := data.Reader().ReadJudgeVerification(ctx, result.RunID)
 					if err != nil || judgeReport.ValidateFor(judgeInput) != nil || judgeReport.Passed != (mode == "pass") {
 						t.Fatalf("actual Judge report: %+v %v", judgeReport, err)
 					}
@@ -196,11 +198,11 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 							t.Fatalf("Judge answers: %+v %v", answers, err)
 						}
 						assertJudgeCommittedReadsRejectSubstitution(t, ctx, f, generationConfig, similarityConfig, base, result.RunID)
-						qualityInput, err := quality.ReadInput(ctx, result.RunID)
+						qualityInput, err := quality.Reader().ReadInput(ctx, result.RunID)
 						if err != nil {
 							t.Fatal(err)
 						}
-						qualityReport, err := quality.ReadReport(ctx, result.RunID)
+						qualityReport, err := quality.Reader().ReadReport(ctx, result.RunID)
 						if err != nil || !qualityReport.Passed || qualityReport.ValidateFor(result.RunID, qualityInput) != nil || len(qualityReport.Canaries) != 2 || len(qualityReport.Cases) != 6 {
 							t.Fatalf("current quality report: %+v %v", qualityReport, err)
 						}
@@ -208,7 +210,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 						if err != nil {
 							t.Fatal(err)
 						}
-						raw, record, err := packages.ReadArchive(ctx, result.RunID)
+						raw, record, err := packages.Reader().ReadArchive(ctx, result.RunID)
 						if err != nil || result.FinalPackageOccurrenceID == nil || record.OccurrenceID != *result.FinalPackageOccurrenceID {
 							t.Fatalf("verified package read: %+v %v", record, err)
 						}
@@ -235,7 +237,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 				if input.Review == nil {
 					t.Fatal("failed Solution admitted data")
 				}
-				if _, err := data.ReadDraft(ctx, result.RunID); err == nil {
+				if _, err := data.Reader().ReadDraft(ctx, result.RunID); err == nil {
 					t.Fatal("data draft exists after failed Solution")
 				}
 			}
@@ -287,7 +289,7 @@ func assertDataCommittedReadsRejectSubstitution(t *testing.T, ctx context.Contex
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"data/plan.json", "data/dataset.json", "data/generated/001.in", "data/generator/main.cpp"} {
 		changed := generationConfig
-		changed.Store = alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
+		changed.Store = &alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
 			if stage.Attempt.StageName != "data_verify" {
 				return
 			}
@@ -307,7 +309,7 @@ func assertDataCommittedReadsRejectSubstitution(t *testing.T, ctx context.Contex
 		if err != nil {
 			t.Fatal(err)
 		}
-		solution, err := application.NewSolutionExecutor(similarity)
+		solution, err := application.NewSolutionExecutor(similarity, generation)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -315,7 +317,7 @@ func assertDataCommittedReadsRejectSubstitution(t *testing.T, ctx context.Contex
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := data.ReadVerification(ctx, runID); err == nil {
+		if _, err := data.Reader().ReadVerification(ctx, runID); err == nil {
 			t.Fatalf("missing committed data artifact accepted: %s", path)
 		}
 	}

@@ -26,6 +26,8 @@ type SandboxArtifactSink struct {
 	identity port.SandboxAuthorizationIdentity
 }
 
+func (s *SandboxArtifactSink) RunID() domain.RunID { return s.identity.RunID }
+
 func NewSandboxArtifactSink(store RunLLMStore, blobs *blob.Store, source clock.Clock, identity port.SandboxAuthorizationIdentity) (*SandboxArtifactSink, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err

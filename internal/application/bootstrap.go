@@ -15,52 +15,39 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
-	"cpgen/internal/workflow"
 )
 
 // Application is the local foreground workflow composition. There is no
 // server, worker pool, or background workflow daemon hidden behind it.
 type Application struct {
 	Runs        RunService
+	Packages    PackageArchiveReader
 	Runtime     port.RuntimeStore
 	Reviews     port.ReviewStore
 	Maintenance *ArtifactMaintenance
 	Locks       *runlock.Manager
 
-	closeOnce    sync.Once
-	closeErr     error
-	closeStorage func() error
+	closeOnce      sync.Once
+	closeErr       error
+	closeStorage   func() error
+	closeExecution func() error
 }
-
-// StorageResources is retained as a compatibility type for callers that used
-// the old test composition hook. Bootstrap no longer consumes a process
-// global factory: the local application always composes its own SQLite and
-// blob stores from the validated effective paths below.
-type StorageResources struct {
-	Runtime        port.RuntimeStore
-	Reviews        port.ReviewStore
-	Metadata       port.GCMetadataStore
-	Ledger         port.ArtifactLedger
-	BlobStore      *blob.Store
-	SandboxRuntime interface {
-		UnfinishedSandboxExecutions(context.Context, domain.RunID) ([]domain.SandboxExecution, error)
-	}
-	Close func() error
-}
-
-type StorageFactory func(context.Context, config.Config) (StorageResources, error)
-
-// RegisterStorageFactory is kept source-compatible for older tests and
-// embedders. It is deliberately ignored by Bootstrap; relying on mutable
-// process-global registration would make the required application contract
-// depend on import order and CLI initialization.
-func RegisterStorageFactory(StorageFactory) {}
 
 // Bootstrap creates the private local application from a validated config.
 // The default remains the Fake pipeline. An explicit compiled workflow selector
 // composes durable generation and, for the Solution revision, a pinned local
 // Docker engine with detached cleanup. Each revision keeps its own boundary.
 func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
+	return bootstrap(ctx, cfg, true)
+}
+
+// BootstrapLocal opens local persistence and verified package readers without
+// constructing stage executors, provider clients, or the Docker runtime.
+func BootstrapLocal(ctx context.Context, cfg config.Config) (*Application, error) {
+	return bootstrap(ctx, cfg, false)
+}
+
+func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Application, error) {
 	if ctx == nil {
 		return nil, errors.New("bootstrap context is nil")
 	}
@@ -94,21 +81,12 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("bootstrap artifact ledger: %w", err)
 	}
-	resources := StorageResources{
-		Runtime: store, Reviews: store, Metadata: store, Ledger: store,
-		BlobStore: blobs, SandboxRuntime: store, Close: store.Close,
-	}
 	closeStore := true
 	defer func() {
 		if closeStore {
-			if resources.Close != nil {
-				_ = resources.Close()
-			}
+			_ = store.Close()
 		}
 	}()
-	if resources.Runtime == nil || resources.Reviews == nil || resources.Metadata == nil || resources.Ledger == nil || resources.BlobStore == nil || resources.SandboxRuntime == nil {
-		return nil, errors.New("bootstrap storage factory returned incomplete resources")
-	}
 	locks, err := runlock.NewManager(paths.Locks, runlock.Options{PollInterval: cfg.Runtime.LockPollInterval})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap run locks: %w", err)
@@ -119,26 +97,36 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 			_ = locks.Close()
 		}
 	}()
-	maintenance, err := NewArtifactMaintenance(locks, resources.Metadata, resources.BlobStore)
+	maintenance, err := NewArtifactMaintenance(locks, store, blobs)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap artifact maintenance: %w", err)
 	}
-	reconciler := &localSandboxReconciler{runtime: resources.SandboxRuntime}
+	reader, err := NewCommittedPackageReader(store, blobs)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap package reader: %w", err)
+	}
+	app := &Application{Runtime: store, Reviews: store, Maintenance: maintenance, Locks: locks, closeStorage: store.Close,
+		Packages: &lockedPackageReader{locks: locks, reader: reader}}
+	if !execution {
+		closeStore, closeLocks = false, false
+		return app, nil
+	}
+	reconciler := &localSandboxReconciler{runtime: store}
 	var runs *LocalRunService
 	if cfg.Workflow != nil {
-		runs, err = bootstrapSlice2RunService(ctx, cfg, store, blobs, locks, reconciler, effectiveJSON)
+		runs, app.closeExecution, err = bootstrapGenerationRunService(ctx, cfg, store, blobs, locks, reconciler, effectiveJSON)
 	} else {
-		pipeline, pipelineErr := workflow.NewSlice1Pipeline(
-			fake.NewPrepareStep(workflow.PrepareCapabilities{}),
-			fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
-			fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+		pipeline, pipelineErr := fake.NewPipeline(
+			fake.NewPrepareStep(fake.PrepareCapabilities{}),
+			fake.NewExerciseStep(fake.ExerciseCapabilities{}),
+			fake.NewCheckpointStep(fake.CheckpointCapabilities{}),
 		)
 		if pipelineErr != nil {
 			return nil, fmt.Errorf("bootstrap fake pipeline: %w", pipelineErr)
 		}
 		runs, err = NewRunService(RunServiceConfig{
-			Runtime: resources.Runtime, Reviews: resources.Reviews, Locks: locks, Pipeline: pipeline,
-			Clock: clock.Real{}, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat,
+			Runtime: store, Reviews: store, Locks: locks, Pipeline: pipeline,
+			Clock: clock.Real{}, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat, ControlPollInterval: cfg.Runtime.ControlPollInterval,
 			Reconciler: reconciler, EffectiveConfigJSON: effectiveJSON,
 			EffectiveConfigDigest: cfg.EffectiveDigest(), Scenario: cfg.FakeWorkflow.Scenario,
 		})
@@ -146,7 +134,7 @@ func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap run service: %w", err)
 	}
-	app := &Application{Runs: runs, Runtime: resources.Runtime, Reviews: resources.Reviews, Maintenance: maintenance, Locks: locks, closeStorage: resources.Close}
+	app.Runs = runs
 	closeStore, closeLocks = false, false
 	return app, nil
 }
@@ -160,8 +148,8 @@ func (a *Application) Close() error {
 	}
 	a.closeOnce.Do(func() {
 		var errs []error
-		if closer, ok := a.Runs.(interface{ Close() error }); ok {
-			errs = append(errs, closer.Close())
+		if a.closeExecution != nil {
+			errs = append(errs, a.closeExecution())
 		}
 		if a.Locks != nil {
 			errs = append(errs, a.Locks.Close())

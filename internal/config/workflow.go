@@ -80,7 +80,7 @@ func decodeWorkflow(raw *rawWorkflowConfig) (*WorkflowConfig, error) {
 }
 
 func (c WorkflowConfig) Validate() error {
-	if c.Revision != workflow.Slice2CheckpointWorkflowRevision && c.Revision != workflow.SolutionWorkflowRevision && c.Revision != workflow.MVPWorkflowRevision {
+	if c.Revision != workflow.LegacySimilarityCheckpointRevision && c.Revision != workflow.LegacySolutionCheckpointRevision && c.Revision != workflow.GenerationRevision {
 		return field("workflow.revision", errors.New("must select a supported compiled live workflow revision"))
 	}
 	if c.IdeaCount < 2 || c.IdeaCount > 8 {

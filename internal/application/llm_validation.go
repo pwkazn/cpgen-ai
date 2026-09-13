@@ -29,17 +29,27 @@ func (s *LLMCalls) ReadFormatRepair(ctx context.Context, open domain.OpenCallReq
 	if ctx == nil || s.artifacts == nil {
 		return nil, errors.New("format repair requires context and private response storage")
 	}
+	return verifyFormatRepair(ctx, s.ledger, s.provider, open, request, func(ctx context.Context, grant domain.DispatchGrant) (domain.PhysicalExecution[port.GenerateResponse], *port.RepairInput, bool, error) {
+		session, err := s.artifacts.session(open, request)
+		if err != nil {
+			return domain.PhysicalExecution[port.GenerateResponse]{}, nil, false, err
+		}
+		return session.replayReceipt(ctx, grant, s.provider)
+	})
+}
+
+func verifyFormatRepair(ctx context.Context, ledger ReceiptCallReadStore, provider LLMReadPolicy, open domain.OpenCallRequest, request port.GenerateRequest, replay func(context.Context, domain.DispatchGrant) (domain.PhysicalExecution[port.GenerateResponse], *port.RepairInput, bool, error)) (*port.RepairInput, error) {
 	if err := open.Validate(); err != nil {
 		return nil, err
 	}
-	plan, err := s.provider.PlanGenerate(request)
+	plan, err := provider.PlanGenerate(request)
 	if err != nil {
 		return nil, err
 	}
 	if open.Kind != domain.CallLLMGenerate || open.RequestDigest != plan.RequestDigest || open.Provider != plan.Provider || open.PolicyDigest != request.ProviderPolicyDigest || open.LogicalOperationID != request.LogicalIdempotencyKey {
 		return nil, errors.New("format repair request binding differs")
 	}
-	prepared, err := s.ledger.LoadCall(ctx, open.ID)
+	prepared, err := ledger.LoadCall(ctx, open.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -53,15 +63,11 @@ func (s *LLMCalls) ReadFormatRepair(ctx context.Context, open domain.OpenCallReq
 	if call.ResultAttemptCallID == nil || len(call.Failure.Evidence) != 1 {
 		return nil, errors.New("format repair lacks one physical validation receipt")
 	}
-	grant, err := s.ledger.ResumeDispatch(ctx, open.ExpectedRunVersion, *call.ResultAttemptCallID)
+	grant, err := ledger.ResumeDispatch(ctx, open.ExpectedRunVersion, *call.ResultAttemptCallID)
 	if err != nil {
 		return nil, err
 	}
-	session, err := s.artifacts.session(open, request)
-	if err != nil {
-		return nil, err
-	}
-	execution, repair, found, err := session.replayReceipt(ctx, grant, s.provider)
+	execution, repair, found, err := replay(ctx, grant)
 	if err != nil {
 		return nil, err
 	}
@@ -78,4 +84,10 @@ func (s *LLMCalls) ReadFormatRepair(ctx context.Context, open domain.OpenCallReq
 		}
 	}
 	return nil, errors.New("format repair receipt differs from completed physical call")
+}
+
+func (s *CommittedLLMReader) readFormatRepair(ctx context.Context, open domain.OpenCallRequest, request port.GenerateRequest) (*port.RepairInput, error) {
+	return verifyFormatRepair(ctx, s.ledger, s.provider, open, request, func(ctx context.Context, grant domain.DispatchGrant) (domain.PhysicalExecution[port.GenerateResponse], *port.RepairInput, bool, error) {
+		return s.receipt(ctx, open, request, grant)
+	})
 }

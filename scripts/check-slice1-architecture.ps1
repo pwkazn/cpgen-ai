@@ -70,14 +70,19 @@ function Get-Lines {
     return @(Get-Content -LiteralPath $absolutePath)
 }
 
-# Keep the library amendment coupled to the durable authority contract.
+# Keep local scheduling and provider integration coupled to durable authority.
 # Historical Slice 0/1 verification files deliberately remain outside this set.
 $libraryContracts = @{
-    'docs/adr/0006-lightweight-local-workflow.md' = @('LangGraphGo', 'LangChainGo', 'internal/application', 'internal/agent', 'SQLite remains authoritative')
-    'ARCHITECTURE.md' = @('LangGraphGo', 'LangChainGo', 'SQLite remains authoritative', 'Go 1.25.0')
-    'docs/design/workflow.md' = @('LangGraphGo', 'internal/application', 'SQLite remains authoritative')
+    'docs/adr/0006-lightweight-local-workflow.md' = @('local fixed loop', 'LangChainGo', 'internal/application', 'internal/agent', 'SQLite remains authoritative')
+    'ARCHITECTURE.md' = @('local fixed loop', 'LangChainGo', 'SQLite remains authoritative', 'Go 1.25.0')
+    'docs/design/workflow.md' = @('local fixed loop', 'internal/application', 'SQLite remains authoritative')
     'docs/design/llm.md' = @('LangChainGo', 'internal/agent', 'CallCoordinator')
-    'go.mod' = @('go 1.25.0', 'github.com/tmc/langchaingo v0.1.14', 'github.com/smallnest/langgraphgo v0.8.5')
+    'go.mod' = @('go 1.25.0', 'github.com/tmc/langchaingo v0.1.14')
+}
+
+$moduleLines = Get-Lines -Path 'go.mod'
+if ($null -ne $moduleLines -and ($moduleLines -join "`n") -match 'github\.com/smallnest/langgraphgo') {
+    Add-Failure -Path 'go.mod' -Line 1 -Phrase 'github.com/smallnest/langgraphgo' -Reason 'fixed scheduling must use the local loop'
 }
 foreach ($path in $libraryContracts.Keys) {
     $lines = Get-Lines -Path $path

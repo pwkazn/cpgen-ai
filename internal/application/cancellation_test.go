@@ -13,7 +13,6 @@ import (
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/runlock"
-	"cpgen/internal/workflow"
 )
 
 func TestRunServiceOwnerCancelFinalizesWithValidDeterministicKeys(t *testing.T) {
@@ -34,10 +33,10 @@ func TestRunServiceOwnerCancelFinalizesWithValidDeterministicKeys(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	pipeline, err := workflow.NewSlice1Pipeline(
-		fake.NewPrepareStep(workflow.PrepareCapabilities{}),
-		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
-		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+	pipeline, err := fake.NewPipeline(
+		fake.NewPrepareStep(fake.PrepareCapabilities{}),
+		fake.NewExerciseStep(fake.ExerciseCapabilities{}),
+		fake.NewCheckpointStep(fake.CheckpointCapabilities{}),
 	)
 	if err != nil {
 		t.Fatal(err)

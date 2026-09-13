@@ -47,7 +47,7 @@ func TestSlice2ExamplesValidateGenerateAndResumeThroughCLI(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "NEEDS_REVIEW" || result.Data.State != domain.RunNeedsReview || result.Data.CurrentStage != "idea" || result.Data.WorkflowRevision != workflow.Slice2CheckpointWorkflowRevision {
+	if result.Status != "NEEDS_REVIEW" || result.Data.State != domain.RunNeedsReview || result.Data.CurrentStage != "idea" || result.Data.WorkflowRevision != workflow.LegacySimilarityCheckpointRevision {
 		t.Fatalf("unexpected preview: %+v", result)
 	}
 	version := result.Data.Version

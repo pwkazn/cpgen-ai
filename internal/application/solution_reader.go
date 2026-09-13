@@ -13,7 +13,83 @@ import (
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	"cpgen/internal/similarity"
 )
+
+type CommittedSimilarityReader interface {
+	ReadCommitted(context.Context, domain.RunID) (SimilarityContent, error)
+}
+type SolutionReader struct {
+	similarity CommittedSimilarityReader
+	generation *GenerationReader
+	calls      CommittedDraftReader
+	store      SandboxEvidenceReadStore
+	blobs      port.VerifiedBlobReader
+	revision   string
+}
+
+// ReadInput reconstructs current committed acceptance; a caller-supplied ACCEPT is insufficient.
+func (s *SolutionReader) ReadInput(ctx context.Context, runID domain.RunID) (domain.AgentResult[domain.SolutionDraftInputV1], error) {
+	var empty domain.AgentResult[domain.SolutionDraftInputV1]
+	content, err := s.similarity.ReadCommitted(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if content.Decision.Kind != similarity.DecisionAccept {
+		result := domain.Review[domain.SolutionDraftInputV1](domain.ReviewRequest{EvidenceDigest: content.Evidence.EvidenceDigest, PolicyDigest: content.Input.ExecutionPolicyDigest, Reason: "similarity_requires_review:" + string(content.Decision.Kind)})
+		return result, result.Validate()
+	}
+	inputDigest, err := content.Input.Digest()
+	if err != nil {
+		return empty, err
+	}
+	decision, err := canonicalJSON(content.Decision)
+	if err != nil {
+		return empty, err
+	}
+	input, err := domain.NewSolutionDraftInput(content.Statement.Idea.Snapshot, content.Statement.Problem, inputDigest, content.Evidence.EvidenceDigest, domain.SumBytes(decision))
+	if err != nil {
+		return empty, err
+	}
+	return domain.Success(input), nil
+}
+
+// ReadDraft validates committed content provenance, not compilation or Judge proof.
+func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.SolutionContent, error) {
+	var empty domain.SolutionContent
+	input, err := s.ReadInput(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if input.Value == nil {
+		return empty, errors.New("solution draft has no accepted current source")
+	}
+	variables, err := input.Value.CanonicalJSON()
+	if err != nil {
+		return empty, err
+	}
+	digest, err := input.Value.Digest()
+	if err != nil {
+		return empty, err
+	}
+	calls := s.calls
+	raw, expected, err := s.generation.readDraft(ctx, runID, "solution", digest, variables, calls)
+	if err != nil {
+		return empty, err
+	}
+	var draft domain.SolutionDraftV1
+	if err := json.Unmarshal(raw, &draft); err != nil {
+		return empty, err
+	}
+	content, err := draft.Bind(*input.Value)
+	if err != nil {
+		return empty, err
+	}
+	if content.ContentDigest != expected {
+		return empty, errors.New("committed solution digest differs from reconstructed content")
+	}
+	return content, nil
+}
 
 type solutionVerificationReadStore interface {
 	port.SandboxLifecycleReader
@@ -24,12 +100,9 @@ type solutionVerificationReadStore interface {
 // sample execution requests, Docker receipts, retained artifacts and cleanup.
 // Configuration supplies the frozen toolchain/Engine policy only; this method
 // never starts Docker, writes artifacts, or calls either external provider.
-func (s *SolutionExecutor) ReadVerification(ctx context.Context, runID domain.RunID, config DockerSandboxConfig) (SolutionVerificationReport, error) {
+func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunID, config SandboxReadPolicy) (SolutionVerificationReport, error) {
 	var empty SolutionVerificationReport
-	store, ok := s.generation.config.Store.(solutionVerificationReadStore)
-	if !ok {
-		return empty, errors.New("solution verification requires committed sandbox reads")
-	}
+	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -62,7 +135,7 @@ func (s *SolutionExecutor) ReadVerification(ctx context.Context, runID domain.Ru
 		}
 		items[item.Blob.LogicalPath] = item
 	}
-	blobs := s.generation.config.Blobs
+	blobs := s.blobs
 	read := func(path domain.SafeRelPath, expected domain.BlobRef, role domain.ArtifactRole, limit int64) ([]byte, error) {
 		item, exists := items[path]
 		if !exists || item.Blob.Blob != expected || item.Blob.Role != role {
@@ -101,7 +174,7 @@ func (s *SolutionExecutor) ReadVerification(ctx context.Context, runID domain.Ru
 		if !exists || item.Blob.MediaType != p.MediaType || !reflect.DeepEqual(item.Blob.Provenance, p.Provenance) {
 			return errors.New("verification process artifact metadata differs")
 		}
-		call, err := s.generation.config.Store.ReadLogicalCall(ctx, item.CurrentCallRecordID)
+		call, err := s.store.ReadLogicalCall(ctx, item.CurrentCallRecordID)
 		if err != nil {
 			return err
 		}
@@ -112,7 +185,7 @@ func (s *SolutionExecutor) ReadVerification(ctx context.Context, runID domain.Ru
 		return err
 	}
 	verifyResult := func(kind domain.CallKind, request any, result any, build func(docker.PlanIdentity) (port.ContainerPlan, error)) error {
-		identity, planIdentity, err := sandboxOperationIdentity(config, kind, request)
+		identity, planIdentity, err := sandboxReadOperationIdentity(config, kind, request)
 		if err != nil {
 			return err
 		}

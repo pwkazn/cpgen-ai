@@ -12,7 +12,7 @@ import (
 const similarityYAML = "similarity:\n  endpoint: https://similarity.example.com/search\n  api_key_env: CPGEN_TEST_SIMILARITY_KEY\n  provider_identity: fixture\n  service_identity: index-v1\n  timeout: 30s\n  max_response_bytes: 1048576\n  limit: 20\n  policy_ref: similarity-policy/v1\n  acceptance_threshold: 0.5\n  rejection_threshold: 0.8\n  minimum_hits: 1\n"
 
 func explicitWorkflowYAML() string {
-	return "workflow:\n  revision: " + workflow.Slice2CheckpointWorkflowRevision + "\n  idea_count: 2\n  llm_cost_upper_bound_micro_usd: 10000\n  similarity_cost_upper_bound_micro_usd: 1000\n"
+	return "workflow:\n  revision: " + workflow.LegacySimilarityCheckpointRevision + "\n  idea_count: 2\n  llm_cost_upper_bound_micro_usd: 10000\n  similarity_cost_upper_bound_micro_usd: 1000\n"
 }
 
 func TestWorkflowDefaultIdeaCountMatchesDeclaredContentPolicy(t *testing.T) {
@@ -40,7 +40,7 @@ func TestWorkflowSelectionIsExplicitAndFrozenWithoutCredentialValues(t *testing.
 	t.Setenv("CPGEN_TEST_PROVIDER_KEY", "private-provider-value")
 	t.Setenv("CPGEN_TEST_SIMILARITY_KEY", "private-similarity-value")
 	live, err := config.Decode([]byte(base + providerYAML + similarityYAML + explicitWorkflowYAML()))
-	if err != nil || live.Workflow == nil || live.Similarity == nil || live.Workflow.Revision != workflow.Slice2CheckpointWorkflowRevision || live.Workflow.IdeaCount != 2 || live.Similarity.Limit != 20 {
+	if err != nil || live.Workflow == nil || live.Similarity == nil || live.Workflow.Revision != workflow.LegacySimilarityCheckpointRevision || live.Workflow.IdeaCount != 2 || live.Similarity.Limit != 20 {
 		t.Fatalf("explicit selection=%+v err=%v", live.Workflow, err)
 	}
 	raw, err := live.Effective()
@@ -77,7 +77,7 @@ func TestWorkflowConfigurationRequiresCompleteClosedDependencies(t *testing.T) {
 	assertConfigField(t, base+providerYAML+explicitWorkflowYAML(), "similarity")
 	complete := base + providerYAML + similarityYAML + explicitWorkflowYAML()
 	for _, test := range []struct{ old, replacement, field string }{
-		{workflow.Slice2CheckpointWorkflowRevision, workflow.Slice2WorkflowRevision, "workflow.revision"},
+		{workflow.LegacySimilarityCheckpointRevision, workflow.LegacySimilarityRevision, "workflow.revision"},
 		{"idea_count: 2", "idea_count: 1", "workflow.idea_count"},
 		{"idea_count: 2", "idea_count: 9", "workflow.idea_count"},
 		{"llm_cost_upper_bound_micro_usd: 10000", "llm_cost_upper_bound_micro_usd: 0", "workflow.llm_cost_upper_bound_micro_usd"},

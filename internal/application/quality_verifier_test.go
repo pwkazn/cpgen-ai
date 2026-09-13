@@ -147,7 +147,7 @@ func assertQualityCommittedReadsRejectSubstitution(t *testing.T, ctx context.Con
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"quality/checker/main.cpp", "quality/canaries/wa/output.txt"} {
 		changed := generationConfig
-		changed.Store = alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
+		changed.Store = &alteredSolutionStageStore{f.store, func(stage *port.CommittedPrivateStage) {
 			if stage.Attempt.StageName != "quality" {
 				return
 			}
@@ -167,7 +167,7 @@ func assertQualityCommittedReadsRejectSubstitution(t *testing.T, ctx context.Con
 		if err != nil {
 			t.Fatal(err)
 		}
-		solution, err := application.NewSolutionExecutor(similarity)
+		solution, err := application.NewSolutionExecutor(similarity, generation)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -179,7 +179,7 @@ func assertQualityCommittedReadsRejectSubstitution(t *testing.T, ctx context.Con
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := quality.ReadReport(ctx, runID); err == nil {
+		if _, err := quality.Reader().ReadReport(ctx, runID); err == nil {
 			t.Fatalf("quality accepted a missing committed artifact: %s", path)
 		}
 	}

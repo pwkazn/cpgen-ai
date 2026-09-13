@@ -36,7 +36,9 @@ Different runs may execute concurrently in separate CLI processes. A single run 
 
 ## 3. System context
 
-The user interacts only with the cpgen CLI. Ordinary stateful run commands load configuration, open and migrate SQLite, acquire the shared artifact-usage lock and the run-specific execution lock, reconcile unfinished sandbox resources for that run, perform one command, and exit. GC is an explicit maintenance command: it acquires the exclusive global artifact lock, takes no per-run lock, and never executes a run stage.
+The user interacts through the cpgen CLI. Read commands use local storage assembly without stage executors, provider transports or Docker preflight. Package export acquires the shared run lock and then the shared artifact lock, reconstructs committed proof using the run's frozen settings, and verifies the archive. Historical runs still require their original local toolchain lock file because its content was not persisted in the run; missing or changed lock bytes cause export to fail.
+
+Execution commands load configuration, open and migrate SQLite, acquire the run-specific execution lock and shared artifact-usage lock, reconcile unfinished sandbox resources when required, perform one command, and exit. Explicit artifact maintenance acquires the exclusive global artifact lock, takes no per-run lock, and never executes a run stage. It is currently an application API, not an exposed CLI subcommand.
 
 External dependencies are limited to explicitly configured model and similarity providers plus the local Docker Engine. Adapters normalize provider results into typed domain outcomes. Ordinary tests use deterministic Fake adapters; real-service smoke tests are opt-in.
 
@@ -48,21 +50,20 @@ The CLI validates configuration and requests, invokes application services, stre
 
 ### 4.2 Application coordinator
 
-The coordinator owns:
+The application uses a fixed loop, one run coordinator and explicit business stages:
 
-- creating a run from immutable request, configuration, and workflow digests;
-- acquiring the run lock before mutable execution;
-- selecting the current compiled stage;
-- opening a durable stage attempt with a stable logical idempotency key;
-- reserving budgets and effect records;
-- invoking the stage outside database write transactions;
-- verifying artifacts and evidence;
-- atomically settling ledgers, completing the attempt, advancing the projection, and appending events;
-- stopping at BLOCKED, NEEDS_REVIEW, READY, FAILED, or CANCELLED.
+- Bootstrap/Application constructs storage, providers and Docker, and owns resource closure. Read commands use BootstrapLocal without execution resources.
+- LocalRunService owns run locks, attempts, start/finish, cancellation, review and recovery. Its stageControl helper owns joined accounting/cancellation pollers. Runtime state is not copied into separate lifecycle, termination or recovery objects.
+- `fixedStages` contains typed input/result dispatch and the explicit recovery switch. Business executors use their own Reader; they do not contain upstream executors. Each Reader's methods and proof verification live together.
+- Read-only model and sandbox policies remain separate from transports. Artifact publication takes the existing admitted attempt and run version, then uses the unchanged ledger internally.
+
+`GenerationRunConfig` supplies owner resources once. Composition validates shared storage, admission, clock, locks and frozen policy before directly assembling stage structs. Historical constructor helpers exist only in tests; immutable `workflow.Definition` preserves persisted revisions and stage sequences without upgrading old runs.
+
+Committed readers continue checking run/attempt provenance, publication state and Blob digests. Package completion uses the separate `FinalizeVerifiedPackage` transaction; READY cannot precede the verified occurrence. RunView, BudgetSnapshot and CallTrace stay derived views. The [rework record](docs/evidence/architecture-follow-up-2026-09-14.md) documents removed abstractions and validation.
 
 It does not implement generic scheduling, replay, timers, or distributed ownership.
 
-Under the 2026-09-08 ADR-0006 amendment, LangGraphGo is permitted only for fixed serial graph assembly in `internal/application`. SQLite remains authoritative: a node must check the stage/evidence commit before advancing, and recovery reads the existing projection and verified occurrences. Automatic graph checkpoints and a parallel graph.json store are excluded. LangChainGo stays in `internal/agent`; provider and scheduler library types never enter domain, port or stage code. The current CLI still uses the Slice 1 Fake constructor while durable integration is completed.
+Under the 2026-09-13 ADR-0006 amendment, a local fixed loop in `internal/application` replaces the LangGraphGo wrapper. SQLite remains authoritative: the loop must check the stage/evidence commit before advancing, and recovery reads the existing projection and verified occurrences. Automatic graph checkpoints and a parallel graph.json store are excluded. LangChainGo stays in `internal/agent`; provider library types never enter domain, port or stage code. Explicit configuration selects the MVP; the default Fake and historical preview revisions retain their existing boundaries.
 
 ### 4.3 Typed stages
 
@@ -96,7 +97,7 @@ All identifiers are validated before they are used in paths, labels, or queries.
 
 ## 6. Fixed workflow
 
-The authoritative stage order is compiled. Persisted stage name, ordinal, workflow revision, and schema version select a compatible binary definition; database rows do not define graph edges.
+The authoritative stage order and attempt recovery policy are compiled in `internal/workflow/definition.go`. Definition accessors copy stage slices; callers cannot mutate the order. Persisted stage name, ordinal, workflow revision, and schema version select a compatible binary definition; database rows do not define graph edges.
 
 The closed run state set is:
 
@@ -110,7 +111,7 @@ The closed run state set is:
 
 A stage uses PENDING, RUNNING, SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, or CANCELLED. Its append-only attempt ends as SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, CANCELLED, or INTERRUPTED.
 
-READY remains unreachable until Slice 5 satisfies package gates.
+The MVP reaches READY only through the verified Package transaction. Historical preview and checkpoint revisions do not produce READY.
 
 ## 7. Per-run locking and transaction protocol
 
@@ -217,7 +218,7 @@ Slice 1 proves:
 - watchdog death, deadline, and exact-resource reconciliation;
 - no external I/O during SQLite write transactions.
 
-Release gates include full Go tests, vet, race tests, Go 1.25.0 compatibility, Linux cross-build, Docker-required safety tests where available, and the architecture consistency script. go.mod pins LangChainGo v0.1.14 and LangGraphGo v0.8.5; CI tests the minimum Go version and the current stable toolchain.
+Release gates include full Go tests, vet, race tests, Go 1.25.0 compatibility, Linux cross-build, Docker-required safety tests where available, and the architecture consistency script. go.mod pins LangChainGo v0.1.14; fixed scheduling has no graph-library dependency. CI tests the minimum Go version and the current stable toolchain.
 
 ## 15. Delivery slices
 

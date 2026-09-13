@@ -27,7 +27,7 @@ type GenerationReaderOptions struct {
 
 type GenerationReader struct {
 	store           GenerationReadStore
-	idea, statement *StructuredLLMCalls
+	idea, statement CommittedDraftReader
 	options         GenerationReaderOptions
 }
 
@@ -50,7 +50,7 @@ type GenerationStatementContent struct {
 	Problem domain.ProblemSpec
 }
 
-func NewGenerationReader(store GenerationReadStore, idea, statement *StructuredLLMCalls, options GenerationReaderOptions) (*GenerationReader, error) {
+func NewGenerationReader(store GenerationReadStore, idea, statement CommittedDraftReader, options GenerationReaderOptions) (*GenerationReader, error) {
 	if store == nil || idea == nil || statement == nil {
 		return nil, errors.New("generation reader requires typed storage and both structured response readers")
 	}
@@ -179,7 +179,7 @@ func (r *GenerationReader) ReadStatement(ctx context.Context, runID domain.RunID
 	return GenerationStatementContent{idea, problem}, nil
 }
 
-func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, stage domain.StageName, inputDigest domain.Digest, variables []byte, service *StructuredLLMCalls) ([]byte, domain.Digest, error) {
+func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, stage domain.StageName, inputDigest domain.Digest, variables []byte, service CommittedDraftReader) ([]byte, domain.Digest, error) {
 	committed, err := r.store.ReadCommittedLLMStage(ctx, runID, stage)
 	if err != nil {
 		return nil, "", err
@@ -229,7 +229,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 			continue
 		}
 		request := port.GenerateRequest{Prompt: prompt, Schema: schema, Variables: append(json.RawMessage(nil), variables...), Sampling: r.options.Sampling, MaxOutput: r.options.MaxOutput, LogicalIdempotencyKey: candidate.LogicalOperationID, ProviderPolicyDigest: r.options.ProviderPolicyDigest, PrivacyClassification: "private"}
-		plan, err := service.calls.provider.PlanGenerate(request)
+		plan, err := service.PlanGenerate(request)
 		if err != nil {
 			return nil, "", err
 		}
@@ -253,11 +253,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 				return nil, "", errors.New("committed stage contains unrelated provider output")
 			}
 		}
-		ledger, ok := service.calls.ledger.(LLMCacheLedger)
-		if !ok {
-			return nil, "", errors.New("committed draft requires producer occurrence reads")
-		}
-		actualSource, item, err := ledger.ReadCommittedLLMArtifact(ctx, runID, response.RawBlob.WriterTokenID)
+		actualSource, item, err := service.ReadCommittedLLMArtifact(ctx, runID, response.RawBlob.WriterTokenID)
 		if err != nil {
 			return nil, "", err
 		}

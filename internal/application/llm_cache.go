@@ -131,37 +131,11 @@ func (s *StructuredLLMCache) Put(ctx context.Context, open domain.OpenCallReques
 }
 
 func (s *StructuredLLMCalls) readCommittedResponse(ctx context.Context, open domain.OpenCallRequest, request port.GenerateRequest) (*port.GenerateResponse, error) {
-	prepared, err := s.calls.ledger.LoadCall(ctx, open.ID)
+	reader, err := s.committedReader()
 	if err != nil {
 		return nil, err
 	}
-	call := prepared.Call
-	if call.RunID != open.RunID || call.StageName != open.StageName || call.AttemptID != open.AttemptID || call.RequestDigest != open.RequestDigest || call.PolicyDigest != open.PolicyDigest || call.LogicalOperationID != open.LogicalOperationID || call.State != domain.CallRecordTerminal || call.Failure != nil || call.ResultAttemptCallID == nil {
-		return nil, errors.New("cache source is not a matching successful terminal provider call")
-	}
-	session, err := s.calls.artifacts.session(open, request)
-	if err != nil {
-		return nil, err
-	}
-	local, err := s.calls.ledger.LoadCall(ctx, session.callID)
-	if err != nil {
-		return nil, err
-	}
-	if local.Call.State != domain.CallRecordTerminal || local.Call.Failure != nil {
-		return nil, errors.New("private response is not committed for cache reuse")
-	}
-	grant, err := s.calls.ledger.ResumeDispatch(ctx, open.ExpectedRunVersion, *call.ResultAttemptCallID)
-	if err != nil {
-		return nil, err
-	}
-	execution, diagnostic, found, err := session.replayReceipt(ctx, grant, s.calls.provider)
-	if err != nil {
-		return nil, err
-	}
-	if !found || diagnostic != nil || execution.Value == nil || execution.Value.RawBlob == nil || !matchesSuccessfulProviderReceipt(prepared, grant.AttemptCallID, execution) {
-		return nil, errors.New("committed response does not match the successful provider receipt")
-	}
-	return execution.Value, nil
+	return reader.readCommittedResponse(ctx, open, request)
 }
 
 func matchesSuccessfulProviderReceipt(prepared domain.PreparedCalls, id domain.AttemptCallID, execution domain.PhysicalExecution[port.GenerateResponse]) bool {

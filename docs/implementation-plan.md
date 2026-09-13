@@ -116,13 +116,17 @@ Goal: deliver a recoverable single-host foreground core proportional to the prod
 
 ## 4. Slice 2: idea, statement, model, and similarity
 
-**Current priority, revised by the user on 2026-09-09:** complete the usable forward generation loop. Valid Similarity ACCEPT proceeds to Solution; non-accepted business results enter human review. Implement LOOP-01/SOL-01 → DATA-01 → JUDGE-01 → PKG-01 according to the [current executable plan](superpowers/plans/2026-09-09-mvp-generation-loop.md). Automatic mutation and its retained-source/authorization prerequisites are deferred for redesign and do not gate MVP delivery. Existing Quality and PackageGate checks remain required.
+**Historical priority, 2026-09-09 (ordinary-problem loop completed):** complete the usable forward generation loop. Valid Similarity ACCEPT proceeds to Solution; non-accepted business results enter human review. Implement LOOP-01/SOL-01 → DATA-01 → JUDGE-01 → PKG-01 according to the [current executable plan](superpowers/plans/2026-09-09-mvp-generation-loop.md). Automatic mutation and its retained-source/authorization prerequisites are deferred for redesign and do not gate MVP delivery. Existing Quality and PackageGate checks remain required.
 
 Deliver typed GenerationRequest, Idea, Statement, model adapters, prompt registry, strict structured output, similarity adapter, evidence cache, policy decisions, privacy rules, and review routing.
 
 Completion requires deterministic Fake E2E coverage, opt-in provider smoke tests, current-policy dependency checks after blocking, complete budget and provenance records, and no package-unsafe content leakage.
 
-### Library integration checkpoints (2026-09-08)
+The initial [architecture simplification plan](superpowers/plans/2026-09-13-architecture-simplification.md) is followed by [the initial R1–R4 proposal](design/architecture-follow-up-2026-09-14.md), which was reworked after user rejection; current changes and verification are in its [rework record](evidence/architecture-follow-up-2026-09-14.md). The ordinary-problem loop is implemented; its broader historical slice milestones below do not reopen that delivery.
+
+### Historical library integration checkpoints (2026-09-08)
+
+These record the original integration. The 2026-09-13 ADR amendment replaces LangGraphGo with a checked local loop and retains LangChainGo; current dependency requirements are in go.mod.
 
 1. INT-01/INT-02: amend ADR-0006 and current designs; pin LangChainGo v0.1.14 and LangGraphGo v0.8.5 with Go 1.25.0, minimum/current CI, import boundaries and upstream contract probes. Preserve historical Slice 0/1 evidence.
 2. LLM-01: port the provider adapter through the existing MeteredLLM contract, compare canonical requests and typed outcomes to the HTTP adapter, and retain local strict schemas and endpoint policy.

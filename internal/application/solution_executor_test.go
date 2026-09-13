@@ -21,7 +21,7 @@ func newSolutionExecutorFixture(t *testing.T, repair bool, response ...http.Hand
 
 func newSolutionExecutorFixtureWithOutputs(t *testing.T, repair bool, outputs map[string][]byte, response ...http.HandlerFunc) (*similarityExecutorFixture, *application.SolutionExecutor) {
 	t.Helper()
-	return newSolutionExecutorFixtureForWorkflow(t, repair, outputs, workflow.SolutionWorkflowRevision, response...)
+	return newSolutionExecutorFixtureForWorkflow(t, repair, outputs, workflow.LegacySolutionCheckpointRevision, response...)
 }
 
 func newSolutionExecutorFixtureForWorkflow(t *testing.T, repair bool, outputs map[string][]byte, revision string, response ...http.HandlerFunc) (*similarityExecutorFixture, *application.SolutionExecutor) {
@@ -34,7 +34,7 @@ func newSolutionExecutorFixtureForWorkflow(t *testing.T, repair bool, outputs ma
 			step = "idea.draft"
 		} else if ordinal == 2 {
 			step = "statement.draft"
-		} else if ordinal >= 4 && revision == workflow.MVPWorkflowRevision {
+		} else if ordinal >= 4 && revision == workflow.GenerationRevision {
 			step = "data.draft"
 		}
 		content := string(outputs[step])
@@ -50,7 +50,7 @@ func newSolutionExecutorFixtureForWorkflow(t *testing.T, repair bool, outputs ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	solution, err := application.NewSolutionExecutor(f.service)
+	solution, err := application.NewSolutionExecutor(f.service, f.config.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func beginCommittedSolutionVerification(t *testing.T, f *similarityExecutorFixtu
 	}
 	evidence := searched.Outcome.Value.EvidenceDigest
 	f.finish(t, view, evidence, "similarity_decision", evidence, searched.Occurrences)
-	prepared, err := service.ReadInput(ctx, f.runID)
+	prepared, err := service.Reader().ReadInput(ctx, f.runID)
 	if err != nil || prepared.Value == nil {
 		t.Fatalf("accepted input=%+v %v", prepared, err)
 	}
@@ -125,7 +125,7 @@ func TestSolutionExecutorVerificationRequiresCommittedDraftAndCurrentAttempt(t *
 			if _, err := service.VerifyDraft(ctx, view, factory); err == nil || calls != 1 {
 				t.Fatal("completed attempt was allowed to execute verification again")
 			}
-			stored, err := service.ReadDraft(ctx, f.runID)
+			stored, err := service.Reader().ReadDraft(ctx, f.runID)
 			if err != nil || stored.ContentDigest != content.ContentDigest || f.httpCalls.Load() != 3 || f.sends.Load() != 1 {
 				t.Fatalf("verification changed draft provenance or dispatched models: %v", err)
 			}
@@ -139,7 +139,7 @@ func TestSolutionExecutorGeneratesOnlyFromCommittedAcceptanceAndReplays(t *testi
 			ctx := context.Background()
 			f, service := newSolutionExecutorFixture(t, repair)
 			input, view := f.beginSimilarity(t)
-			if _, err := service.ReadInput(ctx, f.runID); err == nil {
+			if _, err := service.Reader().ReadInput(ctx, f.runID); err == nil {
 				t.Fatal("uncommitted acceptance admitted")
 			}
 			searched, err := f.service.RunSimilarity(ctx, view, input)
@@ -147,7 +147,7 @@ func TestSolutionExecutorGeneratesOnlyFromCommittedAcceptanceAndReplays(t *testi
 				t.Fatalf("search=%+v %v", searched, err)
 			}
 			f.finish(t, view, searched.Outcome.Value.EvidenceDigest, "similarity_decision", searched.Outcome.Value.EvidenceDigest, searched.Occurrences)
-			prepared, err := service.ReadInput(ctx, f.runID)
+			prepared, err := service.Reader().ReadInput(ctx, f.runID)
 			if err != nil || prepared.Value == nil {
 				t.Fatalf("input=%+v %v", prepared, err)
 			}
@@ -172,7 +172,7 @@ func TestSolutionExecutorGeneratesOnlyFromCommittedAcceptanceAndReplays(t *testi
 				wantHTTP++
 			}
 			f.heartbeat(t)
-			restarted, err := application.NewSolutionExecutor(f.service)
+			restarted, err := application.NewSolutionExecutor(f.service, f.config.Generation)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -181,7 +181,7 @@ func TestSolutionExecutorGeneratesOnlyFromCommittedAcceptanceAndReplays(t *testi
 				t.Fatalf("replay=%+v %v LLM=%d similarity=%d", replay, err, f.httpCalls.Load(), f.sends.Load())
 			}
 			f.finish(t, solutionView, result.Outcome.Value.ContentDigest, "solution_verify", result.Outcome.Value.ContentDigest, result.Occurrences)
-			stored, err := restarted.ReadDraft(ctx, f.runID)
+			stored, err := restarted.Reader().ReadDraft(ctx, f.runID)
 			if err != nil || stored.ContentDigest != result.Outcome.Value.ContentDigest || f.httpCalls.Load() != wantHTTP {
 				t.Fatalf("committed solution=%+v %v", stored, err)
 			}
@@ -211,7 +211,7 @@ func TestSolutionExecutorNonAcceptedBusinessEvidenceRequiresReview(t *testing.T)
 			}
 			f.finish(t, view, searched.Outcome.Value.EvidenceDigest, "similarity_decision", searched.Outcome.Value.EvidenceDigest, searched.Occurrences)
 			for replay := 0; replay < 2; replay++ {
-				result, err := service.ReadInput(ctx, f.runID)
+				result, err := service.Reader().ReadInput(ctx, f.runID)
 				if err != nil || result.Review == nil || result.Value != nil || f.httpCalls.Load() != 2 || f.sends.Load() != 1 {
 					t.Fatalf("review=%+v %v", result, err)
 				}

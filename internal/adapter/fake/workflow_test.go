@@ -10,11 +10,11 @@ import (
 )
 
 func TestSlice1FakeStepsDeriveDeterministicResults(t *testing.T) {
-	prepare := fake.NewPrepareStep(workflow.PrepareCapabilities{})
-	exercise := fake.NewExerciseStep(workflow.ExerciseCapabilities{})
-	checkpoint := fake.NewCheckpointStep(workflow.CheckpointCapabilities{})
+	prepare := fake.NewPrepareStep(fake.PrepareCapabilities{})
+	exercise := fake.NewExerciseStep(fake.ExerciseCapabilities{})
+	checkpoint := fake.NewCheckpointStep(fake.CheckpointCapabilities{})
 	view := testView(t)
-	input := domain.Slice1Input{Brief: "demo", RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest()}
+	input := domain.FakeInput{Brief: "demo", RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest()}
 	first, err := prepare.Run(context.Background(), view, input)
 	if err != nil {
 		t.Fatal(err)
@@ -44,9 +44,9 @@ func TestSlice1FakeStepsDeriveDeterministicResults(t *testing.T) {
 
 func TestSlice1FakeStepsExposeControlOutcomes(t *testing.T) {
 	view := testView(t)
-	prepare := fake.NewPrepareStep(workflow.PrepareCapabilities{})
+	prepare := fake.NewPrepareStep(fake.PrepareCapabilities{})
 	for _, scenario := range []string{"blocked", "retry", "failure", "cancel"} {
-		input := domain.Slice1Input{Brief: "demo", Scenario: scenario, RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest()}
+		input := domain.FakeInput{Brief: "demo", Scenario: scenario, RequestDigest: view.RequestDigest(), ConfigDigest: view.ConfigDigest()}
 		result, err := prepare.Run(context.Background(), view, input)
 		if err != nil {
 			t.Fatal(err)
@@ -61,7 +61,7 @@ func testView(t *testing.T) domain.RunView {
 	t.Helper()
 	digest := domain.SumBytes([]byte("view"))
 	view, err := domain.NewRunView(domain.RunViewData{
-		RunID: domain.RunID("run_0123456789abcdef0123456789abcdef"), WorkflowRevision: workflow.Slice1WorkflowRevision,
+		RunID: domain.RunID("run_0123456789abcdef0123456789abcdef"), WorkflowRevision: workflow.FakeRevision,
 		SchemaVersion: "cpgen.request/v1", RequestDigest: digest, ConfigDigest: digest, WorkflowDigest: digest,
 		State: domain.RunRunning, CurrentStage: "prepare", Version: 1,
 		Budget: domain.BudgetSnapshot{Remaining: map[domain.BudgetDimension]int64{}},

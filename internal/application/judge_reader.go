@@ -12,15 +12,9 @@ import (
 
 // ReadJudgeVerification proves the retained programs, validated inputs, exact
 // execution requests, cleaned resources and answer bytes without dispatching.
-func (s *DataExecutor) ReadJudgeVerification(ctx context.Context, runID domain.RunID) (JudgeVerificationReport, error) {
+func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.RunID) (JudgeVerificationReport, error) {
 	var empty JudgeVerificationReport
-	store, ok := s.generation.config.Store.(interface {
-		solutionVerificationReadStore
-		sandboxEvidenceStore
-	})
-	if !ok {
-		return empty, errors.New("Judge requires committed sandbox evidence reads")
-	}
+	store := s.store
 	input, err := s.ReadJudgeInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -37,7 +31,7 @@ func (s *DataExecutor) ReadJudgeVerification(ctx context.Context, runID domain.R
 	if attempt.Validate() != nil || attempt.RunID != runID || attempt.StageName != "judge" || attempt.State != domain.StageAttemptSucceeded || attempt.InputDigest != digest || attempt.OutputDigest == nil {
 		return empty, errors.New("Judge stage differs from current verified data")
 	}
-	reader, err := newSandboxStageEvidence(ctx, store, s.generation.config.Blobs, stage)
+	reader, err := newSandboxStageEvidence(ctx, store, s.blobs, stage)
 	if err != nil {
 		return empty, err
 	}
@@ -82,7 +76,7 @@ func (s *DataExecutor) ReadJudgeVerification(ctx context.Context, runID domain.R
 				return err
 			}
 			if token != "" {
-				raw, err := readSolutionVerificationBlob(ctx, s.generation.config.Blobs, result.Stdout.Blob, 1<<20)
+				raw, err := readSolutionVerificationBlob(ctx, s.blobs, result.Stdout.Blob, 1<<20)
 				if err != nil {
 					return err
 				}
@@ -101,7 +95,7 @@ func (s *DataExecutor) ReadJudgeVerification(ctx context.Context, runID domain.R
 			}
 		}
 		if check.Answer != nil {
-			raw, err := readSolutionVerificationBlob(ctx, s.generation.config.Blobs, *check.Answer, 1<<20)
+			raw, err := readSolutionVerificationBlob(ctx, s.blobs, *check.Answer, 1<<20)
 			if err != nil {
 				return empty, err
 			}

@@ -12,14 +12,14 @@ import (
 // still comes from verified committed Statement content, even after active
 // accounting is closed. Missing operations remain absent.
 func (s *SimilarityExecutor) ReconcileStage(ctx context.Context, runID domain.RunID) error {
-	current, attempt, err := s.config.Generation.reconciliationAttempt(ctx, runID)
+	current, attempt, err := s.admission.reconciliationAttempt(ctx, runID)
 	if err != nil || attempt == nil {
 		return err
 	}
 	if current.CurrentStage != "similarity" {
 		return errors.New("similarity cleanup requires its current stage")
 	}
-	statement, input, err := s.readInput(ctx, runID)
+	statement, input, err := s.reader.readInput(ctx, runID)
 	if err != nil {
 		return err
 	}
@@ -30,11 +30,11 @@ func (s *SimilarityExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 	if digest != attempt.InputDigest {
 		return errors.New("similarity cleanup input differs")
 	}
-	request, err := s.attemptRequest(runID, *attempt, statement.Problem, input)
+	request, err := s.reader.attemptRequest(runID, *attempt, statement.Problem, input)
 	if err != nil {
 		return err
 	}
-	plan, err := s.config.Provider.PlanSearch(request)
+	plan, err := s.provider.PlanSearch(request)
 	if err != nil {
 		return err
 	}
@@ -42,18 +42,17 @@ func (s *SimilarityExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 		return errors.New("similarity cleanup provider policy differs")
 	}
 	logical := request.LogicalIdempotencyKey
-	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: current.Version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
-	generation := s.config.Generation.config
-	if _, err := generation.Store.ReadLogicalCall(ctx, open.ID); errors.Is(err, sqlite.ErrNotFound) {
+	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: current.Version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
+	if _, err := s.store.ReadLogicalCall(ctx, open.ID); errors.Is(err, sqlite.ErrNotFound) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	ledger, err := NewRunBoundLLMLedger(generation.Store, runID, attempt.StageName, attempt.AttemptID)
+	ledger, err := NewRunBoundLLMLedger(s.store, runID, attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return err
 	}
-	calls, err := NewReplayableSimilarityCalls(ledger, s.config.Provider, generation.Blobs, generation.Clock, s.config.CostUpperBoundMicroUSD)
+	calls, err := NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return err
 	}

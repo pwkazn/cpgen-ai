@@ -12,15 +12,34 @@ import (
 	"cpgen/internal/port"
 )
 
-func (s *QualityExecutor) ReadReport(ctx context.Context, runID domain.RunID) (QualityReport, error) {
-	var empty QualityReport
-	store, ok := s.data.generation.config.Store.(interface {
-		solutionVerificationReadStore
-		sandboxEvidenceStore
-	})
-	if !ok {
-		return empty, errors.New("quality requires committed sandbox evidence reads")
+type QualityReader struct {
+	data       *DataReader
+	store      SandboxEvidenceReadStore
+	blobs      port.VerifiedBlobReader
+	sandbox    SandboxReadPolicy
+	similarity CommittedSimilarityReader
+}
+
+func (s *QualityReader) ReadInput(ctx context.Context, runID domain.RunID) (QualityInput, error) {
+	var empty QualityInput
+	input, err := s.data.ReadJudgeInput(ctx, runID)
+	if err != nil {
+		return empty, err
 	}
+	report, err := s.data.ReadJudgeVerification(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	value := QualityInput{JudgeInput: input, JudgeReport: report}
+	if err := value.Validate(); err != nil {
+		return empty, err
+	}
+	return value, nil
+}
+
+func (s *QualityReader) ReadReport(ctx context.Context, runID domain.RunID) (QualityReport, error) {
+	var empty QualityReport
+	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -37,7 +56,7 @@ func (s *QualityExecutor) ReadReport(ctx context.Context, runID domain.RunID) (Q
 	if attempt.Validate() != nil || attempt.RunID != runID || attempt.StageName != "quality" || attempt.State != domain.StageAttemptSucceeded || attempt.InputDigest != digest || attempt.OutputDigest == nil {
 		return empty, errors.New("quality stage differs from current Judge evidence")
 	}
-	reader, err := newSandboxStageEvidence(ctx, store, s.data.generation.config.Blobs, stage)
+	reader, err := newSandboxStageEvidence(ctx, store, s.blobs, stage)
 	if err != nil {
 		return empty, err
 	}
@@ -74,7 +93,7 @@ func (s *QualityExecutor) ReadReport(ctx context.Context, runID domain.RunID) (Q
 	if err := report.ValidateFor(runID, input); err != nil {
 		return empty, err
 	}
-	config := s.data.sandbox
+	config := s.sandbox
 	config.Identity = qualityVerificationIdentity(attempt, 1)
 	_, filename, media, compiler, err := solutionCompiler("cpp", config.Lock)
 	if err != nil {

@@ -93,7 +93,7 @@ func TestIdeaCandidatesRetainRejectedBatchAcrossDatabaseReopen(t *testing.T) {
 
 func TestIdeaCandidatesDoNotChangePreviewNoFeasibleReview(t *testing.T) {
 	ctx := context.Background()
-	generation := newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.Slice2CheckpointWorkflowRevision, 3, rejectedIdeaResponse(t))
+	generation := newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.LegacySimilarityCheckpointRevision, 3, rejectedIdeaResponse(t))
 	f := similarityExecutorFixtureFromGeneration(t, generation)
 	service := slice2FixtureService(t, f)
 	seed := f.snapshot.EffectiveSeed

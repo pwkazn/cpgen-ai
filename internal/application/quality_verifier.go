@@ -48,7 +48,7 @@ func (s *QualityVerifier) Verify(ctx context.Context, runID domain.RunID, input 
 	if err := runID.Validate(); err != nil {
 		return empty, err
 	}
-	if config.Sandbox == nil || config.Publisher == nil || config.Blobs == nil || config.Publisher.identity.RunID != runID {
+	if config.Sandbox == nil || config.Publisher == nil || config.Blobs == nil || config.Publisher.RunID() != runID {
 		return empty, errors.New("quality requires capabilities for its exact run")
 	}
 	lockDigest, err := config.Lock.Digest()

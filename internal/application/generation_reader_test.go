@@ -231,7 +231,7 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.CreateRun(context.Background(), domain.CreateRunRequest{RunID: f.runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: snapshot.RequestDigest, EffectiveSeed: snapshot.EffectiveSeed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: cfg.EffectiveDigest(), WorkflowRevision: workflow.Slice2WorkflowRevision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(workflow.Slice2WorkflowRevision)), BudgetLimits: limits, StageSequence: []domain.StageName{"idea", "statement", "similarity"}, CreatedAt: clock.Now(), IdempotencyKey: coordinatorID("create", "generation-reader")})
+	_, err = store.CreateRun(context.Background(), domain.CreateRunRequest{RunID: f.runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: snapshot.RequestDigest, EffectiveSeed: snapshot.EffectiveSeed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: cfg.EffectiveDigest(), WorkflowRevision: workflow.LegacySimilarityRevision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(workflow.LegacySimilarityRevision)), BudgetLimits: limits, StageSequence: []domain.StageName{"idea", "statement", "similarity"}, CreatedAt: clock.Now(), IdempotencyKey: coordinatorID("create", "generation-reader")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestGenerationReaderRestoresCurrentCacheUseAfterReviewInvalidation(t *testi
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("recheck the same admitted content"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001501", RunID: f.runID, ExpectedRunVersion: reviewRun.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.Slice2WorkflowRevision, StageName: "similarity", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "reader-invalidation"), At: f.clock.Now()})
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001501", RunID: f.runID, ExpectedRunVersion: reviewRun.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.LegacySimilarityRevision, StageName: "similarity", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "reader-invalidation"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}

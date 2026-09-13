@@ -44,7 +44,7 @@ func TestSolutionRunServiceRoutesAcceptanceThroughRealVerification(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			solution, err := application.NewSolutionExecutor(evidence)
+			solution, err := application.NewSolutionExecutor(evidence, generation)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +67,7 @@ func TestSolutionRunServiceRoutesAcceptanceThroughRealVerification(t *testing.T)
 			seed := f.snapshot.EffectiveSeed
 			request.Seed = &seed
 			result, err := newService().Generate(ctx, request)
-			if err != nil || result.State != domain.RunNeedsReview || result.ActiveStartedAt != nil || result.WorkflowRevision != workflow.SolutionWorkflowRevision {
+			if err != nil || result.State != domain.RunNeedsReview || result.ActiveStartedAt != nil || result.WorkflowRevision != workflow.LegacySolutionCheckpointRevision {
 				t.Fatalf("run=%+v %v", result, err)
 			}
 			wantStage, wantHTTP, wantContainers := domain.StageName("solution_checkpoint"), int32(3), int64(16)
@@ -85,7 +85,7 @@ func TestSolutionRunServiceRoutesAcceptanceThroughRealVerification(t *testing.T)
 				t.Fatalf("container usage=%+v %v", budget, err)
 			}
 			if mode != "reject" {
-				report, err := solution.ReadVerification(ctx, result.RunID, base)
+				report, err := solution.Reader().ReadVerification(ctx, result.RunID, base.ReadPolicy())
 				if err != nil || report.Passed != (mode == "pass") {
 					t.Fatalf("report=%+v %v", report, err)
 				}

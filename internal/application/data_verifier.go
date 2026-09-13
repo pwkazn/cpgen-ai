@@ -18,7 +18,7 @@ const dataVerificationSchema = "cpgen.data-verification/v1"
 
 type DataVerifierConfig struct {
 	Sandbox, RepeatSandbox SolutionSandbox
-	Publisher              *SandboxArtifactSink
+	Publisher              StageArtifactPublisher
 	Blobs                  port.VerifiedBlobReader
 	Lock                   toolchain.Lock
 }

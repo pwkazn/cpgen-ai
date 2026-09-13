@@ -55,9 +55,11 @@ func TestProviderAndGraphLibraryImportsStayAtIntegrationBoundaries(t *testing.T)
 				if err != nil {
 					return err
 				}
+				if name == "github.com/smallnest/langgraphgo" || strings.HasPrefix(name, "github.com/smallnest/langgraphgo/") {
+					t.Errorf("%s imports a graph runtime; fixed scheduling belongs to the local application loop", path)
+				}
 				for dependency, allowed := range map[string]string{
-					"github.com/tmc/langchaingo":       "../../internal/agent/",
-					"github.com/smallnest/langgraphgo": "../../internal/application/",
+					"github.com/tmc/langchaingo": "../../internal/agent/",
 				} {
 					if (name == dependency || strings.HasPrefix(name, dependency+"/")) && !strings.HasPrefix(filepath.ToSlash(path), allowed) {
 						t.Errorf("%s imports %s outside %s", path, name, allowed)

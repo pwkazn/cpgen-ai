@@ -58,7 +58,7 @@ func TestReconcileFailureWithoutEvidenceRemainsGeneric(t *testing.T) {
 	}
 
 	snapshot := domain.RunSnapshot{RunID: runID}
-	if _, err := service.recoverRunning(context.Background(), snapshot); err == nil {
+	if _, err := (&LocalRunService{reconciler: service.reconciler}).recover(context.Background(), snapshot, "", false); err == nil {
 		t.Fatal("recoverRunning unexpectedly succeeded")
 	} else if errors.Is(err, ErrCleanupPending) || !errors.Is(err, rootErr) {
 		t.Fatalf("recovery error = %v, want generic wrapped inspection failure", err)
@@ -87,7 +87,7 @@ func TestZeroReconcileReportDoesNotBecomeCleanupPending(t *testing.T) {
 	if err := service.reconcileForTerminal(context.Background(), runID); err == nil || errors.Is(err, ErrCleanupPending) {
 		t.Fatalf("terminal reconciliation error = %v, want generic incomplete-report error", err)
 	}
-	if _, err := service.recoverRunning(context.Background(), domain.RunSnapshot{RunID: runID}); err == nil || errors.Is(err, ErrCleanupPending) {
+	if _, err := (&LocalRunService{reconciler: service.reconciler}).recover(context.Background(), domain.RunSnapshot{RunID: runID}, "", false); err == nil || errors.Is(err, ErrCleanupPending) {
 		t.Fatalf("recovery reconciliation error = %v, want generic incomplete-report error", err)
 	}
 }

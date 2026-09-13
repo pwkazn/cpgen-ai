@@ -214,7 +214,7 @@ func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool) {
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("recheck the same frozen input"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.Slice2WorkflowRevision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.LegacySimilarityRevision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ type generationExecutorFixture struct {
 
 func newGenerationExecutorFixture(t *testing.T, maxCalls int64, repair bool, respond ...http.HandlerFunc) generationExecutorFixture {
 	t.Helper()
-	return newGenerationExecutorFixtureWithWorkflow(t, maxCalls, repair, workflow.Slice2WorkflowRevision, 0, respond...)
+	return newGenerationExecutorFixtureWithWorkflow(t, maxCalls, repair, workflow.LegacySimilarityRevision, 0, respond...)
 }
 
 func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repair bool, revision string, similarityCalls int64, respond ...http.HandlerFunc) generationExecutorFixture {
@@ -340,7 +340,7 @@ func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repa
 	if workflow.HasSolutionStages(revision) {
 		limits.MaxArtifactBytes, limits.MaxSandboxCreates, limits.MaxActiveTimeMilliseconds = 64<<20, 100, 180000
 	}
-	if revision == workflow.MVPWorkflowRevision {
+	if revision == workflow.GenerationRevision {
 		limits.MaxActiveTimeMilliseconds = 600000
 		limits.MaxPackageBytes = 16 << 20
 	}
@@ -389,13 +389,13 @@ func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repa
 		t.Fatal(err)
 	}
 	stages := []domain.StageName{"idea", "statement", "similarity"}
-	if revision == workflow.Slice2CheckpointWorkflowRevision {
+	if revision == workflow.LegacySimilarityCheckpointRevision {
 		stages = append(stages, "slice2_checkpoint")
 	}
-	if revision == workflow.SolutionWorkflowRevision {
+	if revision == workflow.LegacySolutionCheckpointRevision {
 		stages = append(stages, "similarity_decision", "solution", "solution_verify", "solution_checkpoint")
 	}
-	if revision == workflow.MVPWorkflowRevision {
+	if revision == workflow.GenerationRevision {
 		stages = append(stages, "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package")
 	}
 	_, err = store.CreateRun(context.Background(), domain.CreateRunRequest{RunID: f.runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: snapshot.RequestDigest, EffectiveSeed: snapshot.EffectiveSeed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: cfg.EffectiveDigest(), WorkflowRevision: revision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(revision)), BudgetLimits: limits, StageSequence: stages, CreatedAt: clock.Now(), IdempotencyKey: coordinatorID("create", "generation-executor")})

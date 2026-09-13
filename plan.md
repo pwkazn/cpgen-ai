@@ -14,7 +14,7 @@
 ## 3. 技术选型与资源
 - **核心开发语言**: `Go`。负责任务编排、Agent 状态机、CLI/API、缓存、持久化、查重适配器和判题控制；利用 goroutine 和 `context.Context` 实现受控并发、取消与超时。
 - **大语言模型(LLM)**: 通过 `LangChainGo` 封装供应商调用，对业务层保留现有 `port.MeteredLLM` 类型化接口。首个集成配置使用已实测的 DeepSeek：`base_url=https://api.deepseek.com`、`model=deepseek-v4-flash`；模型、地址和凭据环境变量名均可配置。
-- **Workflow 调度**: 已接入 `smallnest/langgraphgo`，执行编译期组装的 CPGen 固定流程；当前只扩展查重通过后的正向阶段和人工复核分支。保持单机、前台 CLI、每个 run 一个执行者；业务状态、持久化和质量门禁由 CPGen 管理。
+- **Workflow 调度**: 使用 `internal/application` 的本地循环推进编译期固定阶段，替换原 `smallnest/langgraphgo` 包装；当前只扩展查重通过后的正向阶段和人工复核分支。保持单机、前台 CLI、每个 run 一个执行者；业务状态、持久化和质量门禁由 CPGen 管理。
 - **查重模块 (当前阶段)**: 调用可配置 URL 的语义查重服务，默认 `base_url=https://yuantiji.ac`、`protocol=yuantiji_v2`，通过 `POST /api/search` 查询。公共原题姬与自托管兼容服务使用同一客户端，只需切换服务地址；接口格式不同时再切换协议适配器。
 - **查重模块 (未来规划)**: 当项目核心链路跑通后，计划替换为本地部署的 `BGE-M3` 嵌入模型，实现完全离线、自主可控的检索。开发者笔记本（RTX 4060 Laptop 8GB显存）经评估可以流畅运行该模型。
   - **参考项目**: 核心架构与数据格式参考 [fjzzq2002/is-my-problem-new](https://github.com/fjzzq2002/is-my-problem-new) (原题姬)。
@@ -27,7 +27,7 @@
 | 基础 | 已验证内容 | 尚待完成 |
 | --- | --- | --- |
 | `codex/phase2` | 完整 MVP 配置接通正向固定图、真实 Docker、Quality、原子 READY 与 CLI 导出；真实事务内退出恢复和导出包独立编译执行验收通过 | 已验收普通 C++ 题及本地供应商 fixture；外部服务可用性、Go 实际闭环和 SPJ 分别验收。未接受的查重结果仍先复核，变异继续延期 |
-| `codex/cpgen-json-demo` / `codex/langgraph-trial` | LangChainGo 供应商适配和图试验；正式分支已锁定 LangChainGo `v0.1.14`、LangGraphGo `v0.8.5` 与最低 Go 1.25.0，并迁入适配器和类型化图兼容回归 | 正式分支的付费供应商、真实 Similarity 和 Docker 端到端验收仍须独立记录，试验结果不能代替正式生命周期门禁 |
+| `codex/cpgen-json-demo` / `codex/langgraph-trial` | LangChainGo 供应商适配和图试验；历史集成锁定 LangChainGo `v0.1.14`、LangGraphGo `v0.8.5` 与最低 Go 1.25.0；2026-09-13 已移除 LangGraphGo，保留适配器和阶段推进回归 | 正式分支的付费供应商、真实 Similarity 和 Docker 端到端验收仍须独立记录，试验结果不能代替正式生命周期门禁 |
 | DeepSeek + Docker 实测 | 四个生成阶段成功；保存结果经真实 Docker 编译、12 组对拍及预期输出核对后生成 ZIP；试验支持节点暂停、恢复和有界修复 | 真实查重、完整 Judge/Quality/PackageGate 和正式状态协议；demo 的 `READY` 不作为完整 MVP 验收 |
 
 实现从 `codex/phase2` 的领域契约和已验收执行基础继续，选择性迁移试验适配代码与回归案例。具体清单见 [TODO.md](TODO.md)。现行约束见 [workflow 设计](docs/design/workflow.md)、[LLM 设计](docs/design/llm.md) 和 [ADR-0006](docs/adr/0006-lightweight-local-workflow.md)。当前 [完整包提交证据](docs/evidence/mvp-package-commit-foundation.md) 已覆盖普通 C++ 题从本地供应商 fixture 到真实 Docker、原子 READY、独立 CLI 导出和全新执行复验。详见 [闭环验收范围](docs/superpowers/plans/2026-09-09-mvp-generation-loop.md)；外部供应商与真实查重服务可用性单独验收。
@@ -80,24 +80,24 @@
 
 当前固定图已接入正式 Idea/Statement/Similarity 预览及已提交内容重建；提交失败不推进，恢复从当前阶段继续。完整 MVP selector 已接通查重通过后的 Solution、Data、Judge、Quality 和原子打包；旧预览边界不变，见 [闭环验收](docs/superpowers/plans/2026-09-09-mvp-generation-loop.md)。
 
-1. **库与业务边界**：在 `internal/application` 装配 LangGraphGo，将节点桥接到 `internal/workflow` 的具体类型化阶段；领域类型和阶段代码保持不依赖调度库。图在代码中固定组装，第一版串行执行；业务分支限于查重通过后的正向推进、人工复核和停止。自动变异与业务修复不进入首个闭环。
-2. **迁移现有执行入口**：从 `LocalRunService` 的 Slice 1 Fake 分派中分离阶段调度，保留 run lock、attempt 开始/提交、预算、取消和 Docker 清理协议。先接入已有 Idea / Statement / Similarity，再随 Slice 3–5 增加其余阶段。未实现阶段明确停在切片边界，禁止用 Fake 结果或空节点补齐正式流程后宣称 `READY`。
-3. **单一持久化来源**：SQLite 的 run/stage/attempt 和 Blob occurrence 继续作为正式进度与制品依据；LangGraphGo 持有执行期间的类型化状态。节点成功结果与证据提交完成后才能推进下一节点；从已提交的 stage、workflow revision 和输入 digest 恢复，不并行维护 demo `graph.json`。试验中已发现上游 `v0.8.5` 自动 checkpoint 保存错误被忽略、文件恢复丢失具体状态类型，正式集成必须采用显式检查提交结果的桥接方式。
+1. **调度与业务边界**：`internal/application` 的本地固定循环桥接具体类型化阶段，按持久化 revision 选择五套兼容序列。每次完成一次阶段边界并检查身份、版本和精确后继，遇到暂停或终态立即返回。调度不重试、不保存第二套 checkpoint。
+2. **执行入口**：正式 MVP 与历史/Fake 构造明确区分。LocalRunService 负责持锁、阶段分派和终态提交；stageControl 负责计时/取消及 poller join，runRecoveryHandler 和 runReviewHandler 分别处理恢复和复核。查询与导出单独装配本地读取资源。
+3. **单一持久化来源**：SQLite 的 run/stage/attempt 和已提交 Blob occurrence 是进度与制品依据。阶段与证据提交完成才推进，从已提交 stage、revision 和输入 digest 恢复。错误返回仅可保留同一阶段、合法身份和未倒退版本的最新投影。
 4. **恢复与控制**：依赖失败进入 `BLOCKED`，人工恢复时重查对应依赖；Docker 故障不能触发内容修复。人工审核沿用 `ReviewDecision`，取消沿用持久化请求和停止证明。首版保留已验收的有界传输重试和 JSON 格式修复，不执行自动解法修复或 Idea 变异。跨进程恢复不得重复调用已提交阶段，外部发送边界未知时沿用保守恢复规则。
-5. **版本与兼容**：为新构造器定义 workflow revision，校验 stage 顺序、schema/config digest 与 checkpoint 兼容性；旧 run 继续交给兼容的已编译定义或明确报告不兼容，不能修改旧快照使其强行通过。依赖集成同时升级并锁定 Go 工具链、CI 与构建文档，试验版本只作为首个验证基线。
+5. **版本与兼容**：Go 构造和内部组件变化不改现有 workflow revision、schema、canonical JSON 或身份算法；旧 run 继续使用兼容固定序列。导出仍重建全部证据与规范 ZIP；历史 run 未保存完整 lock，因此缺少原工具链文件必须拒绝。
 6. **验收**：用固定普通题和本地 HTTP 场景验证正向顺序、查重未通过后的人工复核、取消及未完成门禁阻止 `READY`；用子进程验证崩溃恢复、同 run 互斥、提交失败不推进及调用不重复。真实 Docker、供应商与查重服务验收分别记录，保留原有 Slice 0/1 安全回归；本地 fixture 不代表真实服务验证。
 
 ## 5. 开发里程碑 (分阶段实施)
 
 ### 阶段一：核心闭环 (MVP) —— **优先实现**
 - [x] 完成运行库集成说明与 Go/CI 依赖兼容调整，明确试验成果迁入正式分支的边界。
-- [x] 将 LangChainGo、持久化计量和 LangGraphGo 接入正式 Idea/Statement/Similarity 预览，并完成本地恢复验收。
+- [x] 历史完成 LangChainGo、持久化计量和 LangGraphGo 的预览集成；后续本地循环保留其阶段与恢复契约。
 - [x] 实现固定 seed 的 Idea 与题面内容草稿、严格本地绑定和私有响应恢复。
 - [x] 集成原题姬兼容 Similarity 适配器和当前证据读取；真实外部服务验收单独保留。
-- [ ] **第一优先级**：有效 ACCEPT 接入 Solution，生成 Reference/Brute 并通过 Docker 编译和样例；未通过先人工复核。
-- [ ] **第二优先级**：完成可重现测试计划、generator/validator、数据与答案生成。
-- [ ] **第三优先级**：完成 Docker/Judge 差分、正式数据与资源门禁，随后执行 Quality/PackageGate 并导出可复验题包。
-- [ ] 验收完整正向链路及复核、阻塞、取消、恢复路径；包级 `READY` 仍以 Slice 5 验收为准。
+- [x] **普通题已完成**：有效 ACCEPT 接入 Solution，生成 Reference/Brute 并通过 Docker 编译和样例；未通过先人工复核。
+- [x] **普通题已完成**：完成可重现测试计划、generator/validator、数据与答案生成。
+- [x] **普通题已完成**：完成 Docker/Judge 差分、正式数据与资源门禁，随后执行 Quality/PackageGate 并导出可复验题包。
+- [x] 普通 C++ 正向链路、包事务恢复与独立导出已在原闭环验收完成；后续架构重构的逐轮验证见 [架构返工记录](docs/evidence/architecture-follow-up-2026-09-14.md)。
 - [ ] **产出**: 能生成带标程和基础数据的非SPJ题目的命令行工具。
 
 ### 阶段二：质量增强

@@ -46,8 +46,8 @@ func (s *similarityResponseArtifacts) session(open domain.OpenCallRequest, reque
 	if err != nil {
 		return nil, err
 	}
-	core := &privateResponseSession{ledger: s.ledger, blobs: s.blobs, clock: s.clock, open: open, binding: binding, maxBytes: plan.MaxResponseBytes*6 + 16384,
-		callID: domain.CallRecordID(coordinatorMutationID("callrec", "similarity-response", open.ID)), prefix: "similarity-response", mediaType: similarityResponseMediaType, pathPrefix: "private/similarity/", schema: similarityResponseSchema}
+	core := &privateResponseSession{ledger: s.ledger, blobs: s.blobs, clock: s.clock, privateResponseBinding: privateResponseBinding{open: open, binding: binding, maxBytes: plan.MaxResponseBytes*6 + 16384,
+		callID: domain.CallRecordID(coordinatorMutationID("callrec", "similarity-response", open.ID)), prefix: "similarity-response", mediaType: similarityResponseMediaType, pathPrefix: "private/similarity/", schema: similarityResponseSchema}}
 	return &similarityResponseSession{core, request}, nil
 }
 
@@ -75,7 +75,7 @@ type similarityResponseReceipt struct {
 	Execution      domain.PhysicalExecution[similarity.Evidence] `json:"execution"`
 }
 
-func (s *similarityResponseSession) validate(ctx context.Context, grant domain.DispatchGrant, execution domain.PhysicalExecution[similarity.Evidence], provider similarity.PhysicalProvider) error {
+func (s *similarityResponseSession) validate(ctx context.Context, grant domain.DispatchGrant, execution domain.PhysicalExecution[similarity.Evidence], provider SimilarityReadPolicy) error {
 	prepared, err := s.ledger.LoadCall(ctx, grant.CallRecordID)
 	if err != nil {
 		return err
@@ -83,7 +83,7 @@ func (s *similarityResponseSession) validate(ctx context.Context, grant domain.D
 	return validateSimilarityReceiptExecution(prepared, s.request, grant.AttemptCallID, execution, provider)
 }
 
-func validateSimilarityReceiptExecution(prepared domain.PreparedCalls, request similarity.Request, id domain.AttemptCallID, execution domain.PhysicalExecution[similarity.Evidence], provider similarity.PhysicalProvider) error {
+func validateSimilarityReceiptExecution(prepared domain.PreparedCalls, request similarity.Request, id domain.AttemptCallID, execution domain.PhysicalExecution[similarity.Evidence], provider SimilarityReadPolicy) error {
 	if execution.Validate() != nil || execution.Boundary != domain.BoundaryCompleted || execution.Value == nil {
 		return errors.New("invalid successful similarity receipt")
 	}

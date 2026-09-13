@@ -6,14 +6,22 @@ import (
 	"slices"
 	"time"
 
+	"cpgen/internal/adapter/storage/blob"
+	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	"cpgen/internal/runlock"
 	"cpgen/internal/similarity"
 	"cpgen/internal/workflow"
 )
 
-type SimilarityExecutorConfig struct {
+type SimilarityStageConfig struct {
 	WorkflowRevision       string
-	Generation             *GenerationExecutor
+	Statement              *GenerationReader
+	Admission              *StageAdmission
+	Store                  SimilarityStageStore
+	Blobs                  *blob.Store
+	Clock                  clock.Clock
+	Locks                  *runlock.Manager
 	Provider               similarity.PhysicalProvider
 	Policy                 similarity.DecisionPolicy
 	Limit                  int
@@ -25,8 +33,13 @@ type SimilarityExecutorConfig struct {
 // decision boundary. The foreground caller owns locks, active time and the
 // atomic stage commit, exactly as for the generation executor.
 type SimilarityExecutor struct {
-	config SimilarityExecutorConfig
-	reader *SimilarityReader
+	reader    *SimilarityContentReader
+	admission *StageAdmission
+	store     RunLLMStore
+	blobs     *blob.Store
+	clock     clock.Clock
+	locks     *runlock.Manager
+	provider  similarity.PhysicalProvider
 }
 
 type SimilarityStageResult struct {
@@ -44,15 +57,18 @@ type SimilarityContent struct {
 	Decision  similarity.Decision
 }
 
-func NewSimilarityExecutor(config SimilarityExecutorConfig) (*SimilarityExecutor, error) {
+func NewSimilarityExecutorWithConfig(config SimilarityStageConfig) (*SimilarityExecutor, error) {
 	if config.WorkflowRevision == "" {
-		config.WorkflowRevision = workflow.Slice2CheckpointWorkflowRevision
+		config.WorkflowRevision = workflow.LegacySimilarityCheckpointRevision
 	}
-	if config.WorkflowRevision != workflow.Slice2CheckpointWorkflowRevision && !workflow.HasSolutionStages(config.WorkflowRevision) {
+	if config.WorkflowRevision != workflow.LegacySimilarityCheckpointRevision && !workflow.HasSolutionStages(config.WorkflowRevision) {
 		return nil, errors.New("similarity executor requires a supported compiled workflow revision")
 	}
-	if config.Generation == nil || config.Provider == nil || config.CostUpperBoundMicroUSD <= 0 || config.Limit < config.Policy.MinimumHits || config.Limit <= 0 || config.Limit > 10000 {
+	if config.Statement == nil || config.Admission == nil || config.Store == nil || config.Blobs == nil || config.Clock == nil || config.Locks == nil || config.Provider == nil || config.CostUpperBoundMicroUSD <= 0 || config.Limit < config.Policy.MinimumHits || config.Limit <= 0 || config.Limit > 10000 {
 		return nil, errors.New("similarity executor requires generation storage, provider and bounded policy")
+	}
+	if !sameDependency(config.Store, config.Admission.store) || !sameDependency(config.Store, config.Statement.store) {
+		return nil, errors.New("similarity evidence and admission must share execution storage")
 	}
 	if err := config.Policy.Validate(); err != nil {
 		return nil, err
@@ -63,105 +79,18 @@ func NewSimilarityExecutor(config SimilarityExecutorConfig) (*SimilarityExecutor
 	if config.RetryPolicy.MaxAttempts > 8 {
 		return nil, errors.New("similarity transport retry bound exceeds eight attempts")
 	}
-	store, ok := config.Generation.config.Store.(SimilarityReadStore)
-	if !ok {
-		return nil, errors.New("similarity executor requires committed evidence storage")
-	}
-	reader, err := NewSimilarityReader(store, config.Generation.config.Blobs, config.Provider)
+	reader, err := NewSimilarityReader(config.Store, config.Blobs, config.Provider)
 	if err != nil {
 		return nil, err
 	}
 	config.Policy.ReviewSources = slices.Clone(config.Policy.ReviewSources)
-	return &SimilarityExecutor{config, reader}, nil
+	policy := similarityReadPolicy{config.WorkflowRevision, config.Provider, config.Policy, config.Limit, config.RetryPolicy, config.CostUpperBoundMicroUSD}
+	content := &SimilarityContentReader{config: policy, reader: reader, store: config.Store, statement: config.Statement}
+	return &SimilarityExecutor{reader: content, admission: config.Admission, store: config.Store, blobs: config.Blobs, clock: config.Clock, locks: config.Locks, provider: config.Provider}, nil
 }
 
 // InputForProblem performs pure planning without authentication or HTTP. Its
 // digest is suitable for Statement's next-stage input before BeginStage.
-func (s *SimilarityExecutor) InputForProblem(problem domain.ProblemSpec) (domain.SimilarityInputV1, error) {
-	var empty domain.SimilarityInputV1
-	if err := problem.Validate(); err != nil {
-		return empty, err
-	}
-	request, err := s.request(problem, "similarity-input-planning/v1")
-	if err != nil {
-		return empty, err
-	}
-	plan, err := s.config.Provider.PlanSearch(request)
-	if err != nil {
-		return empty, err
-	}
-	raw, err := canonicalJSON(struct {
-		Revision string             `json:"revision"`
-		Provider domain.Digest      `json:"provider_policy"`
-		Decision domain.Digest      `json:"decision_policy"`
-		Limit    int                `json:"limit"`
-		Retry    domain.RetryPolicy `json:"retry_policy"`
-		Cost     int64              `json:"cost_upper_bound_micro_usd"`
-	}{s.config.WorkflowRevision, plan.PolicyDigest, s.config.Policy.PolicyDigest, s.config.Limit, s.config.RetryPolicy, s.config.CostUpperBoundMicroUSD})
-	if err != nil {
-		return empty, err
-	}
-	return domain.NewSimilarityInputV1(problem, request.CandidateProjectionDigest, s.config.Policy.PolicyDigest, plan.PolicyDigest, domain.SumBytes(raw), s.config.Limit)
-}
-
-func (s *SimilarityExecutor) request(problem domain.ProblemSpec, logical string) (similarity.Request, error) {
-	projection, err := similarity.NewPackageSafeProjection(problem.Title, problem.Description, problem.RequiredConstraints, problem.Language)
-	if err != nil {
-		return similarity.Request{}, err
-	}
-	request, err := similarity.NewRequest(projection, s.config.Policy.PolicyRef, s.config.Policy.PolicyDigest, logical)
-	if err != nil {
-		return request, err
-	}
-	request.Limit = s.config.Limit
-	return request, request.Validate()
-}
-
-func (s *SimilarityExecutor) ReadInput(ctx context.Context, runID domain.RunID) (domain.SimilarityInputV1, error) {
-	_, input, err := s.readInput(ctx, runID)
-	return input, err
-}
-
-func (s *SimilarityExecutor) readInput(ctx context.Context, runID domain.RunID) (GenerationStatementContent, domain.SimilarityInputV1, error) {
-	var statement GenerationStatementContent
-	var input domain.SimilarityInputV1
-	if ctx == nil {
-		return statement, input, errors.New("similarity input read requires a context")
-	}
-	current, err := s.config.Generation.config.Store.GetRun(ctx, runID)
-	if err != nil {
-		return statement, input, err
-	}
-	if current.WorkflowRevision != s.config.WorkflowRevision || current.WorkflowDigest != domain.SumBytes([]byte(current.WorkflowRevision)) {
-		return statement, input, errors.New("typed similarity requires the compiled checkpoint workflow")
-	}
-	statement, err = s.config.Generation.Reader().ReadStatement(ctx, runID)
-	if err != nil {
-		return statement, input, err
-	}
-	input, err = s.InputForProblem(statement.Problem)
-	if err != nil {
-		return statement, input, err
-	}
-	expected, err := s.config.Generation.config.Store.ReadStageInputDigest(ctx, runID, "similarity")
-	if err != nil {
-		return statement, input, err
-	}
-	digest, err := input.Digest()
-	if err != nil || digest != expected {
-		return statement, input, errors.New("similarity input differs from the committed Statement chain or execution policy")
-	}
-	return statement, input, nil
-}
-
-func (s *SimilarityExecutor) attemptRequest(runID domain.RunID, attempt domain.StageAttempt, problem domain.ProblemSpec, input domain.SimilarityInputV1) (similarity.Request, error) {
-	digest, err := input.Digest()
-	if err != nil {
-		return similarity.Request{}, err
-	}
-	logical := coordinatorMutationID("similarity", runID, attempt.AttemptID, digest)
-	return s.request(problem, logical)
-}
 
 func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunView, input domain.SimilarityInputV1) (SimilarityStageResult, error) {
 	var result SimilarityStageResult
@@ -169,39 +98,38 @@ func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunV
 	if err != nil {
 		return result, err
 	}
-	attempt, err := s.config.Generation.admit(ctx, view, "similarity", digest)
+	attempt, err := s.admission.admit(ctx, view, "similarity", digest)
 	if err != nil {
 		return result, err
 	}
-	statement, expected, err := s.readInput(ctx, view.RunID())
+	statement, expected, err := s.reader.readInput(ctx, view.RunID())
 	if err != nil {
 		return result, err
 	}
 	if input != expected {
 		return result, errors.New("similarity input differs from its verified private content chain")
 	}
-	request, err := s.attemptRequest(view.RunID(), attempt, statement.Problem, input)
+	request, err := s.reader.attemptRequest(view.RunID(), attempt, statement.Problem, input)
 	if err != nil {
 		return result, err
 	}
-	plan, err := s.config.Provider.PlanSearch(request)
+	plan, err := s.provider.PlanSearch(request)
 	if err != nil {
 		return result, err
 	}
 	if plan.PolicyDigest != input.ProviderPolicyDigest {
 		return result, errors.New("similarity provider policy changed after input planning")
 	}
-	generation := s.config.Generation.config
-	ledger, err := NewRunBoundLLMLedger(generation.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
+	ledger, err := NewRunBoundLLMLedger(s.store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err
 	}
-	calls, err := NewReplayableSimilarityCalls(ledger, s.config.Provider, generation.Blobs, generation.Clock, s.config.CostUpperBoundMicroUSD)
+	calls, err := NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return result, err
 	}
 	logical := request.LogicalIdempotencyKey
-	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: view.RunID(), ExpectedRunVersion: view.Version(), StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
+	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: view.RunID(), ExpectedRunVersion: view.Version(), StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
 	searched, err := calls.SearchWithArtifacts(ctx, open, request)
 	result.CallTrace = searched.Outcome.CallTrace
 	if err != nil {
@@ -211,13 +139,13 @@ func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunV
 		return result, err
 	}
 	if searched.Outcome.Failure != nil {
-		result.Outcome = similarityFailure(view, attempt, input.ExecutionPolicyDigest, plan.Provider, searched.Outcome, generation.Clock.Now())
+		result.Outcome = similarityFailure(view, attempt, input.ExecutionPolicyDigest, plan.Provider, searched.Outcome, s.clock.Now())
 		return result, nil
 	}
 	if searched.Artifact == nil {
 		return result, ErrSimilarityReplayUnavailable
 	}
-	decision := similarity.Evaluate(s.config.Policy, *searched.Outcome.Value)
+	decision := similarity.Evaluate(s.reader.config.Policy, *searched.Outcome.Value)
 	if err := decision.Validate(); err != nil {
 		return result, err
 	}
@@ -229,30 +157,6 @@ func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunV
 
 // ReadCommitted reconstructs both private generation content and similarity
 // evidence. Neither this path nor ReadInput can issue a provider request.
-func (s *SimilarityExecutor) ReadCommitted(ctx context.Context, runID domain.RunID) (SimilarityContent, error) {
-	var result SimilarityContent
-	statement, input, err := s.readInput(ctx, runID)
-	if err != nil {
-		return result, err
-	}
-	attempt, err := s.config.Generation.config.Store.CurrentStageAttempt(ctx, runID, "similarity")
-	if err != nil {
-		return result, err
-	}
-	request, err := s.attemptRequest(runID, attempt, statement.Problem, input)
-	if err != nil {
-		return result, err
-	}
-	evidence, err := s.reader.ReadTyped(ctx, runID, "similarity", input, request)
-	if err != nil {
-		return result, err
-	}
-	decision := similarity.Evaluate(s.config.Policy, evidence)
-	if err := decision.Validate(); err != nil {
-		return result, err
-	}
-	return SimilarityContent{statement, input, request, evidence, decision}, nil
-}
 
 func similarityFailure(view domain.RunView, attempt domain.StageAttempt, policy domain.Digest, provider string, outcome domain.MeteredOutcome[similarity.Evidence], now time.Time) domain.AgentResult[similarity.Evidence] {
 	failure := outcome.Failure
@@ -276,4 +180,21 @@ func similarityFailure(view domain.RunView, attempt domain.StageAttempt, policy 
 		return domain.Blocked[similarity.Evidence](domain.BlockedCheckpoint{RunID: view.RunID(), StageName: attempt.StageName, StageInputDigest: attempt.InputDigest, DependencyID: dependency, DependencyDigest: domain.SumBytes([]byte(dependency + "\x00" + string(policy))), PolicyDigest: policy, ErrorDigest: domain.SumBytes(evidence), RetryAfter: retryAfter, CreatedAt: now.UTC()})
 	}
 	return generationContentReview[similarity.Evidence](policy, outcome.CallTrace, reason)
+}
+
+func (s *SimilarityExecutor) Reader() *SimilarityContentReader { return s.reader }
+func (s *SimilarityExecutor) Revision() string {
+	if s == nil || s.reader == nil {
+		return ""
+	}
+	return s.reader.config.WorkflowRevision
+}
+func (s *SimilarityExecutor) ReadInput(ctx context.Context, run domain.RunID) (domain.SimilarityInputV1, error) {
+	return s.reader.ReadInput(ctx, run)
+}
+func (s *SimilarityExecutor) ReadCommitted(ctx context.Context, run domain.RunID) (SimilarityContent, error) {
+	return s.reader.ReadCommitted(ctx, run)
+}
+func (s *SimilarityExecutor) InputForProblem(problem domain.ProblemSpec) (domain.SimilarityInputV1, error) {
+	return s.reader.InputForProblem(problem)
 }

@@ -84,7 +84,7 @@ func TestRunGraphCommitFailurePreservesCurrentStageAndResumeSkipsCommittedStage(
 	}
 }
 
-func TestRunGraphRejectsUnsupportedSlice1InputBeforeCreate(t *testing.T) {
+func TestRunGraphRejectsUnsupportedFakeInputBeforeCreate(t *testing.T) {
 	f := newRunGraphFixture(t)
 	request := f.request
 	request.Mode, request.Brief = domain.RequestModeRandom, ""
@@ -242,7 +242,7 @@ func newRunGraphFixture(t *testing.T) runGraphFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	pipeline, err := workflow.NewSlice1Pipeline(fake.NewPrepareStep(workflow.PrepareCapabilities{}), fake.NewExerciseStep(workflow.ExerciseCapabilities{}), fake.NewCheckpointStep(workflow.CheckpointCapabilities{}))
+	pipeline, err := fake.NewPipeline(fake.NewPrepareStep(fake.PrepareCapabilities{}), fake.NewExerciseStep(fake.ExerciseCapabilities{}), fake.NewCheckpointStep(fake.CheckpointCapabilities{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,5 +271,5 @@ func (f runGraphFixture) create(t *testing.T) domain.CreateRunRequest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return domain.CreateRunRequest{RunID: "run_00000000000000000000000000000011", SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 1, RedactedEffectiveConfigJSON: raw, RedactedEffectiveConfigDigest: domain.SumBytes(raw), WorkflowRevision: workflow.Slice1WorkflowRevision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(workflow.Slice1WorkflowRevision)), BudgetLimits: f.request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: f.now, IdempotencyKey: "create_00000000000000000000000000000011"}
+	return domain.CreateRunRequest{RunID: "run_00000000000000000000000000000011", SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 1, RedactedEffectiveConfigJSON: raw, RedactedEffectiveConfigDigest: domain.SumBytes(raw), WorkflowRevision: workflow.FakeRevision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)), BudgetLimits: f.request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: f.now, IdempotencyKey: "create_00000000000000000000000000000011"}
 }

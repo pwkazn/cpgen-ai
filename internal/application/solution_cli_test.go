@@ -51,7 +51,7 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 		t.Fatal(err)
 	}
 	if mvp {
-		raw = []byte(strings.Replace(string(raw), workflow.SolutionWorkflowRevision, workflow.MVPWorkflowRevision, 1))
+		raw = []byte(strings.Replace(string(raw), workflow.LegacySolutionCheckpointRevision, workflow.GenerationRevision, 1))
 	}
 	lockDigest, err := base.Lock.Digest()
 	if err != nil {
@@ -188,7 +188,7 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, retry, err := application.BuildSlice2ExecutionSettings(cfg)
+	content, retry, err := application.BuildGenerationExecutionSettings(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 	if calls.Load() != wantCalls || searches.Load() != 1 {
 		t.Fatal("CLI replay dispatched fixture providers")
 	}
-	readApp, err := application.Bootstrap(ctx, cfg)
+	readApp, err := application.BootstrapLocal(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +278,16 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 		t.Fatalf("CLI Docker accounting: %+v %v", budget, err)
 	}
 	if mvp {
+		// Export uses only local resources and the run's frozen policy. Make
+		// the current execution configuration unusable without touching the
+		// original frozen lock needed to reconstruct historical proof.
+		offlineConfig := strings.NewReplacer(cfg.Sandbox.EngineEndpoint, cfg.Sandbox.EngineEndpoint+"-offline-test", filepath.ToSlash(cfg.Sandbox.ToolchainLockPath), filepath.ToSlash(filepath.Join(root, "missing-current-lock.json"))).Replace(string(raw))
+		if _, err := config.Decode([]byte(offlineConfig)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, []byte(offlineConfig), 0600); err != nil {
+			t.Fatal(err)
+		}
 		destination := filepath.Join(root, "problem.zip")
 		runCLI(0, "run", "export", string(result.RunID), "--output", destination)
 		raw, err := os.ReadFile(destination)
@@ -295,6 +305,16 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 		runCLI(9, "run", "export", string(result.RunID), "--output", destination)
 		if calls.Load() != wantCalls || searches.Load() != 1 {
 			t.Fatal("export dispatched model or Similarity")
+		}
+		afterExport, err := readStore.GetRun(ctx, result.RunID)
+		if err != nil || afterExport.Version != result.Version {
+			t.Fatalf("export changed run: %+v %v", afterExport, err)
+		}
+		afterBudget, err := readStore.BudgetSnapshot(ctx, result.RunID)
+		beforeBytes, _ := json.Marshal(budget)
+		afterBytes, _ := json.Marshal(afterBudget)
+		if err != nil || !bytes.Equal(beforeBytes, afterBytes) {
+			t.Fatalf("export changed budget: %v", err)
 		}
 		revalidateExportedPackageInDocker(t, ctx, base, raw)
 	}

@@ -7,7 +7,6 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.1
-	github.com/smallnest/langgraphgo v0.8.5
 	github.com/tmc/langchaingo v0.1.14
 	golang.org/x/sys v0.39.0
 	golang.org/x/text v0.32.0

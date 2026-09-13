@@ -31,13 +31,11 @@ func runPackageExport(args []string, app *application.Application, stdout, stder
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "output_path", err)
 	}
-	reader, ok := app.Runs.(interface {
-		ReadPackageArchive(context.Context, domain.RunID) ([]byte, domain.VerifiedPackageRecord, error)
-	})
-	if !ok {
+	reader := app.Packages
+	if reader == nil {
 		return writeStateError(stdout, stderr, 5, "package_unavailable", errors.New("workflow has no verified package export"))
 	}
-	raw, record, err := reader.ReadPackageArchive(context.Background(), id)
+	raw, record, err := reader.ReadArchive(context.Background(), id)
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}

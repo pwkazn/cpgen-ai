@@ -21,18 +21,18 @@ func (s *DataExecutor) VerifyDraft(ctx context.Context, view domain.RunView, fac
 	if factory == nil {
 		return empty, errors.New("data verification requires its sandbox factory")
 	}
-	input, err := s.ReadInput(ctx, view.RunID())
+	input, err := s.reader.ReadInput(ctx, view.RunID())
 	if err != nil {
 		return empty, err
 	}
 	if input.Value == nil {
 		return empty, errors.New("data verification requires a passing Solution")
 	}
-	content, err := s.ReadDraft(ctx, view.RunID())
+	content, err := s.reader.ReadDraft(ctx, view.RunID())
 	if err != nil {
 		return empty, err
 	}
-	attempt, err := s.generation.admit(ctx, view, "data_verify", content.ContentDigest)
+	attempt, err := s.drafts.admit(ctx, view, "data_verify", content.ContentDigest)
 	if err != nil {
 		return empty, err
 	}
@@ -54,12 +54,11 @@ func (s *DataExecutor) VerifyDraft(ctx context.Context, view domain.RunView, fac
 	if mainErr != nil || repeatErr != nil || mainDigest != wanted || repeatDigest != wanted {
 		return empty, errors.New("data execution changed the frozen toolchain")
 	}
-	config := s.generation.config
-	publisher, err := NewSandboxArtifactSink(config.Store, config.Blobs, config.Clock, identity)
+	publisher, err := s.publisher(attempt, view.Version())
 	if err != nil {
 		return empty, err
 	}
-	verifier, err := NewDataVerifier(DataVerifierConfig{Sandbox: main, RepeatSandbox: repeat, Publisher: publisher, Blobs: config.Blobs, Lock: lock})
+	verifier, err := NewDataVerifier(DataVerifierConfig{Sandbox: main, RepeatSandbox: repeat, Publisher: publisher, Blobs: s.blobs, Lock: lock})
 	if err != nil {
 		return empty, err
 	}

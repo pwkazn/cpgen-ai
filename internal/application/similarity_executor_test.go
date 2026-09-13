@@ -264,7 +264,7 @@ type similarityExecutorFixture struct {
 
 func newSimilarityExecutorFixture(t *testing.T, maxCalls int64, respond ...http.HandlerFunc) *similarityExecutorFixture {
 	t.Helper()
-	return similarityExecutorFixtureFromGeneration(t, newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.Slice2CheckpointWorkflowRevision, maxCalls), respond...)
+	return similarityExecutorFixtureFromGeneration(t, newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.LegacySimilarityCheckpointRevision, maxCalls), respond...)
 }
 
 func similarityExecutorFixtureFromGeneration(t *testing.T, generation generationExecutorFixture, respond ...http.HandlerFunc) *similarityExecutorFixture {

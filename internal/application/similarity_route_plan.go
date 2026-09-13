@@ -55,7 +55,7 @@ type SimilarityRoutePlan struct {
 }
 
 func (p SimilarityRoutePlan) Validate() error {
-	if p.SchemaVersion != SimilarityRoutePlanSchemaV1 || p.RuleVersion != similarityRoutingPolicyV1 || p.RunVersion <= 0 || p.WorkflowRevision != workflow.Slice2CheckpointWorkflowRevision {
+	if p.SchemaVersion != SimilarityRoutePlanSchemaV1 || p.RuleVersion != similarityRoutingPolicyV1 || p.RunVersion <= 0 || p.WorkflowRevision != workflow.LegacySimilarityCheckpointRevision {
 		return errors.New("unsupported similarity route plan identity")
 	}
 	if err := p.RunID.Validate(); err != nil {
@@ -208,20 +208,33 @@ func similarityRoute(decision similarity.Decision, budget domain.MutationBudgetS
 	}
 }
 
+type similarityRouteReadStore interface {
+	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)
+	PendingCancel(context.Context, domain.RunID) (*domain.ControlRequest, error)
+	ReadStageInputDigest(context.Context, domain.RunID, domain.StageName) (domain.Digest, error)
+}
+
 type SimilarityRoutePlanner struct {
-	executor *SimilarityExecutor
+	evidence *SimilarityContentReader
 	budgets  port.MutationBudgetReader
+	locks    *runlock.Manager
+	store    similarityRouteReadStore
+	policy   domain.Digest
 }
 
 func NewSimilarityRoutePlanner(executor *SimilarityExecutor) (*SimilarityRoutePlanner, error) {
 	if executor == nil {
 		return nil, errors.New("similarity route planning requires a committed evidence executor")
 	}
-	budgets, ok := executor.config.Generation.config.Store.(port.MutationBudgetReader)
+	budgets, ok := executor.store.(port.MutationBudgetReader)
 	if !ok {
 		return nil, errors.New("similarity route planning requires authoritative mutation quota reads")
 	}
-	return &SimilarityRoutePlanner{executor, budgets}, nil
+	store, ok := executor.store.(similarityRouteReadStore)
+	if !ok {
+		return nil, errors.New("route planning requires current run and stage input readers")
+	}
+	return &SimilarityRoutePlanner{executor.Reader(), budgets, executor.locks, store, executor.admission.policy}, nil
 }
 
 // Read owns shared run/artifact locks for a standalone inspection. It performs
@@ -235,34 +248,33 @@ func (p *SimilarityRoutePlanner) Read(ctx context.Context, runID domain.RunID) (
 	if err := runID.Validate(); err != nil {
 		return empty, err
 	}
-	generation := p.executor.config.Generation.config
-	guard, err := generation.Locks.AcquireRun(ctx, runID, runlock.Shared)
+	guard, err := p.locks.AcquireRun(ctx, runID, runlock.Shared)
 	if err != nil {
 		return empty, err
 	}
 	defer guard.Close()
-	artifacts, err := generation.Locks.AcquireArtifacts(ctx, runlock.Shared)
+	artifacts, err := p.locks.AcquireArtifacts(ctx, runlock.Shared)
 	if err != nil {
 		return empty, err
 	}
 	defer artifacts.Close()
-	current, err := generation.Store.GetRun(ctx, runID)
+	current, err := p.store.GetRun(ctx, runID)
 	if err != nil {
 		return empty, err
 	}
-	if current.WorkflowRevision != workflow.Slice2CheckpointWorkflowRevision || current.WorkflowDigest != domain.SumBytes([]byte(current.WorkflowRevision)) || current.ConfigDigest != generation.Content.ProviderPolicyDigest || current.CurrentStage != "slice2_checkpoint" || (current.State != domain.RunRunning && current.State != domain.RunNeedsReview) {
+	if current.WorkflowRevision != workflow.LegacySimilarityCheckpointRevision || current.WorkflowDigest != domain.SumBytes([]byte(current.WorkflowRevision)) || current.ConfigDigest != p.policy || current.CurrentStage != "slice2_checkpoint" || (current.State != domain.RunRunning && current.State != domain.RunNeedsReview) {
 		return empty, errors.New("route planning requires the current frozen Similarity checkpoint")
 	}
-	if pending, err := generation.Store.PendingCancel(ctx, runID); err != nil {
+	if pending, err := p.store.PendingCancel(ctx, runID); err != nil {
 		return empty, err
 	} else if pending != nil {
 		return empty, errors.New("cancelled work cannot plan a new business route")
 	}
-	content, err := p.executor.ReadCommitted(ctx, runID)
+	content, err := p.evidence.ReadCommitted(ctx, runID)
 	if err != nil {
 		return empty, err
 	}
-	input, err := generation.Store.ReadStageInputDigest(ctx, runID, "slice2_checkpoint")
+	input, err := p.store.ReadStageInputDigest(ctx, runID, "slice2_checkpoint")
 	if err != nil {
 		return empty, err
 	}
@@ -300,7 +312,7 @@ func (p *SimilarityRoutePlanner) Read(ctx context.Context, runID domain.RunID) (
 	if err := plan.Validate(); err != nil {
 		return empty, err
 	}
-	after, err := generation.Store.GetRun(ctx, runID)
+	after, err := p.store.GetRun(ctx, runID)
 	if err != nil {
 		return empty, err
 	}

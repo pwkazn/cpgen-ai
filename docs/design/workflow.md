@@ -21,11 +21,11 @@ A run persists:
 
 Every stage record persists its typed input digest, optional output digest, attempt count, current attempt ID, state, last typed error, logical idempotency key, and committed evidence references.
 
-The compiled constructor is authoritative. Persisted names and ordinals are compatibility selectors and audit fields, not a user-defined graph.
+The compiled constructor is authoritative. Persisted names and ordinals are compatibility selectors and audit fields, not a user-defined graph. Immutable `workflow.Definition` is the single source for fixed stage order, package completion and attempt preservation. `NewGenerationRunService` uses the flat `GenerationRunConfig` with explicit owner resources; historical Go constructor helpers exist only in tests. Resource/admission/frozen-policy checks run at composition, while run/attempt/evidence checks remain at execution boundaries.
 
 ## 3. Concrete typed pipeline
 
-The Phase 1 constructor assembles these versioned stages:
+The generation constructor assembles these business stages:
 
 1. Idea
 2. Statement
@@ -36,11 +36,11 @@ The Phase 1 constructor assembles these versioned stages:
 7. Quality
 8. Package
 
-Slice 1 uses a deterministic Fake constructor with a small subset of stages to prove persistence and restart. Later slices replace or extend that constructor with real stage implementations.
+The current `GenerationRevision` assembles the complete ordinary-problem pipeline, including separate verification and decision boundaries. `revisions.go` isolates the unchanged persisted revision strings and historical stopping points. All revisions use the application scheduler; there is no separate historical pipeline executor. The default deterministic Fake pipeline and its capability configuration live in `internal/adapter/fake`.
 
-The ADR-0006 library amendment permits LangGraphGo `v0.8.5` assembly in `internal/application` only. The graph has one active node at a time; graph types do not enter stage contracts. CPGen owns conditional repair bounds, review and stop decisions. Default graph node retries, checkpoints, callbacks and tracing remain disabled. Every node must propagate commit errors and check cancellation before external work. Successful library termination at an unfinished slice boundary is not READY.
+The 2026-09-13 ADR-0006 amendment uses a local fixed loop in `internal/application`, replacing the LangGraphGo wrapper. One stage boundary runs at a time. The loop validates identity, stage order and committed version before selecting the next stage, checks cancellation before invocation and returns immediately on a pause or terminal result. It performs no retries or independent checkpoint writes. A failed boundary may return an updated same-stage projection when BeginStage or accounting already committed; foreign or regressed projections are rejected.
 
-Graph progress is reconstructed from the compatible compiled workflow revision, stage/input/config/schema bindings and verified stored outputs. SQLite remains authoritative; no graph.json store or unchecked automatic checkpoint callback is used. `compiledRunGraph` now drives the existing Slice 1 lifecycle through fixed application nodes; it checks complete persisted stage selectors before mutation and advances only after the checked stage commit. WF-03a verifies committed Idea/Statement input recovery and WF-02a composes their durable typed execution in application components. The remaining WF-02 through WF-05 work connects these components, durable Similarity and recovery/control to the run service. The CLI continues to select Fake stages until those integration tests pass.
+Progress is reconstructed from the compatible compiled workflow revision, stage/input/config/schema bindings and verified stored outputs. SQLite remains authoritative; no graph.json store or unchecked automatic checkpoint callback is used. The scheduler shares no invocation state between runs. `LocalRunService` directly manages attempts, result commits, review and recovery under the run lock; its stageControl helper joins pollers. `fixedStages` adapts typed business inputs/results and selects recovery through an explicit switch. There is no recovery registration table or separate lifecycle/termination object. Bootstrap/Application owns and closes execution resources before storage. The existing stage-sequence, error, cancellation, concurrent-run and subprocess recovery tests remain the behavioral contract after removing the graph library.
 
 A stage is parameterized by concrete Go input and output values. It receives an immutable RunView, a copied input, and a narrow set of metered ports. It never receives persistence, the process lock, raw Docker, unrestricted Blob writing, or mutable coordinator state.
 
@@ -144,7 +144,11 @@ An unchanged digest may reuse a verified committed stage output only when schema
 
 The coordinator exposes each stage a RunView containing read-only remaining limits. Metered ports own reservations and settlement for model calls, similarity calls, Docker runs, artifact bytes, tokens, cost, and active time.
 
+Stage publication takes the existing admitted attempt and version and artifact declaration plus bytes; the publication adapter owns physical call, reservation and writer identities. Committed proof readers use read-only response policy and sandbox planning inputs without transports or lifecycle resources. No database revision, schema, canonical encoding or audit identity changes accompany these capability boundaries.
+
 Stage code cannot mutate counters. Parallel-safe account updates use database constraints and expected account versions. Cache results still create logical call evidence and retain the source call and artifact provenance.
+
+Adding an ordinary business stage requires its typed implementation, committed evidence reader, a new compatible workflow definition and fixed execution/commit/recovery adapters. Existing persisted definitions must retain their sequences. Timer, cancellation, budget, writer and generic terminal-cleanup state machines do not gain business-stage branches; only a new effect protocol would require a separately reviewed adapter change.
 
 ## 13. Acceptance
 

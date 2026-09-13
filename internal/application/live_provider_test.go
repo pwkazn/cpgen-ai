@@ -102,7 +102,7 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	// No custom client or transport is installed on the real model adapter.
 	model, err := agent.NewLangChain(llmConfig)
 	must(err)
-	content, retry, err := application.BuildSlice2ExecutionSettings(cfg)
+	content, retry, err := application.BuildGenerationExecutionSettings(cfg)
 	must(err)
 	gc := application.GenerationExecutorConfig{Store: store, Blobs: blobs, LLM: model, Clock: clock.Real{}, Locks: app.Locks, Content: content, RetryPolicy: retry, CostUpperBoundMicroUSD: cfg.Workflow.LLMCostUpperBoundMicroUSD}
 	for step, target := range map[string]*application.FormatRepairPolicy{"idea.draft": &gc.IdeaRepair, "statement.draft": &gc.StatementRepair, "solution.draft": &gc.SolutionRepair, "data.draft": &gc.DataRepair} {

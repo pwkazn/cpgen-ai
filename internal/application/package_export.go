@@ -10,7 +10,7 @@ import (
 
 func (s *LocalRunService) ReadPackageArchive(ctx context.Context, runID domain.RunID) ([]byte, domain.VerifiedPackageRecord, error) {
 	var empty domain.VerifiedPackageRecord
-	if s.packages == nil {
+	if s.archive == nil {
 		return nil, empty, errors.New("this workflow does not export verified packages")
 	}
 	if err := runID.Validate(); err != nil {
@@ -26,5 +26,5 @@ func (s *LocalRunService) ReadPackageArchive(ctx context.Context, runID domain.R
 		return nil, empty, err
 	}
 	defer artifacts.Close()
-	return s.packages.ReadArchive(ctx, runID)
+	return s.archive.ReadArchive(ctx, runID)
 }

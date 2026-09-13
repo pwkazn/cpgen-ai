@@ -7,16 +7,16 @@ import (
 
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
-	"cpgen/internal/similarity"
 	"cpgen/internal/toolchain"
-	"cpgen/internal/workflow"
 )
 
 // SolutionExecutor reuses the generation ledger and verified committed
 // Similarity chain. Draft collection alone is not compilation or Judge proof.
 type SolutionExecutor struct {
-	similarity *SimilarityExecutor
-	generation *GenerationExecutor
+	publisher StagePublisher
+	blobs     port.VerifiedBlobReader
+	reader    *SolutionReader
+	drafts    *DraftExecution
 }
 
 // SolutionSandboxFactory is invoked only after the current verification
@@ -32,18 +32,18 @@ func (s *SolutionExecutor) VerifyDraft(ctx context.Context, view domain.RunView,
 	if factory == nil {
 		return empty, errors.New("solution verification requires a sandbox factory")
 	}
-	input, err := s.ReadInput(ctx, view.RunID())
+	input, err := s.reader.ReadInput(ctx, view.RunID())
 	if err != nil {
 		return empty, err
 	}
 	if input.Value == nil {
 		return empty, errors.New("solution verification requires committed acceptance")
 	}
-	content, err := s.ReadDraft(ctx, view.RunID())
+	content, err := s.reader.ReadDraft(ctx, view.RunID())
 	if err != nil {
 		return empty, err
 	}
-	attempt, err := s.generation.admit(ctx, view, "solution_verify", content.ContentDigest)
+	attempt, err := s.drafts.admit(ctx, view, "solution_verify", content.ContentDigest)
 	if err != nil {
 		return empty, err
 	}
@@ -52,12 +52,11 @@ func (s *SolutionExecutor) VerifyDraft(ctx context.Context, view domain.RunView,
 	if err != nil {
 		return empty, err
 	}
-	config := s.generation.config
-	publisher, err := NewSandboxArtifactSink(config.Store, config.Blobs, config.Clock, identity)
+	publisher, err := s.publisher(attempt, view.Version())
 	if err != nil {
 		return empty, err
 	}
-	verifier, err := NewSolutionVerifier(SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: config.Blobs, Lock: lock})
+	verifier, err := NewSolutionVerifier(SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: s.blobs, Lock: lock})
 	if err != nil {
 		return empty, err
 	}
@@ -70,56 +69,17 @@ func solutionVerificationIdentity(attempt domain.StageAttempt, version int64) po
 		LogicalOperationID: "solution-verification", Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
 }
 
-func NewSolutionExecutor(evidence *SimilarityExecutor) (*SolutionExecutor, error) {
-	if evidence == nil || !workflow.HasSolutionStages(evidence.config.WorkflowRevision) {
-		return nil, errors.New("solution executor requires the forward solution workflow")
-	}
-	generation := evidence.config.Generation
-	if _, err := generation.calls(generation.config.Store, "solution"); err != nil {
-		return nil, err
-	}
-	return &SolutionExecutor{evidence, generation}, nil
-}
-
-// ReadInput performs the simple business split using current committed
-// evidence. It never reads or consumes mutation quota, retries Similarity or
-// starts a model call. A structural caller-supplied ACCEPT is not sufficient.
-func (s *SolutionExecutor) ReadInput(ctx context.Context, runID domain.RunID) (domain.AgentResult[domain.SolutionDraftInputV1], error) {
-	var empty domain.AgentResult[domain.SolutionDraftInputV1]
-	content, err := s.similarity.ReadCommitted(ctx, runID)
-	if err != nil {
-		return empty, err
-	}
-	if content.Decision.Kind != similarity.DecisionAccept {
-		result := domain.Review[domain.SolutionDraftInputV1](domain.ReviewRequest{EvidenceDigest: content.Evidence.EvidenceDigest, PolicyDigest: content.Input.ExecutionPolicyDigest, Reason: "similarity_requires_review:" + string(content.Decision.Kind)})
-		return result, result.Validate()
-	}
-	inputDigest, err := content.Input.Digest()
-	if err != nil {
-		return empty, err
-	}
-	decision, err := canonicalJSON(content.Decision)
-	if err != nil {
-		return empty, err
-	}
-	input, err := domain.NewSolutionDraftInput(content.Statement.Idea.Snapshot, content.Statement.Problem, inputDigest, content.Evidence.EvidenceDigest, domain.SumBytes(decision))
-	if err != nil {
-		return empty, err
-	}
-	return domain.Success(input), nil
-}
-
 func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView, input domain.SolutionDraftInputV1) (GenerationStageResult[domain.SolutionContent], error) {
 	var result GenerationStageResult[domain.SolutionContent]
 	digest, err := input.Digest()
 	if err != nil {
 		return result, err
 	}
-	attempt, err := s.generation.admit(ctx, view, "solution", digest)
+	attempt, err := s.drafts.admit(ctx, view, "solution", digest)
 	if err != nil {
 		return result, err
 	}
-	expected, err := s.ReadInput(ctx, view.RunID())
+	expected, err := s.reader.ReadInput(ctx, view.RunID())
 	if err != nil {
 		return result, err
 	}
@@ -135,13 +95,13 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 	if err != nil {
 		return result, err
 	}
-	generated, err := s.generation.generate(ctx, view, attempt, variables)
+	generated, err := s.drafts.generate(ctx, view, attempt, variables)
 	result = generationResult[domain.SolutionContent](generated)
 	if err != nil {
 		return result, err
 	}
 	if generated.outcome.Failure != nil {
-		result.Outcome = generationFailure[domain.SolutionContent](view, attempt, s.generation.config.Content.ProviderPolicyDigest, generated.outcome, s.generation.config.Clock.Now())
+		result.Outcome = generationFailure[domain.SolutionContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated.outcome, s.drafts.config.Clock.Now())
 		return result, nil
 	}
 	var draft domain.SolutionDraftV1
@@ -150,7 +110,7 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 	}
 	content, err := draft.Bind(input)
 	if err != nil {
-		result.Outcome = generationContentReview[domain.SolutionContent](s.generation.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "solution_binding_rejected")
+		result.Outcome = generationContentReview[domain.SolutionContent](s.drafts.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "solution_binding_rejected")
 		return result, nil
 	}
 	result.Outcome = domain.Success(content)
@@ -160,41 +120,34 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 
 // ReadDraft reconstructs a committed content proposal. It must not be used as
 // proof that its source compiled, matched samples, or passed later Judge gates.
-func (s *SolutionExecutor) ReadDraft(ctx context.Context, runID domain.RunID) (domain.SolutionContent, error) {
-	var empty domain.SolutionContent
-	input, err := s.ReadInput(ctx, runID)
+
+func (s *SolutionExecutor) Reader() *SolutionReader { return s.reader }
+
+func (s *SolutionExecutor) ReconcileDraft(ctx context.Context, runID domain.RunID) error {
+	current, attempt, err := s.drafts.reconciliationAttempt(ctx, runID)
+	if err != nil || attempt == nil {
+		return err
+	}
+	if current.CurrentStage != "solution" {
+		return errors.New("Solution cleanup requires its draft stage")
+	}
+	input, err := s.reader.ReadInput(ctx, runID)
 	if err != nil {
-		return empty, err
+		return err
 	}
 	if input.Value == nil {
-		return empty, errors.New("solution draft has no accepted current source")
-	}
-	variables, err := input.Value.CanonicalJSON()
-	if err != nil {
-		return empty, err
+		return errors.New("Solution cleanup lost current acceptance")
 	}
 	digest, err := input.Value.Digest()
 	if err != nil {
-		return empty, err
+		return err
 	}
-	calls, err := s.generation.calls(s.generation.config.Store, "solution")
+	if digest != attempt.InputDigest {
+		return errors.New("Solution cleanup input differs")
+	}
+	variables, err := input.Value.CanonicalJSON()
 	if err != nil {
-		return empty, err
+		return err
 	}
-	raw, expected, err := s.generation.reader.readDraft(ctx, runID, "solution", digest, variables, calls)
-	if err != nil {
-		return empty, err
-	}
-	var draft domain.SolutionDraftV1
-	if err := json.Unmarshal(raw, &draft); err != nil {
-		return empty, err
-	}
-	content, err := draft.Bind(*input.Value)
-	if err != nil {
-		return empty, err
-	}
-	if content.ContentDigest != expected {
-		return empty, errors.New("committed solution digest differs from reconstructed content")
-	}
-	return content, nil
+	return s.drafts.reconcileDraftRequest(ctx, current, *attempt, variables)
 }

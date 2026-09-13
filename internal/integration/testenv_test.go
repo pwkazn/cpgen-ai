@@ -82,10 +82,10 @@ func openIntegrationRecoveryApp(t *testing.T, env integrationEnvironment, bounda
 
 func replaceIntegrationRecovery(t *testing.T, env integrationEnvironment, app *application.Application, recovery application.RunRecovery) *application.Application {
 	t.Helper()
-	pipeline, err := workflow.NewSlice1Pipeline(
-		fake.NewPrepareStep(workflow.PrepareCapabilities{}),
-		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
-		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+	pipeline, err := fake.NewPipeline(
+		fake.NewPrepareStep(fake.PrepareCapabilities{}),
+		fake.NewExerciseStep(fake.ExerciseCapabilities{}),
+		fake.NewCheckpointStep(fake.CheckpointCapabilities{}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -262,10 +262,10 @@ type blockingPrepareStep struct {
 
 func (s *blockingPrepareStep) Name() domain.StageName { return "prepare" }
 
-func (s *blockingPrepareStep) Run(ctx context.Context, _ domain.RunView, _ domain.Slice1Input) (domain.AgentResult[domain.Slice1Prepared], error) {
+func (s *blockingPrepareStep) Run(ctx context.Context, _ domain.RunView, _ domain.FakeInput) (domain.AgentResult[domain.FakePrepared], error) {
 	close(s.started)
 	<-ctx.Done()
-	return domain.Cancelled[domain.Slice1Prepared](domain.CancellationEvidence{Cause: domain.CauseUserCancel, Evidence: domain.SumBytes([]byte("integration live cancel"))}), nil
+	return domain.Cancelled[domain.FakePrepared](domain.CancellationEvidence{Cause: domain.CauseUserCancel, Evidence: domain.SumBytes([]byte("integration live cancel"))}), nil
 }
 
 func runLiveExecutorHelper(cfg config.Config) error {
@@ -275,10 +275,10 @@ func runLiveExecutorHelper(cfg config.Config) error {
 	}
 	defer app.Close()
 	started := make(chan struct{})
-	pipeline, err := workflow.NewSlice1Pipeline(
+	pipeline, err := fake.NewPipeline(
 		&blockingPrepareStep{started: started},
-		fake.NewExerciseStep(workflow.ExerciseCapabilities{}),
-		fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+		fake.NewExerciseStep(fake.ExerciseCapabilities{}),
+		fake.NewCheckpointStep(fake.CheckpointCapabilities{}),
 	)
 	if err != nil {
 		return err
@@ -339,8 +339,8 @@ func runBoundaryUntil(ctx context.Context, app *application.Application, cfg con
 	create := domain.CreateRunRequest{
 		RunID: runID, SubmittedRequestJSON: submitted, SubmittedRequestDigest: domain.SumBytes(submitted),
 		EffectiveSeed: int64(len(request.Brief)), RedactedEffectiveConfigJSON: effective,
-		RedactedEffectiveConfigDigest: domain.SumBytes(effective), WorkflowRevision: workflow.Slice1WorkflowRevision,
-		SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: domain.SumBytes([]byte(workflow.Slice1WorkflowRevision)),
+		RedactedEffectiveConfigDigest: domain.SumBytes(effective), WorkflowRevision: workflow.FakeRevision,
+		SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)),
 		BudgetLimits: request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: now,
 		IdempotencyKey: "control_00000000000000000000000000000001",
 	}

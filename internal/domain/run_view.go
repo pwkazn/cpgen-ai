@@ -1,16 +1,14 @@
 package domain
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 )
 
-// Slice1Input and the following values are intentionally small deterministic
-// contracts. Later slices replace their payloads with the richer stage
-// schemas, while the coordinator and typed boundaries remain unchanged.
-type Slice1Input struct {
+// FakeInput and the following values support deterministic local exercises
+// of execution, cancellation, and dependency recovery.
+type FakeInput struct {
 	Brief         string            `json:"brief"`
 	RequestDigest Digest            `json:"request_digest"`
 	ConfigDigest  Digest            `json:"config_digest"`
@@ -19,9 +17,9 @@ type Slice1Input struct {
 	Flags         map[string]string `json:"flags,omitempty"`
 }
 
-func (v Slice1Input) Validate() error {
+func (v FakeInput) Validate() error {
 	if v.Brief == "" {
-		return errors.New("slice1 input brief is required")
+		return errors.New("fake input brief is required")
 	}
 	if err := v.RequestDigest.Validate(); err != nil {
 		return err
@@ -32,19 +30,19 @@ func (v Slice1Input) Validate() error {
 	return nil
 }
 
-type Slice1Prepared struct {
+type FakePrepared struct {
 	Digest    Digest                 `json:"digest"`
 	Summary   string                 `json:"summary"`
 	Scenario  string                 `json:"scenario,omitempty"`
 	Artifacts []CommittedArtifactRef `json:"artifacts,omitempty"`
 }
 
-func (v Slice1Prepared) Validate() error {
+func (v FakePrepared) Validate() error {
 	if err := v.Digest.Validate(); err != nil {
 		return err
 	}
 	if v.Summary == "" {
-		return errors.New("slice1 prepared summary is required")
+		return errors.New("fake prepared summary is required")
 	}
 	for index, item := range v.Artifacts {
 		if err := item.Validate(); err != nil {
@@ -54,7 +52,7 @@ func (v Slice1Prepared) Validate() error {
 	return nil
 }
 
-type Slice1Evidence struct {
+type FakeEvidence struct {
 	Digest           Digest `json:"digest"`
 	PreparedDigest   Digest `json:"prepared_digest"`
 	DependencyID     string `json:"dependency_id,omitempty"`
@@ -63,7 +61,7 @@ type Slice1Evidence struct {
 	Scenario         string `json:"scenario,omitempty"`
 }
 
-func (v Slice1Evidence) Validate() error {
+func (v FakeEvidence) Validate() error {
 	if err := v.Digest.Validate(); err != nil {
 		return err
 	}
@@ -83,7 +81,7 @@ func (v Slice1Evidence) Validate() error {
 	return nil
 }
 
-type Slice1Checkpoint struct {
+type FakeCheckpoint struct {
 	Digest           Digest `json:"digest"`
 	EvidenceDigest   Digest `json:"evidence_digest"`
 	DependencyID     string `json:"dependency_id,omitempty"`
@@ -92,7 +90,7 @@ type Slice1Checkpoint struct {
 	Reason           string `json:"reason,omitempty"`
 }
 
-func (v Slice1Checkpoint) Validate() error {
+func (v FakeCheckpoint) Validate() error {
 	if err := v.Digest.Validate(); err != nil {
 		return err
 	}
@@ -110,14 +108,6 @@ func (v Slice1Checkpoint) Validate() error {
 		return errors.New("dependency id is required with dependency digest")
 	}
 	return nil
-}
-
-func stableSlice1Digest(value any) (Digest, error) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return "", err
-	}
-	return SumBytes(encoded), nil
 }
 
 // BudgetSnapshot is the read-only budget projection made available to a step.

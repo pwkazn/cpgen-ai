@@ -378,6 +378,10 @@ func verifySandboxCleaned(ctx context.Context, store port.SandboxLifecycleReader
 var _ port.MeteredSandbox = (*DockerSandboxSession)(nil)
 
 func sandboxOperationIdentity(c DockerSandboxConfig, kind domain.CallKind, request any) (port.SandboxAuthorizationIdentity, docker.PlanIdentity, error) {
+	return sandboxReadOperationIdentity(c.ReadPolicy(), kind, request)
+}
+
+func sandboxReadOperationIdentity(c SandboxReadPolicy, kind domain.CallKind, request any) (port.SandboxAuthorizationIdentity, docker.PlanIdentity, error) {
 	parent := c.Identity
 	parent.ExpectedRunVersion = 0
 	lockDigest, err := c.Lock.Digest()
@@ -403,4 +407,19 @@ func sandboxOperationIdentity(c DockerSandboxConfig, kind domain.CallKind, reque
 	identity.LogicalOperationID = "sandbox:" + string(identity.SandboxExecutionID)
 	planIdentity := docker.PlanIdentity{RunID: identity.RunID, AttemptID: identity.AttemptID, SandboxExecutionID: identity.SandboxExecutionID, LogicalOperationID: identity.LogicalOperationID, OperationNonce: string(identity.SandboxExecutionID)[len("sandbox_"):], EngineIdentityDigest: c.EngineIdentity}
 	return identity, planIdentity, nil
+}
+
+// SandboxReadPolicy contains only the immutable inputs used to reconstruct a
+// committed execution plan. Readers cannot acquire an Engine, grant or writer
+// through this value.
+type SandboxReadPolicy struct {
+	Identity       port.SandboxAuthorizationIdentity
+	Config         docker.Config
+	Lock           toolchain.Lock
+	EngineIdentity domain.Digest
+	Limits         docker.ControlLimits
+}
+
+func (c DockerSandboxConfig) ReadPolicy() SandboxReadPolicy {
+	return SandboxReadPolicy{c.Identity, c.Config, c.Lock, c.EngineIdentity, c.Limits}
 }

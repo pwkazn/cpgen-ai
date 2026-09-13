@@ -50,7 +50,7 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 				if !errors.Is(err, errInjectedSandboxReceiptGap) || !gap.failed.Load() {
 					t.Fatalf("receipt interruption was not reached: %v", err)
 				}
-				service, err = application.NewSolutionExecutor(f.service)
+				service, err = application.NewSolutionExecutor(f.service, f.config.Generation)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -64,7 +64,7 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restarted, err := application.NewSolutionExecutor(f.service)
+			restarted, err := application.NewSolutionExecutor(f.service, f.config.Generation)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,11 +90,11 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 			if used := int64(100) - after.Remaining[domain.BudgetDockerContainerCreates]; used != wantContainers {
 				t.Fatalf("unexpected physical Docker dispatch/retry: used=%d want=%d", used, wantContainers)
 			}
-			if _, err := restarted.ReadVerification(ctx, f.runID, base); err == nil {
+			if _, err := restarted.Reader().ReadVerification(ctx, f.runID, base.ReadPolicy()); err == nil {
 				t.Fatal("uncommitted verification artifacts became a passing gate")
 			}
 			f.finish(t, view, replay.ReportArtifact.Blob.Digest, "solution_checkpoint", replay.ReportArtifact.Blob.Digest, replay.Occurrences)
-			committed, err := restarted.ReadVerification(ctx, f.runID, base)
+			committed, err := restarted.Reader().ReadVerification(ctx, f.runID, base.ReadPolicy())
 			if err != nil {
 				t.Fatalf("read committed Docker verification: %v", err)
 			}
@@ -104,7 +104,7 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 			}
 			wrongConfig := base
 			wrongConfig.Limits.HelperPIDs++
-			if _, err := restarted.ReadVerification(ctx, f.runID, wrongConfig); err == nil {
+			if _, err := restarted.Reader().ReadVerification(ctx, f.runID, wrongConfig.ReadPolicy()); err == nil {
 				t.Fatal("changed sandbox policy reused verification evidence")
 			}
 			if mode == "pass" {
@@ -177,7 +177,7 @@ func assertCommittedSolutionRejectsAlteredStage(t *testing.T, ctx context.Contex
 	} {
 		t.Run(name, func(t *testing.T) {
 			generationConfig := f.executorConfig
-			generationConfig.Store = alteredSolutionStageStore{f.store, alter}
+			generationConfig.Store = &alteredSolutionStageStore{f.store, alter}
 			generation, err := application.NewGenerationExecutor(generationConfig)
 			if err != nil {
 				t.Fatal(err)
@@ -188,11 +188,11 @@ func assertCommittedSolutionRejectsAlteredStage(t *testing.T, ctx context.Contex
 			if err != nil {
 				t.Fatal(err)
 			}
-			service, err := application.NewSolutionExecutor(evidence)
+			service, err := application.NewSolutionExecutor(evidence, generation)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.ReadVerification(ctx, f.runID, config); err == nil {
+			if _, err := service.Reader().ReadVerification(ctx, f.runID, config.ReadPolicy()); err == nil {
 				t.Fatal("altered committed verification was accepted")
 			}
 		})

@@ -14,7 +14,7 @@ import (
 func solutionConfigYAML(t *testing.T) string {
 	t.Helper()
 	return configBase(t) + providerYAML + similarityYAML +
-		strings.Replace(explicitWorkflowYAML(), workflow.Slice2CheckpointWorkflowRevision, workflow.SolutionWorkflowRevision, 1) +
+		strings.Replace(explicitWorkflowYAML(), workflow.LegacySimilarityCheckpointRevision, workflow.LegacySolutionCheckpointRevision, 1) +
 		"sandbox:\n  engine_endpoint: unix:///var/run/docker.sock\n  toolchain_lock_path: " + filepath.ToSlash(filepath.Join(t.TempDir(), "toolchain.lock.json")) +
 		"\n  toolchain_lock_digest: " + string(domain.SumBytes([]byte("fixture lock"))) + "\n"
 }
@@ -22,12 +22,12 @@ func solutionConfigYAML(t *testing.T) string {
 func TestSolutionConfigurationRequiresClosedPinnedLocalSandbox(t *testing.T) {
 	raw := solutionConfigYAML(t)
 	cfg, err := config.Decode([]byte(raw))
-	if err != nil || cfg.Workflow.Revision != workflow.SolutionWorkflowRevision || cfg.Sandbox == nil {
+	if err != nil || cfg.Workflow.Revision != workflow.LegacySolutionCheckpointRevision || cfg.Sandbox == nil {
 		t.Fatalf("forward configuration: %+v %v", cfg, err)
 	}
 	assertConfigField(t, raw[:strings.Index(raw, "sandbox:\n")], "sandbox")
-	mvp := strings.Replace(raw, workflow.SolutionWorkflowRevision, workflow.MVPWorkflowRevision, 1)
-	if parsed, err := config.Decode([]byte(mvp)); err != nil || parsed.Workflow.Revision != workflow.MVPWorkflowRevision || parsed.Sandbox == nil {
+	mvp := strings.Replace(raw, workflow.LegacySolutionCheckpointRevision, workflow.GenerationRevision, 1)
+	if parsed, err := config.Decode([]byte(mvp)); err != nil || parsed.Workflow.Revision != workflow.GenerationRevision || parsed.Sandbox == nil {
 		t.Fatalf("MVP configuration: %+v %v", parsed, err)
 	}
 	assertConfigField(t, mvp[:strings.Index(mvp, "sandbox:\n")], "sandbox")

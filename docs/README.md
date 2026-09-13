@@ -1,5 +1,9 @@
 # CP Problem Generator Documentation Index
 
+The [2026-09-13 architecture simplification plan](superpowers/plans/2026-09-13-architecture-simplification.md) tracks separation of read/export and execution services, explicit stage dependencies, local fixed scheduling, and consolidated historical compatibility. Its implementation and verification records distinguish completed changes from outstanding environment checks. The local scheduler replaces the earlier LangGraphGo wrapper while retaining the persisted revision and transition contracts.
+
+The [2026-09-14 architecture follow-up](design/architecture-follow-up-2026-09-14.md) preserves the first proposal, whose implementation was rejected for adding too many abstractions. The [rework record](evidence/architecture-follow-up-2026-09-14.md) covers the simplified coordinator, direct readers, removed configuration layers and current verification. Toolchain snapshots and a separate publication ledger remain independent design decisions.
+
 ## Document hierarchy
 
 1. ARCHITECTURE.md defines the current system boundary.
@@ -17,7 +21,7 @@ The user revised the MVP priority on 2026-09-09: [complete a usable generation l
 
 The [Solution slice](evidence/mvp-solution-foundation.md), [Data execution](evidence/mvp-data-foundation.md), [Judge answers and differential checks](evidence/mvp-judge-foundation.md), and [Quality with package format v2](evidence/mvp-quality-package-foundation.md) now feed [package assembly, atomic READY and CLI export](evidence/mvp-package-commit-foundation.md). The full MVP configuration passes real Docker and independent CLI acceptance for an ordinary C++ problem, including a process exit inside the package transaction and fresh execution from the exported ZIP. A subsequent [APINode live-provider test](evidence/apinode-live-mvp-2026-09-10.md) passes real model generation through Docker, export and independent revalidation. Similarity remains a local fixture; actual originality has not been checked.
 
-The 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the in-process library amendment, pinned dependencies and provider boundary tests. Later checkpoints below complete the preview CLI and durable graph integration.
+The historical 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the former in-process library amendment and provider boundary tests. Later checkpoints below record preview CLI and durable graph integration; the 2026-09-13 ADR-0006 amendment supersedes the graph-library implementation choice.
 
 The subsequent [provider configuration and durable dispatch checkpoint](evidence/slice2-durable-llm-dispatch.md) records LLM-02 and LLM-03a with independent subagent acceptance. The [private result replay checkpoint](evidence/slice2-private-llm-replay.md), [bounded JSON repair checkpoint](evidence/slice2-bounded-json-repair.md) and [private cache checkpoint](evidence/slice2-private-llm-cache.md) complete LLM-03b through LLM-05 with full gates. The [compiled application graph](evidence/slice2-compiled-graph.md) completes WF-01 with full gates. The [development log](development-log.md) records the active work order.
 

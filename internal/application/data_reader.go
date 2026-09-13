@@ -11,17 +11,116 @@ import (
 	"cpgen/internal/port"
 )
 
+type DataReader struct {
+	solution   *SolutionReader
+	sandbox    SandboxReadPolicy
+	generation *GenerationReader
+	calls      CommittedDraftReader
+	store      SandboxEvidenceReadStore
+	blobs      port.VerifiedBlobReader
+}
+
+func (s *DataReader) ReadInput(ctx context.Context, runID domain.RunID) (domain.AgentResult[domain.DataDraftInputV1], error) {
+	var empty domain.AgentResult[domain.DataDraftInputV1]
+	input, err := s.solution.ReadInput(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if input.Value == nil {
+		return empty, errors.New("data requires current committed acceptance")
+	}
+	content, err := s.solution.ReadDraft(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	report, err := s.solution.ReadVerification(ctx, runID, s.sandbox)
+	if err != nil {
+		return empty, err
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return empty, err
+	}
+	digest := domain.SumBytes(raw)
+	if !report.Passed {
+		return domain.Review[domain.DataDraftInputV1](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: report.PolicyDigest, Reason: "solution_requires_review:" + report.Reason}), nil
+	}
+	bound, err := domain.NewDataDraftInput(*input.Value, content, digest)
+	if err != nil {
+		return empty, err
+	}
+	return domain.Success(bound), nil
+}
+
+func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.DataContent, error) {
+	var empty domain.DataContent
+	input, err := s.ReadInput(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if input.Value == nil {
+		return empty, errors.New("data draft has no passing current Solution")
+	}
+	variables, err := input.Value.CanonicalJSON()
+	if err != nil {
+		return empty, err
+	}
+	digest, err := input.Value.Digest()
+	if err != nil {
+		return empty, err
+	}
+	calls := s.calls
+	raw, expected, err := s.generation.readDraft(ctx, runID, "data", digest, variables, calls)
+	if err != nil {
+		return empty, err
+	}
+	var draft domain.DataDraftV1
+	if err := json.Unmarshal(raw, &draft); err != nil {
+		return empty, err
+	}
+	content, err := draft.Bind(*input.Value)
+	if err != nil {
+		return empty, err
+	}
+	if content.ContentDigest != expected {
+		return empty, errors.New("committed data digest differs from reconstructed content")
+	}
+	return content, nil
+}
+
+func (s *DataReader) ReadJudgeInput(ctx context.Context, runID domain.RunID) (JudgeInput, error) {
+	var empty JudgeInput
+	input, err := s.ReadInput(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	if input.Value == nil {
+		return empty, errors.New("Judge requires a current passing Solution")
+	}
+	content, err := s.ReadDraft(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	report, err := s.ReadVerification(ctx, runID)
+	if err != nil {
+		return empty, err
+	}
+	solution, err := s.solution.ReadVerification(ctx, runID, s.sandbox)
+	if err != nil {
+		return empty, err
+	}
+	value := JudgeInput{DataInput: *input.Value, Data: content, DataReport: report, SolutionReport: solution}
+	if _, err := value.dataset(); err != nil {
+		return empty, err
+	}
+	return value, nil
+}
+
 // ReadVerification reconstructs the committed data report and every exact
 // generator/validator request. It performs no Docker execution or publication.
-func (s *DataExecutor) ReadVerification(ctx context.Context, runID domain.RunID) (DataVerificationReport, error) {
+func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (DataVerificationReport, error) {
 	var empty DataVerificationReport
-	store, ok := s.generation.config.Store.(interface {
-		solutionVerificationReadStore
-		sandboxEvidenceStore
-	})
-	if !ok {
-		return empty, errors.New("data verification requires committed sandbox evidence reads")
-	}
+	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -41,7 +140,7 @@ func (s *DataExecutor) ReadVerification(ctx context.Context, runID domain.RunID)
 	if attempt.Validate() != nil || attempt.RunID != runID || attempt.StageName != "data_verify" || attempt.State != domain.StageAttemptSucceeded || attempt.InputDigest != content.ContentDigest || attempt.OutputDigest == nil {
 		return empty, errors.New("data verification stage differs from the current draft")
 	}
-	reader, err := newSandboxStageEvidence(ctx, store, s.generation.config.Blobs, stage)
+	reader, err := newSandboxStageEvidence(ctx, store, s.blobs, stage)
 	if err != nil {
 		return empty, err
 	}
@@ -135,7 +234,7 @@ func (s *DataExecutor) ReadVerification(ctx context.Context, runID domain.RunID)
 			}
 		}
 		if generated.Input != nil {
-			raw, err := readSolutionVerificationBlob(ctx, s.generation.config.Blobs, *generated.Input, 1<<20)
+			raw, err := readSolutionVerificationBlob(ctx, s.blobs, *generated.Input, 1<<20)
 			if err != nil {
 				return empty, err
 			}

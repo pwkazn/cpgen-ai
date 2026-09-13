@@ -6,6 +6,8 @@ Date: 2026-08-31
 
 Amended: 2026-09-08 (in-process library integration)
 
+Amended: 2026-09-13 (local fixed scheduling)
+
 ## Context
 
 Phase 1 needs a recoverable product workflow, but its deployment boundary is one host and one local project workspace. The completed Slice 0 Docker watchdog, measurement, budget, and artifact evidence already provide the difficult external-effect safety boundary. Building a hosted general workflow runtime would add mechanisms the product does not require.
@@ -26,13 +28,13 @@ Supersedes: ADR-0001 only where it implied a generic Step runtime; ADR-0002 exec
 
 This decision also rejects a daemon, task queue, arbitrary runtime graph, execution lease, lease epoch, owner epoch, fencing token, PROBING or QUIESCING run mode, observation ticket or floor, generic recovery intent, startup janitor, and distributed ownership. Temporal, AutoGen, CrewAI and hosted LangGraph services remain unnecessary; future cross-host requirements require a separate ADR and proof of need.
 
-## In-process library amendment
+## Provider library and local scheduling
 
-LangGraphGo `v0.8.5` is accepted solely as an in-process library for fixed, serial graph assembly in `internal/application`. LangChainGo `v0.1.14` is accepted for provider adaptation in `internal/agent`. The minimum Go version is 1.25.0. The versions start from the verified trial and are pinned in go.mod/go.sum; compatibility changes must update CI and build documentation together.
+The 2026-09-13 architecture simplification replaces the LangGraphGo wrapper admitted on 2026-09-08 with a local fixed loop in `internal/application`. The wrapper had no ownership of checkpoints, retries or recovery; those already belonged to CPGen. The loop selects the current persisted stage, invokes one typed stage boundary and validates its committed transition before continuing. It introduces no new workflow revision or stored identity. Historical library evidence remains historical.
 
-Library types stay out of `internal/domain`, `internal/port` and `internal/workflow`. The application bridges graph nodes to concrete typed stages, checks each durable commit before returning node success, and reconstructs progress from SQLite projections and verified Blob occurrences. SQLite remains authoritative. No second graph.json store, automatic library checkpoint persistence, callbacks containing private state, library-managed retries, or user-configurable graph is admitted.
+LangChainGo `v0.1.14` remains pinned for provider adaptation in `internal/agent`. The minimum Go version is 1.25.0. Library types stay out of `internal/domain`, `internal/port` and `internal/workflow`. SQLite remains authoritative: progress is reconstructed from projections and verified Blob occurrences. No second graph.json store, automatic library checkpoint persistence, callbacks containing private state, library-managed retries, or user-configurable graph is admitted.
 
-Transport retries use the existing CallCoordinator with one physical dispatch per authorization. JSON-format repair is a separate bounded operation (at most one when enabled), as are business repair and Idea mutation. Library completion never grants READY: all eight original stages and the same-run package transaction remain required. The CLI retains the Slice 1 Fake constructor until durable provider and graph integration passes its acceptance gates; adding dependencies or adapter contract tests does not change that status.
+Transport retries use the existing CallCoordinator with one physical dispatch per authorization. JSON-format repair is a separate bounded operation (at most one when enabled); automatic business repair and Idea mutation remain deferred. Scheduler completion never grants READY: all eight business stages and the same-run package transaction remain required. Explicit configuration selects the completed ordinary-problem MVP; historical Fake and preview revisions retain their existing boundaries.
 
 ## Retains
 

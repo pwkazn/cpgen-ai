@@ -307,7 +307,7 @@ func TestSlice2RunServiceOwnerObservesExternalCancelDuringProviderRequest(t *tes
 	started := make(chan struct{})
 	release := make(chan struct{})
 	defer close(release)
-	generation := newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.Slice2CheckpointWorkflowRevision, 3, func(w http.ResponseWriter, r *http.Request) {
+	generation := newGenerationExecutorFixtureWithWorkflow(t, 4, false, workflow.LegacySimilarityCheckpointRevision, 3, func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		select {
 		case <-r.Context().Done():

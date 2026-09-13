@@ -25,7 +25,7 @@ func TestRunServiceRejectsIncompleteConfiguration(t *testing.T) {
 func TestRunServiceInterfaceHasFixedLifecycle(t *testing.T) {
 	var _ application.RunService = (*application.LocalRunService)(nil)
 	_ = context.Background()
-	_ = workflow.Slice1WorkflowRevision
+	_ = workflow.FakeRevision
 }
 
 func TestRunServiceGenerateStopsAtSlice1Review(t *testing.T) {
@@ -45,8 +45,8 @@ func TestRunServiceGenerateStopsAtSlice1Review(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	pipeline, err := workflow.NewSlice1Pipeline(
-		fake.NewPrepareStep(workflow.PrepareCapabilities{}), fake.NewExerciseStep(workflow.ExerciseCapabilities{}), fake.NewCheckpointStep(workflow.CheckpointCapabilities{}),
+	pipeline, err := fake.NewPipeline(
+		fake.NewPrepareStep(fake.PrepareCapabilities{}), fake.NewExerciseStep(fake.ExerciseCapabilities{}), fake.NewCheckpointStep(fake.CheckpointCapabilities{}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestRunServiceResumeBlockedCreatesFreshAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	pipeline, err := workflow.NewSlice1Pipeline(fake.NewPrepareStep(workflow.PrepareCapabilities{}), fake.NewExerciseStep(workflow.ExerciseCapabilities{}), fake.NewCheckpointStep(workflow.CheckpointCapabilities{}))
+	pipeline, err := fake.NewPipeline(fake.NewPrepareStep(fake.PrepareCapabilities{}), fake.NewExerciseStep(fake.ExerciseCapabilities{}), fake.NewCheckpointStep(fake.CheckpointCapabilities{}))
 	if err != nil {
 		t.Fatal(err)
 	}

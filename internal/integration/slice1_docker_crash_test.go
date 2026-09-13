@@ -360,7 +360,7 @@ func prepareDurableDockerProbe(t *testing.T, cfg config.Config, runID domain.Run
 		_ = app.Close()
 		return "", nil, nil, func() {}, err
 	}
-	create := domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: submitted, SubmittedRequestDigest: domain.SumBytes(submitted), EffectiveSeed: int64(len(request.Brief)), RedactedEffectiveConfigJSON: effective, RedactedEffectiveConfigDigest: domain.SumBytes(effective), WorkflowRevision: workflow.Slice1WorkflowRevision, SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: domain.SumBytes([]byte(workflow.Slice1WorkflowRevision)), BudgetLimits: request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: now, IdempotencyKey: "control_00000000000000000000000000000081"}
+	create := domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: submitted, SubmittedRequestDigest: domain.SumBytes(submitted), EffectiveSeed: int64(len(request.Brief)), RedactedEffectiveConfigJSON: effective, RedactedEffectiveConfigDigest: domain.SumBytes(effective), WorkflowRevision: workflow.FakeRevision, SchemaVersion: domain.SchemaVersion(request.SchemaVersion), WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)), BudgetLimits: request.BudgetLimits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: now, IdempotencyKey: "control_00000000000000000000000000000081"}
 	created, err := app.Runtime.CreateRun(context.Background(), create)
 	if err != nil {
 		_ = app.Close()

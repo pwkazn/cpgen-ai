@@ -15,21 +15,26 @@ import (
 func (s *StructuredLLMCalls) ReadCommitted(ctx context.Context, open domain.OpenCallRequest, request port.GenerateRequest) (domain.CallRecordID, *port.GenerateResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	reader, err := s.committedReader()
+	if err != nil {
+		return "", nil, err
+	}
+	return reader.ReadCommitted(ctx, open, request)
+}
+
+func (s *CommittedLLMReader) ReadCommitted(ctx context.Context, open domain.OpenCallRequest, request port.GenerateRequest) (domain.CallRecordID, *port.GenerateResponse, error) {
 	if ctx == nil {
 		return "", nil, errors.New("committed response requires a context")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
-	ledger, ok := s.calls.ledger.(LLMCacheLedger)
-	if !ok {
-		return "", nil, errors.New("committed response requires occurrence provenance reads")
-	}
+	ledger := s.ledger
 	open, request, err := s.bind(open, request)
 	if err != nil {
 		return "", nil, err
 	}
-	prepared, err := s.calls.ledger.LoadCall(ctx, open.ID)
+	prepared, err := s.ledger.LoadCall(ctx, open.ID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -39,18 +44,18 @@ func (s *StructuredLLMCalls) ReadCommitted(ctx context.Context, open domain.Open
 		}
 		// Prevent the general replay path from finalizing an uncommitted local
 		// receipt: this API observes only already terminal producing calls.
-		session, err := s.calls.artifacts.session(open, request)
+		session, err := llmResponseBinding(open, request)
 		if err != nil {
 			return "", nil, err
 		}
-		local, err := s.calls.ledger.LoadCall(ctx, session.callID)
+		local, err := s.ledger.LoadCall(ctx, session.callID)
 		if err != nil {
 			return "", nil, err
 		}
 		if local.Call.State != domain.CallRecordTerminal || local.Call.Failure != nil {
 			return "", nil, errors.New("original validation receipt is not committed")
 		}
-		diagnostic, err := s.calls.ReadFormatRepair(ctx, open, request)
+		diagnostic, err := s.readFormatRepair(ctx, open, request)
 		if err != nil {
 			return "", nil, err
 		}

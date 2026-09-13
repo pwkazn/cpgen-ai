@@ -13,7 +13,6 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
-	"cpgen/internal/workflow"
 )
 
 type GenerationExecutionStore interface {
@@ -39,8 +38,15 @@ type GenerationExecutorConfig struct {
 // owns the foreground run/artifact locks, active-time interval and atomic
 // stage commit. Construction and Reader never dispatch a provider request.
 type GenerationExecutor struct {
-	config GenerationExecutorConfig
+	*DraftExecution
 	reader *GenerationReader
+}
+
+// DraftExecution owns controlled model calls shared by the four draft stages.
+// It has no ownership of an upstream business stage.
+type DraftExecution struct {
+	config GenerationExecutorConfig
+	*StageAdmission
 }
 
 // GenerationStageResult keeps application-owned receipts beside the typed
@@ -81,7 +87,7 @@ func NewGenerationExecutor(config GenerationExecutorConfig) (*GenerationExecutor
 	if config.RetryPolicy.MaxAttempts > 8 {
 		return nil, errors.New("generation transport retry bound exceeds eight attempts")
 	}
-	service := &GenerationExecutor{config: config}
+	service := &GenerationExecutor{DraftExecution: &DraftExecution{config: config, StageAdmission: &StageAdmission{store: config.Store, policy: config.Content.ProviderPolicyDigest}}}
 	idea, err := service.calls(config.Store, "idea")
 	if err != nil {
 		return nil, err
@@ -99,7 +105,7 @@ func NewGenerationExecutor(config GenerationExecutorConfig) (*GenerationExecutor
 
 func (s *GenerationExecutor) Reader() *GenerationReader { return s.reader }
 
-func (s *GenerationExecutor) calls(ledger LLMArtifactLedger, stage domain.StageName) (*StructuredLLMCalls, error) {
+func (s *DraftExecution) calls(ledger LLMArtifactLedger, stage domain.StageName) (*StructuredLLMCalls, error) {
 	calls, err := NewReplayableLLMCalls(ledger, s.config.LLM, s.config.Blobs, s.config.Clock, s.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return nil, err
@@ -233,42 +239,6 @@ func (s *GenerationExecutor) RunStatement(ctx context.Context, view domain.RunVi
 	return result, nil
 }
 
-func (s *GenerationExecutor) admit(ctx context.Context, view domain.RunView, stage domain.StageName, input domain.Digest) (domain.StageAttempt, error) {
-	var empty domain.StageAttempt
-	if ctx == nil {
-		return empty, errors.New("generation execution requires a context")
-	}
-	if err := ctx.Err(); err != nil {
-		return empty, err
-	}
-	compatible := view.WorkflowRevision() == workflow.Slice2WorkflowRevision || view.WorkflowRevision() == workflow.Slice2CheckpointWorkflowRevision || workflow.HasSolutionStages(view.WorkflowRevision())
-	if !compatible || view.SchemaVersion() != domain.RequestSchemaV1 || view.State() != domain.RunRunning || view.CurrentStage() != stage || view.AttemptID().Validate() != nil {
-		return empty, errors.New("generation requires the exact current supported stage view")
-	}
-	current, err := s.config.Store.GetRun(ctx, view.RunID())
-	if err != nil {
-		return empty, err
-	}
-	if current.State != domain.RunRunning || current.CurrentStage != stage || current.WorkflowRevision != view.WorkflowRevision() || current.SchemaVersion != view.SchemaVersion() || current.RequestDigest != view.RequestDigest() || current.ConfigDigest != view.ConfigDigest() || current.WorkflowDigest != view.WorkflowDigest() || current.WorkflowDigest != domain.SumBytes([]byte(view.WorkflowRevision())) || current.Version < view.Version() || current.ActiveStartedAt == nil || current.ConfigDigest != s.config.Content.ProviderPolicyDigest {
-		return empty, errors.New("generation view or frozen provider configuration differs from the active run")
-	}
-	snapshot, err := s.config.Store.ReadGenerationSnapshot(ctx, view.RunID())
-	if err != nil {
-		return empty, err
-	}
-	if snapshot.Request.BudgetLimits != view.Budget().Limits {
-		return empty, errors.New("generation view budget differs from the admitted request")
-	}
-	attempt, err := s.config.Store.CurrentStageAttempt(ctx, view.RunID(), stage)
-	if err != nil {
-		return empty, err
-	}
-	if attempt.AttemptID != view.AttemptID() || attempt.State != domain.StageAttemptRunning || attempt.InputDigest != input {
-		return empty, errors.New("generation input or attempt differs from the current stage")
-	}
-	return attempt, nil
-}
-
 type generatedDraft struct {
 	outcome     domain.MeteredOutcome[port.GenerateResponse]
 	occurrences []domain.PendingOccurrence
@@ -281,7 +251,7 @@ func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
 	return GenerationStageResult[T]{CallTraces: draft.traces, Usage: draft.usage}
 }
 
-func (s *GenerationExecutor) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
+func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
 	var result generatedDraft
 	ledger, err := NewRunBoundLLMLedger(s.config.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {

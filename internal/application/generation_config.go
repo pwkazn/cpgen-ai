@@ -28,11 +28,11 @@ func BuildSimilarityConfig(cfg config.Config) (similarity.Config, similarity.Dec
 	return mapped, policy, err
 }
 
-// BuildSlice2ExecutionSettings freezes application-owned content and transport
+// BuildGenerationExecutionSettings freezes application-owned content and transport
 // rules. Adapter retries remain disabled; each of the two possible exchanges
 // needs its own durable reservation/grant. Changing this compiled policy needs
 // a compatible new workflow revision before it may reinterpret persisted runs.
-func BuildSlice2ExecutionSettings(cfg config.Config) (GenerationReaderOptions, domain.RetryPolicy, error) {
+func BuildGenerationExecutionSettings(cfg config.Config) (GenerationReaderOptions, domain.RetryPolicy, error) {
 	var content GenerationReaderOptions
 	var retry domain.RetryPolicy
 	if cfg.Workflow == nil {

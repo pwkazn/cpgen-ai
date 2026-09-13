@@ -25,7 +25,7 @@ type SolutionSandbox interface {
 
 type SolutionVerifierConfig struct {
 	Sandbox   SolutionSandbox
-	Publisher *SandboxArtifactSink
+	Publisher StageArtifactPublisher
 	Blobs     port.VerifiedBlobReader
 	Lock      toolchain.Lock
 }

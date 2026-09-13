@@ -37,7 +37,7 @@ var _ PhysicalProvider = (*HTTPAdapter)(nil)
 // It performs no credential lookup, network access, reservation or dispatch.
 func (a *HTTPAdapter) PlanSearch(request Request) (PhysicalSearchPlan, error) {
 	var result PhysicalSearchPlan
-	if a == nil || a.client == nil || a.endpoint == nil || a.config.MaxResponseBytes <= 0 || a.config.MaxResponseBytes > 64<<20 {
+	if a == nil || a.endpoint == nil || a.config.MaxResponseBytes <= 0 || a.config.MaxResponseBytes > 64<<20 {
 		return result, &Error{Code: ErrorConfiguration}
 	}
 	if request.Limit > a.config.MaxHits {

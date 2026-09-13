@@ -12,7 +12,7 @@ import (
 
 type JudgeVerifierConfig struct {
 	Sandbox             SolutionSandbox
-	Publisher           *SandboxArtifactSink
+	Publisher           StageArtifactPublisher
 	Blobs               port.VerifiedBlobReader
 	ToolchainLockDigest domain.Digest
 }

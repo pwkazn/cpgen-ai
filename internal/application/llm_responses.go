@@ -50,10 +50,18 @@ type llmResponseSession struct {
 }
 
 func (s *llmResponseArtifacts) session(open domain.OpenCallRequest, request port.GenerateRequest) (*llmResponseSession, error) {
+	binding, err := llmResponseBinding(open, request)
+	if err != nil {
+		return nil, err
+	}
+	return &llmResponseSession{privateResponseSession: &privateResponseSession{privateResponseBinding: binding, ledger: s.ledger, blobs: s.blobs, clock: s.clock}, request: request}, nil
+}
+
+func llmResponseBinding(open domain.OpenCallRequest, request port.GenerateRequest) (privateResponseBinding, error) {
 	// JSON escaping can expand structured output by up to six times. Reserve
 	// bounded metadata space separately and reject overflow before any effect.
 	if request.MaxOutput.Bytes <= 0 || request.MaxOutput.Bytes > 64<<20 {
-		return nil, errors.New("private LLM response output limit must be within 64 MiB")
+		return privateResponseBinding{}, errors.New("private LLM response output limit must be within 64 MiB")
 	}
 	raw, err := json.Marshal(struct {
 		Schema  domain.SchemaVersion `json:"schema"`
@@ -61,10 +69,9 @@ func (s *llmResponseArtifacts) session(open domain.OpenCallRequest, request port
 		Request port.GenerateRequest `json:"request"`
 	}{llmResponseSchema, open.ID, request})
 	if err != nil {
-		return nil, err
+		return privateResponseBinding{}, err
 	}
-	core := &privateResponseSession{ledger: s.ledger, blobs: s.blobs, clock: s.clock, open: open, binding: domain.SumBytes(raw), maxBytes: request.MaxOutput.Bytes*6 + 16384, callID: domain.CallRecordID(coordinatorMutationID("callrec", "llm-response", open.ID)), prefix: "llm-response", mediaType: llmResponseMediaType, pathPrefix: "private/llm/", schema: llmResponseSchema}
-	return &llmResponseSession{privateResponseSession: core, request: request}, nil
+	return privateResponseBinding{open: open, binding: domain.SumBytes(raw), maxBytes: request.MaxOutput.Bytes*6 + 16384, callID: domain.CallRecordID(coordinatorMutationID("callrec", "llm-response", open.ID)), prefix: "llm-response", mediaType: llmResponseMediaType, pathPrefix: "private/llm/", schema: llmResponseSchema}, nil
 }
 
 type llmResponseReceipt struct {
@@ -144,6 +151,18 @@ func (s *llmResponseSession) replayReceipt(ctx context.Context, grant domain.Dis
 	if err != nil || !found {
 		return empty, nil, found, err
 	}
+	execution, repair, found, err := decodeLLMReceipt(raw, pending, grant, s.request, s.privateResponseBinding, provider)
+	if err != nil || !found {
+		return empty, nil, found, err
+	}
+	if err := s.markPublished(ctx, grant.Ordinal); err != nil {
+		return empty, nil, false, fmt.Errorf("%w: %w", errCallReceiptPending, err)
+	}
+	return execution, repair, true, nil
+}
+
+func decodeLLMReceipt(raw []byte, pending domain.PendingArtifact, grant domain.DispatchGrant, request port.GenerateRequest, binding privateResponseBinding, provider LLMReadPolicy) (domain.PhysicalExecution[port.GenerateResponse], *port.RepairInput, bool, error) {
+	var empty domain.PhysicalExecution[port.GenerateResponse]
 	var header struct {
 		SchemaVersion domain.SchemaVersion `json:"schema_version"`
 	}
@@ -151,29 +170,26 @@ func (s *llmResponseSession) replayReceipt(ctx context.Context, grant domain.Dis
 		return empty, nil, false, errors.New("private receipt schema is invalid")
 	}
 	var receipt llmResponseReceipt
-	if err := port.DecodeStructuredOutput(raw, header.SchemaVersion, s.maxBytes, &receipt); err != nil {
+	if err := port.DecodeStructuredOutput(raw, header.SchemaVersion, binding.maxBytes, &receipt); err != nil {
 		return empty, nil, false, err
 	}
 	execution := receipt.Execution
-	if receipt.RequestBinding != s.binding || receipt.CallRecordID != grant.CallRecordID || receipt.AttemptCallID != grant.AttemptCallID || execution.Validate() != nil || execution.Boundary != domain.BoundaryCompleted {
+	if receipt.RequestBinding != binding.binding || receipt.CallRecordID != grant.CallRecordID || receipt.AttemptCallID != grant.AttemptCallID || execution.Validate() != nil || execution.Boundary != domain.BoundaryCompleted {
 		return empty, nil, false, errors.New("private response receipt binding is invalid")
 	}
 	if receipt.SchemaVersion == llmResponseSchema {
 		if execution.Value == nil || execution.Value.RawBlob != nil || receipt.FormatRepair != nil {
 			return empty, nil, false, errors.New("invalid successful private receipt")
 		}
-		if err := provider.ValidatePhysicalResponse(s.request, *execution.Value); err != nil {
+		if err := provider.ValidatePhysicalResponse(request, *execution.Value); err != nil {
 			return empty, nil, false, err
 		}
 		execution.Value.RawBlob = &pending
 	} else {
-		if execution.Failure == nil || execution.Failure.Code != domain.FailureProtocol || execution.Failure.Class != domain.FailureRejected || len(execution.Failure.Evidence) != 0 || !validPrivateFormatRepair(receipt.FormatRepair, s.request.Schema.SchemaVersion) {
+		if execution.Failure == nil || execution.Failure.Code != domain.FailureProtocol || execution.Failure.Class != domain.FailureRejected || len(execution.Failure.Evidence) != 0 || !validPrivateFormatRepair(receipt.FormatRepair, request.Schema.SchemaVersion) {
 			return empty, nil, false, errors.New("invalid private validation receipt")
 		}
 		execution.Failure.Evidence = []domain.PendingArtifact{pending}
-	}
-	if err := s.markPublished(ctx, grant.Ordinal); err != nil {
-		return empty, nil, false, fmt.Errorf("%w: %w", errCallReceiptPending, err)
 	}
 	return execution, receipt.FormatRepair, true, nil
 }

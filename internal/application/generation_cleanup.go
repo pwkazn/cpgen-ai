@@ -8,10 +8,9 @@ import (
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
-	"cpgen/internal/workflow"
 )
 
-func (s *GenerationExecutor) draftCall(runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte) (domain.OpenCallRequest, port.GenerateRequest, error) {
+func (s *DraftExecution) draftCall(runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte) (domain.OpenCallRequest, port.GenerateRequest, error) {
 	prompt, schema, err := BuildLLMDraftPrompt(string(attempt.StageName))
 	if err != nil {
 		return domain.OpenCallRequest{}, port.GenerateRequest{}, err
@@ -29,42 +28,6 @@ func (s *GenerationExecutor) draftCall(runID domain.RunID, version int64, attemp
 // reconciliationAttempt deliberately does not require an active interval:
 // settlement is required after cancellation or budget accounting has stopped.
 // New generation remains guarded by admit and the durable dispatch ledger.
-func (s *GenerationExecutor) reconciliationAttempt(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, *domain.StageAttempt, error) {
-	var empty domain.RunSnapshot
-	if ctx == nil {
-		return empty, nil, errors.New("stage reconciliation requires a context")
-	}
-	if err := ctx.Err(); err != nil {
-		return empty, nil, err
-	}
-	current, err := s.config.Store.GetRun(ctx, runID)
-	if err != nil {
-		return empty, nil, err
-	}
-	if current.WorkflowRevision != workflow.Slice2WorkflowRevision && current.WorkflowRevision != workflow.Slice2CheckpointWorkflowRevision && !workflow.HasSolutionStages(current.WorkflowRevision) {
-		return current, nil, errors.New("cleanup workflow revision differs")
-	}
-	if current.WorkflowDigest != domain.SumBytes([]byte(current.WorkflowRevision)) || current.SchemaVersion != domain.RequestSchemaV1 || current.ConfigDigest != s.config.Content.ProviderPolicyDigest {
-		return current, nil, errors.New("cleanup frozen configuration or schema differs")
-	}
-	if current.State != domain.RunRunning {
-		return current, nil, nil
-	}
-	attempt, err := s.config.Store.CurrentStageAttempt(ctx, runID, current.CurrentStage)
-	if errors.Is(err, sqlite.ErrNotFound) {
-		return current, nil, nil
-	}
-	if err != nil {
-		return current, nil, err
-	}
-	if attempt.State != domain.StageAttemptRunning {
-		return current, nil, nil
-	}
-	if attempt.RunID != runID || attempt.StageName != current.CurrentStage {
-		return current, nil, errors.New("cleanup attempt scope differs")
-	}
-	return current, &attempt, nil
-}
 
 // ReconcileStage reconstructs the exact current original request and restores
 // only already-opened original/repair operations. It never checks the cache for
@@ -117,7 +80,7 @@ func (s *GenerationExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 	return s.reconcileDraftRequest(ctx, current, *attempt, variables)
 }
 
-func (s *GenerationExecutor) reconcileDraftRequest(ctx context.Context, current domain.RunSnapshot, attempt domain.StageAttempt, variables []byte) error {
+func (s *DraftExecution) reconcileDraftRequest(ctx context.Context, current domain.RunSnapshot, attempt domain.StageAttempt, variables []byte) error {
 	runID := current.RunID
 	open, request, err := s.draftCall(runID, current.Version, attempt, variables)
 	if err != nil {

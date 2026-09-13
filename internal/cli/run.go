@@ -34,10 +34,11 @@ type versionOutput struct {
 }
 
 type Dependencies struct {
-	GOOS        string
-	CheckDocker func(context.Context, dockersandbox.Config) (dockersandbox.StaticReport, error)
-	RunWatchdog func(context.Context, string) error
-	Bootstrap   func(context.Context, config.Config) (*application.Application, error)
+	GOOS           string
+	CheckDocker    func(context.Context, dockersandbox.Config) (dockersandbox.StaticReport, error)
+	RunWatchdog    func(context.Context, string) error
+	BootstrapLocal func(context.Context, config.Config) (*application.Application, error)
+	Bootstrap      func(context.Context, config.Config) (*application.Application, error)
 }
 
 type doctorOutput struct {
@@ -130,9 +131,21 @@ func runStateful(args []string, configPath string, stdout, stderr io.Writer, dep
 	if args[0] == "config" {
 		return runConfigCommand(args[1:], cfg, stdout, stderr)
 	}
+	if args[0] != "run" && args[0] != "review" && args[0] != "generate" {
+		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown command %q", args[0]))
+	}
+	if code := validateCommandShape(args, stdout, stderr); code != 0 {
+		return code
+	}
 	bootstrap := dependencies.Bootstrap
 	if bootstrap == nil {
 		bootstrap = application.Bootstrap
+	}
+	if localReadCommand(args) {
+		bootstrap = dependencies.BootstrapLocal
+		if bootstrap == nil {
+			bootstrap = application.BootstrapLocal
+		}
 	}
 	app, err := bootstrap(context.Background(), cfg)
 	if err != nil {

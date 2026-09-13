@@ -8,90 +8,25 @@ import (
 
 	"cpgen/internal/domain"
 	"cpgen/internal/workflow"
-
-	"github.com/smallnest/langgraphgo/graph"
 )
 
 // compiledRunGraph schedules one durable stage boundary at a time. The stage
 // callback owns input loading, typed invocation and the checked SQLite commit.
-// This graph never stores stage values or chooses a user-defined sequence.
+// The local loop never stores stage values or chooses a user-defined sequence.
 type compiledRunGraph struct {
-	revision string
-	stages   []domain.StageName
-	runnable *graph.StateRunnable[*runGraphFrame]
+	definition workflow.Definition
+	revision   string
+	stages     []domain.StageName
 }
 
 type runStageBoundary func(context.Context, domain.RunSnapshot) (domain.RunSnapshot, error)
 
-// Each invocation owns its frame. The library returns a zero state on ordinary
-// errors, so the caller retains the last checked projection independently. This
-// is transient progress metadata, not a checkpoint or an alternative state store.
-type runGraphFrame struct {
-	snapshot domain.RunSnapshot
-	advance  runStageBoundary
-}
-
 func newCompiledRunGraph(revision string) (*compiledRunGraph, error) {
-	compiled := &compiledRunGraph{revision: revision}
-	switch revision {
-	case workflow.Slice1WorkflowRevision:
-		compiled.stages = []domain.StageName{"prepare", "exercise", "checkpoint"}
-	case workflow.Slice2WorkflowRevision:
-		compiled.stages = []domain.StageName{"idea", "statement", "similarity"}
-	case workflow.Slice2CheckpointWorkflowRevision:
-		compiled.stages = []domain.StageName{"idea", "statement", "similarity", "slice2_checkpoint"}
-	case workflow.SolutionWorkflowRevision:
-		compiled.stages = []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_checkpoint"}
-	case workflow.MVPWorkflowRevision:
-		compiled.stages = []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}
-	default:
-		return nil, errors.New("workflow revision has no compatible compiled graph")
-	}
-	g := graph.NewStateGraph[*runGraphFrame]()
-	// Do not install retries, schemas/mergers, tracing, callbacks, checkpoints or
-	// library resume configuration. All edges choose exactly one compiled node.
-	g.SetRetryPolicy(nil)
-	g.AddNode("resume", "select the authoritative current stage", func(ctx context.Context, frame *runGraphFrame) (*runGraphFrame, error) {
-		return frame, ctx.Err()
-	})
-	g.SetEntryPoint("resume")
-	g.AddConditionalEdge("resume", func(_ context.Context, frame *runGraphFrame) string { return string(frame.snapshot.CurrentStage) })
-	for _, stage := range compiled.stages {
-		g.AddNode(string(stage), "execute and commit one typed stage", func(ctx context.Context, frame *runGraphFrame) (*runGraphFrame, error) {
-			if err := ctx.Err(); err != nil {
-				return frame, err
-			}
-			before := cloneGraphSnapshot(frame.snapshot)
-			if before.CurrentStage != stage {
-				return frame, errors.New("graph node differs from current committed stage")
-			}
-			after, err := frame.advance(ctx, cloneGraphSnapshot(before))
-			if err != nil {
-				// BeginStage or accounting may have committed before the failure.
-				// Preserve that projection, but never a foreign or regressed one.
-				if compiled.validateIdentity(before, after) == nil && after.CurrentStage == before.CurrentStage {
-					frame.snapshot = cloneGraphSnapshot(after)
-				}
-				return frame, err
-			}
-			if err := compiled.validateTransition(before, after); err != nil {
-				return frame, err
-			}
-			frame.snapshot = cloneGraphSnapshot(after)
-			return frame, nil
-		})
-		g.AddConditionalEdge(string(stage), func(_ context.Context, frame *runGraphFrame) string {
-			if frame.snapshot.State != domain.RunRunning {
-				return graph.END
-			}
-			return string(frame.snapshot.CurrentStage)
-		})
-	}
-	var err error
-	compiled.runnable, err = g.Compile()
+	definition, err := workflow.DefinitionFor(revision)
 	if err != nil {
-		return nil, fmt.Errorf("compile fixed workflow: %w", err)
+		return nil, err
 	}
+	compiled := &compiledRunGraph{definition: definition, revision: revision, stages: definition.Stages()}
 	return compiled, nil
 }
 
@@ -110,13 +45,33 @@ func (g *compiledRunGraph) run(ctx context.Context, snapshot domain.RunSnapshot,
 	default:
 		return snapshot, nil
 	}
-	frame := &runGraphFrame{snapshot: cloneGraphSnapshot(snapshot), advance: advance}
-	_, err := g.runnable.Invoke(ctx, frame)
-	return cloneGraphSnapshot(frame.snapshot), err
+	current := cloneGraphSnapshot(snapshot)
+	for {
+		if err := ctx.Err(); err != nil {
+			return current, err
+		}
+		before := cloneGraphSnapshot(current)
+		after, err := advance(ctx, cloneGraphSnapshot(before))
+		if err != nil {
+			// BeginStage or accounting may have committed before the failure.
+			// Keep that projection only if it belongs to the same current stage.
+			if g.validateIdentity(before, after) == nil && after.CurrentStage == before.CurrentStage {
+				current = cloneGraphSnapshot(after)
+			}
+			return current, err
+		}
+		if err := g.validateTransition(before, after); err != nil {
+			return current, err
+		}
+		current = cloneGraphSnapshot(after)
+		if current.State != domain.RunRunning {
+			return current, nil
+		}
+	}
 }
 
 func (g *compiledRunGraph) validateSnapshot(snapshot domain.RunSnapshot) error {
-	if g == nil || g.runnable == nil {
+	if g == nil || len(g.stages) == 0 {
 		return errors.New("compiled workflow graph is required")
 	}
 	if err := snapshot.Validate(); err != nil {
@@ -132,7 +87,7 @@ func (g *compiledRunGraph) validateSnapshot(snapshot domain.RunSnapshot) error {
 	if ordinal < 0 || snapshot.CurrentStageOrdinal != ordinal+1 {
 		return errors.New("run stage or ordinal is incompatible with compiled graph")
 	}
-	if snapshot.State == domain.RunReady && (g.revision != workflow.MVPWorkflowRevision || snapshot.CurrentStage != "package" || snapshot.CurrentStageOrdinal != len(g.stages)) {
+	if snapshot.State == domain.RunReady && (!g.definition.ProducesPackage() || snapshot.CurrentStage != "package" || snapshot.CurrentStageOrdinal != len(g.stages)) {
 		return errors.New("unfinished compiled slice cannot produce READY")
 	}
 	return nil
