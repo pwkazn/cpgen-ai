@@ -16,6 +16,11 @@ type SandboxConfig struct {
 	EngineEndpoint      string        `json:"engine_endpoint" yaml:"engine_endpoint"`
 	ToolchainLockPath   string        `json:"toolchain_lock_path" yaml:"toolchain_lock_path"`
 	ToolchainLockDigest domain.Digest `json:"toolchain_lock_digest" yaml:"toolchain_lock_digest"`
+	// ToolchainLockSnapshot is an internal field emitted only in persisted
+	// effective configuration. User YAML cannot set it; DecodeEffective restores
+	// it after decoding the public configuration shape. Nil means an unbound
+	// live config; a nonnil empty value marks a legacy persisted config.
+	ToolchainLockSnapshot []byte `json:"toolchain_lock_snapshot,omitempty" yaml:"-"`
 }
 
 func (c SandboxConfig) Validate() error {
@@ -41,5 +46,8 @@ func effectiveSandbox(c *SandboxConfig) *SandboxConfig {
 		return nil
 	}
 	copy := *c
+	if c.ToolchainLockSnapshot != nil {
+		copy.ToolchainLockSnapshot = append([]byte{}, c.ToolchainLockSnapshot...)
+	}
 	return &copy
 }

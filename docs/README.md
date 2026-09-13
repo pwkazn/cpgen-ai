@@ -2,7 +2,7 @@
 
 The [2026-09-13 architecture simplification plan](superpowers/plans/2026-09-13-architecture-simplification.md) tracks separation of read/export and execution services, explicit stage dependencies, local fixed scheduling, and consolidated historical compatibility. Its implementation and verification records distinguish completed changes from outstanding environment checks. The local scheduler replaces the earlier LangGraphGo wrapper while retaining the persisted revision and transition contracts.
 
-The [2026-09-14 architecture follow-up](design/architecture-follow-up-2026-09-14.md) preserves the first proposal, whose implementation was rejected for adding too many abstractions. The [rework record](evidence/architecture-follow-up-2026-09-14.md) covers the simplified coordinator, direct readers, removed configuration layers and current verification. Toolchain snapshots and a separate publication ledger remain independent design decisions.
+The [2026-09-14 architecture follow-up](design/architecture-follow-up-2026-09-14.md) preserves the first proposal, whose implementation was rejected for adding too many abstractions. The [rework record](evidence/architecture-follow-up-2026-09-14.md) covers the simplified coordinator, direct readers, removed configuration layers and current verification. The toolchain snapshot follow-up uses the existing effective configuration; a separate publication ledger remains an independent design decision.
 
 ## Document hierarchy
 
@@ -20,6 +20,8 @@ When documents conflict, the newest accepted ADR and its named authoritative des
 The user revised the MVP priority on 2026-09-09: [complete a usable generation loop first](superpowers/plans/2026-09-09-mvp-generation-loop.md). Similarity ACCEPT continues to Solution/Data/Docker/Judge/Quality/Package; non-accepted business results enter human review. Mutation is deferred for redesign. This scope amendment takes precedence over mutation-first ordering in older plans and component designs.
 
 The [Solution slice](evidence/mvp-solution-foundation.md), [Data execution](evidence/mvp-data-foundation.md), [Judge answers and differential checks](evidence/mvp-judge-foundation.md), and [Quality with package format v2](evidence/mvp-quality-package-foundation.md) now feed [package assembly, atomic READY and CLI export](evidence/mvp-package-commit-foundation.md). The full MVP configuration passes real Docker and independent CLI acceptance for an ordinary C++ problem, including a process exit inside the package transaction and fresh execution from the exported ZIP. A subsequent [APINode live-provider test](evidence/apinode-live-mvp-2026-09-10.md) passes real model generation through Docker, export and independent revalidation. Similarity remains a local fixture; actual originality has not been checked.
+
+New Solution/MVP runs persist the validated canonical toolchain lock with their effective configuration, so CLI resume and offline export can use that bound snapshot after the configured lock path is removed. Historical runs without a snapshot continue to validate and read the original lock path; a missing legacy lock remains a closed failure.
 
 The historical 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the former in-process library amendment and provider boundary tests. Later checkpoints below record preview CLI and durable graph integration; the 2026-09-13 ADR-0006 amendment supersedes the graph-library implementation choice.
 

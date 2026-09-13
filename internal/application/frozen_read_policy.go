@@ -3,14 +3,12 @@ package application
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
-	"cpgen/internal/toolchain"
 	"cpgen/internal/workflow"
 )
 
@@ -24,8 +22,8 @@ type FrozenReadPolicyStore interface {
 // NewFrozenReadPolicy restores only the policy inputs needed to rebuild proof.
 // The caller holds the run and artifact read locks. The returned sandbox value
 // is verification policy, not an executable session: no Engine or Watchdog is
-// constructed. Old runs retain only a toolchain path/digest, so a missing lock
-// must fail closed until a separate snapshot protocol exists.
+// constructed. New runs retain a validated lock snapshot; old runs retain only
+// a toolchain path/digest and therefore fail closed when that lock is missing.
 func NewFrozenReadPolicy(ctx context.Context, store FrozenReadPolicyStore, runID domain.RunID) (config.Config, SandboxReadPolicy, error) {
 	var empty config.Config
 	var sandbox SandboxReadPolicy
@@ -53,20 +51,9 @@ func NewFrozenReadPolicy(ctx context.Context, store FrozenReadPolicyStore, runID
 	if cfg.Workflow == nil || cfg.Workflow.Revision != run.WorkflowRevision || run.WorkflowRevision != workflow.GenerationRevision || run.WorkflowDigest != domain.SumBytes([]byte(run.WorkflowRevision)) || cfg.Sandbox == nil {
 		return empty, sandbox, errors.New("package read policy requires the original MVP configuration")
 	}
-	file, err := os.Open(cfg.Sandbox.ToolchainLockPath)
+	lock, err := LoadConfiguredToolchainLock(cfg)
 	if err != nil {
 		return empty, sandbox, err
-	}
-	lock, loadErr := toolchain.LoadLock(file)
-	if err := errors.Join(loadErr, file.Close()); err != nil {
-		return empty, sandbox, err
-	}
-	digest, err := lock.Digest()
-	if err != nil {
-		return empty, sandbox, err
-	}
-	if digest != cfg.Sandbox.ToolchainLockDigest {
-		return empty, sandbox, errors.New("frozen toolchain lock digest differs")
 	}
 	stage, err := store.ReadCommittedSandboxStage(ctx, runID, "solution_verify")
 	if err != nil {

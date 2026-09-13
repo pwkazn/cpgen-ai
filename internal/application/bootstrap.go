@@ -15,6 +15,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
+	"cpgen/internal/workflow"
 )
 
 // Application is the local foreground workflow composition. There is no
@@ -53,6 +54,11 @@ func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Applica
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	if execution && cfg.Workflow != nil && workflow.HasSolutionStages(cfg.Workflow.Revision) {
+		if err := bindToolchainLockSnapshot(&cfg); err != nil {
+			return nil, err
+		}
 	}
 	effective, err := cfg.EffectiveConfig()
 	if err != nil {
