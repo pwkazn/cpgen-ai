@@ -9,7 +9,6 @@ import (
 
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/config"
-	"cpgen/internal/toolchain"
 )
 
 // Bootstrap pins the local Engine and image lock before any live generation.
@@ -19,20 +18,9 @@ func bootstrapSolutionSandbox(ctx context.Context, cfg config.Config) (DockerSan
 	if cfg.Sandbox == nil {
 		return empty, nil, errors.New("Solution workflow requires sandbox configuration")
 	}
-	file, err := os.Open(cfg.Sandbox.ToolchainLockPath)
+	lock, err := LoadConfiguredToolchainLock(cfg)
 	if err != nil {
 		return empty, nil, err
-	}
-	lock, loadErr := toolchain.LoadLock(file)
-	if err := errors.Join(loadErr, file.Close()); err != nil {
-		return empty, nil, err
-	}
-	digest, err := lock.Digest()
-	if err != nil {
-		return empty, nil, err
-	}
-	if digest != cfg.Sandbox.ToolchainLockDigest {
-		return empty, nil, errors.New("sandbox toolchain lock differs from its configured digest")
 	}
 	engineConfig := docker.Config{EngineEndpoint: cfg.Sandbox.EngineEndpoint, APIVersion: docker.RequiredAPIVersion, BuilderImage: string(lock.Builder.ImageID), RuntimeImage: string(lock.Runtime.ImageID), TransferImage: string(lock.Transfer.ImageID), ExecutionProtocol: docker.ExecutionProtocolDockerDirectV2}
 	static, err := docker.CheckStatic(ctx, engineConfig)

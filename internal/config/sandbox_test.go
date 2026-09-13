@@ -90,3 +90,44 @@ func TestSolutionSandboxIsFrozenAndAbsentFromHistoricalSnapshots(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveToolchainSnapshotRoundTripsButIsNotAcceptedAsYAMLInput(t *testing.T) {
+	raw := solutionConfigYAML(t)
+	cfg, err := config.Decode([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sandbox.ToolchainLockSnapshot = []byte(`{"schema_version":"cpgen.toolchain-lock/v1"}`)
+	effective, err := cfg.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := config.DecodeEffective(effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored.Sandbox.ToolchainLockSnapshot, cfg.Sandbox.ToolchainLockSnapshot) {
+		t.Fatalf("snapshot did not round trip: %q", restored.Sandbox.ToolchainLockSnapshot)
+	}
+	withoutSnapshot := *cfg.Sandbox
+	withoutSnapshot.ToolchainLockSnapshot = nil
+	base := cfg
+	base.Sandbox = &withoutSnapshot
+	if cfg.EffectiveDigest() == base.EffectiveDigest() {
+		t.Fatal("new run snapshot did not change effective configuration digest")
+	}
+	legacyRaw, err := base.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := config.DecodeEffective(legacyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Sandbox.ToolchainLockSnapshot == nil || len(legacy.Sandbox.ToolchainLockSnapshot) != 0 || legacy.EffectiveDigest() != base.EffectiveDigest() {
+		t.Fatal("legacy effective config lost its snapshot-free identity")
+	}
+	if _, err := config.Decode(append([]byte(raw), []byte("\n  toolchain_lock_snapshot: ignored\n")...)); err == nil {
+		t.Fatal("accepted internal snapshot in user YAML")
+	}
+}

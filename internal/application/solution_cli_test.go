@@ -57,9 +57,18 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lockSource := os.Getenv("CPGEN_DOCKER_TOOLCHAIN_LOCK")
+	lockCopy := filepath.Join(root, "bound-toolchain.lock.json")
+	lockRaw, err := os.ReadFile(lockSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockCopy, lockRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	raw = []byte(strings.NewReplacer(
 		"D:/cpgen-private/solution", filepath.ToSlash(filepath.Join(root, "state")),
-		"D:/cpgen-private/toolchains/docker-v1.lock.json", filepath.ToSlash(os.Getenv("CPGEN_DOCKER_TOOLCHAIN_LOCK")),
+		"D:/cpgen-private/toolchains/docker-v1.lock.json", filepath.ToSlash(lockCopy),
 		"sha256:"+strings.Repeat("0", 64), string(lockDigest),
 		"npipe:////./pipe/docker_engine", base.Config.EngineEndpoint,
 		"https://provider.example.com/v1", "https://93.184.216.34/v1",
@@ -69,6 +78,15 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 	cfg, err := config.Decode(raw)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if mvp {
+		snapshot, err := base.Lock.MarshalIndent()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sandbox := *cfg.Sandbox
+		sandbox.ToolchainLockSnapshot = snapshot
+		cfg.Sandbox = &sandbox
 	}
 	base.Limits.CleanupTimeout = cfg.Runtime.CleanupWait
 	configPath := filepath.Join(root, "cpgen.yaml")
@@ -243,6 +261,11 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 	}
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if mvp {
+		if err := os.Remove(lockCopy); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// The child has no keys or injected transport. Its read-only reconstruction
 	// must accept exactly the stored policy and then use real local Docker.

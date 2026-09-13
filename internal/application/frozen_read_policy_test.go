@@ -112,3 +112,70 @@ func TestFrozenReadPolicyRestoresOfflinePolicyAndRejectsBrokenBindings(t *testin
 		t.Fatal("accepted missing frozen lock")
 	}
 }
+
+func TestFrozenReadPolicyUsesBoundToolchainSnapshotAfterOriginalPathChanges(t *testing.T) {
+	root := t.TempDir()
+	lockBytes, err := os.ReadFile("../../config/toolchains/docker-v1.lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := toolchain.LoadLock(bytes.NewReader(lockBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := lock.MarshalIndent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDigest, err := lock.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(root, "lock.json")
+	if err := os.WriteFile(lockPath, lockBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	example, err := os.ReadFile("../../config/mvp.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.NewReplacer("D:/cpgen-private/mvp", filepath.ToSlash(filepath.Join(root, "state")), "D:/cpgen-private/toolchains/docker-v1.lock.json", filepath.ToSlash(lockPath), "sha256:"+strings.Repeat("0", 64), string(lockDigest)).Replace(string(example))
+	cfg, err := config.Decode([]byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sandbox.ToolchainLockSnapshot = canonical
+	raw, err := cfg.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID := domain.RunID("run_00000000000000000000000000000001")
+	attemptID := domain.AttemptID("attempt_00000000000000000000000000000001")
+	executionID := domain.SandboxExecutionID("sandbox_00000000000000000000000000000001")
+	output := domain.SumBytes([]byte("report"))
+	fixture := frozenPolicyFixture{
+		run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw), WorkflowRevision: workflow.GenerationRevision, WorkflowDigest: domain.SumBytes([]byte(workflow.GenerationRevision))}, raw: raw,
+		stage:     port.CommittedPrivateStage{Attempt: domain.StageAttempt{RunID: runID, AttemptID: attemptID, StageName: "solution_verify", Ordinal: 1, State: domain.StageAttemptSucceeded, InputDigest: domain.SumBytes([]byte("draft")), OutputDigest: &output, StartedAt: now, FinishedAt: &now}, Artifacts: []port.CommittedPrivateStageArtifact{{Blob: domain.CacheBlob{LogicalPath: domain.SafeRelPath("sandbox/" + string(executionID) + "/result.json")}}}},
+		execution: domain.SandboxExecution{ID: executionID, RunID: runID, AttemptID: attemptID, StageName: "solution_verify", State: domain.SandboxExecutionCleaned, EngineIdentityDigest: domain.SumBytes([]byte("offline-engine"))},
+	}
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewFrozenReadPolicy(context.Background(), &fixture, runID); err != nil {
+		t.Fatalf("snapshot should survive original lock removal: %v", err)
+	}
+	badConfig, err := config.DecodeEffective(fixture.raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badConfig.Sandbox.ToolchainLockSnapshot = []byte("not a toolchain lock")
+	fixture.raw, err = badConfig.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.run.ConfigDigest = domain.SumBytes(fixture.raw)
+	if _, _, err := NewFrozenReadPolicy(context.Background(), &fixture, runID); err == nil {
+		t.Fatal("accepted corrupted toolchain snapshot")
+	}
+}

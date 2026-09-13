@@ -22,6 +22,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
+	"cpgen/internal/workflow"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -137,6 +138,12 @@ func runStateful(args []string, configPath string, stdout, stderr io.Writer, dep
 	if code := validateCommandShape(args, stdout, stderr); code != 0 {
 		return code
 	}
+	if cfg.Sandbox != nil && cfg.Workflow != nil && workflow.HasSolutionStages(cfg.Workflow.Revision) && shouldRestoreToolchainSnapshot(args) {
+		cfg, err = restoreToolchainSnapshot(context.Background(), cfg, args, dependencies)
+		if err != nil {
+			return writeStateError(stdout, stderr, 9, "bootstrap_failed", err)
+		}
+	}
 	bootstrap := dependencies.Bootstrap
 	if bootstrap == nil {
 		bootstrap = application.Bootstrap
@@ -162,6 +169,83 @@ func runStateful(args []string, configPath string, stdout, stderr io.Writer, dep
 	default:
 		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown command %q", args[0]))
 	}
+}
+
+func shouldRestoreToolchainSnapshot(args []string) bool {
+	if len(args) >= 2 && args[0] == "run" && (args[1] == "resume" || args[1] == "cancel") {
+		return true
+	}
+	return len(args) >= 2 && args[0] == "review" && args[1] != "show" && args[1] != ""
+}
+
+type runDocumentsReader interface {
+	RunViewDocuments(context.Context, domain.RunID) ([]byte, []byte, error)
+}
+
+func restoreToolchainSnapshot(ctx context.Context, cfg config.Config, args []string, dependencies Dependencies) (config.Config, error) {
+	var runID domain.RunID
+	var err error
+	normalized := movePositionalToEnd(args[2:])
+	for index := len(normalized) - 1; index >= 0; index-- {
+		runID, err = parseRunID(normalized[index])
+		if err == nil {
+			break
+		}
+	}
+	if runID == "" {
+		return cfg, errors.New("run ID is required")
+	}
+	bootstrap := dependencies.BootstrapLocal
+	if bootstrap == nil {
+		bootstrap = application.BootstrapLocal
+	}
+	local, err := bootstrap(ctx, cfg)
+	if err != nil {
+		return cfg, err
+	}
+	defer local.Close()
+	documents, ok := local.Runtime.(runDocumentsReader)
+	if !ok {
+		return cfg, errors.New("runtime store cannot read frozen configuration")
+	}
+	run, err := local.Runtime.GetRun(ctx, runID)
+	if err != nil {
+		if errors.Is(err, sqlite.ErrNotFound) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	_, raw, err := documents.RunViewDocuments(ctx, runID)
+	if err != nil {
+		return cfg, err
+	}
+	frozen, err := config.DecodeEffective(raw)
+	if err != nil {
+		return cfg, err
+	}
+	if domain.SumBytes(raw) != run.ConfigDigest {
+		return cfg, errors.New("persisted effective configuration differs from its run binding")
+	}
+	if cfg.Sandbox != nil && frozen.Sandbox != nil && len(frozen.Sandbox.ToolchainLockSnapshot) != 0 {
+		copy := *cfg.Sandbox
+		copy.ToolchainLockSnapshot = append([]byte(nil), frozen.Sandbox.ToolchainLockSnapshot...)
+		cfg.Sandbox = &copy
+	} else if cfg.Sandbox != nil && frozen.Sandbox != nil {
+		// Preserve the distinction between a legacy run and a new run while
+		// keeping the optional field omitted from its effective JSON identity.
+		copy := *cfg.Sandbox
+		copy.ToolchainLockSnapshot = []byte{}
+		cfg.Sandbox = &copy
+	}
+	if cfg.Sandbox != nil && len(cfg.Sandbox.ToolchainLockSnapshot) != 0 {
+		if _, err := application.LoadConfiguredToolchainLock(cfg); err != nil {
+			return cfg, err
+		}
+	}
+	if cfg.EffectiveDigest() != run.ConfigDigest {
+		return cfg, errors.New("current configuration differs from its frozen run binding")
+	}
+	return cfg, nil
 }
 
 func runConfigCommand(args []string, cfg config.Config, stdout, stderr io.Writer) int {

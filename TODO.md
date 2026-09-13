@@ -12,7 +12,7 @@ The first R1–R4 implementation passed behavioral tests but added too many obje
 - [x] Use one coordinator for runtime state, direct stage readers and flat resource composition; consolidate files by responsibility.
 - [x] Preserve the fixed loop, offline reads, exact evidence checks, original identities and atomic READY.
 - [x] Complete rework full race, Go 1.25 and real Docker recovery/cancellation/export checks; full normal tests, Linux build, vet and architecture checks also pass.
-- [ ] Separately design frozen toolchain lock snapshots; missing original lock files still prevent verified export.
+- [x] Freeze the validated toolchain lock in new runs' effective configuration; resume and offline export consume the bound snapshot, while legacy runs retain validated path fallback.
 
 ## Completed ordinary-problem loop — 2026-09-09 user revision
 

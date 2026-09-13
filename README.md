@@ -16,7 +16,7 @@ Phase 1 uses one foreground Go CLI process for each active run on one host. A de
 
 The compiled Go binary owns a concrete typed stage sequence. SQLite stores current run and stage projections plus CPGen ledgers for budgets, calls, artifacts, cache, sandbox resources, reviews, and packages. External work occurs outside database write transactions.
 
-Run inspection and package export use local storage assembly without Docker preflight or provider transports. Export still verifies the committed evidence chain and needs the original toolchain lock file for historical runs; missing lock content is rejected.
+Run inspection and package export use local storage assembly without Docker preflight or provider transports. New Solution/MVP runs retain the validated canonical toolchain lock snapshot, so resume and export survive removal of the configured lock path while still verifying the committed evidence chain. Legacy runs without a snapshot retain the original lock-path fallback and reject export when that file is unavailable.
 
 ADR-0006 uses a local fixed loop in the application layer and LangChainGo v0.1.14 inside the provider adapter. SQLite remains authoritative for progress; each stage transition is checked after commit. Provider library types do not enter domain/port/stage contracts. The [architecture simplification plan](docs/superpowers/plans/2026-09-13-architecture-simplification.md) records the initial refactor; the [architecture rework record](docs/evidence/architecture-follow-up-2026-09-14.md) records the subsequent reduction of wrapper objects, mirror interfaces and duplicated composition.
 
