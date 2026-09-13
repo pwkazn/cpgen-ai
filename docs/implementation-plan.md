@@ -1,163 +1,194 @@
-# MVP 实施计划
+# MVP Implementation Plan
 
-## 1. 实施原则
+Status: Current under ADR-0006
 
-- 按纵向切片提交，每个切片都可运行和测试。
-- 先实现 Fake adapter，再接真实付费/外部服务。
-- 机器可验证 Schema、迁移和 fixture 与代码同提交。
-- 不提前实现 Web、分布式队列、SPJ 生成和本地向量模型。
+## 1. Delivery contract
 
-## 2. Slice 0：纵向技术探针
+Phase 1 follows one foreground executor per run, a per-run process lock, a fixed pipeline, and no workflow-hosting service. SQLite stores current run and stage projections plus CPGen domain ledgers. All external I/O occurs outside write transactions.
 
-### 交付
+Each slice must preserve completed evidence from earlier slices, use typed contracts and deterministic tests, pass repository gates, and end with a reviewable checkpoint.
 
-- `go.mod`、`cmd/cpgen` 最小入口。
-- domain outcome 类型。
-- DockerSandbox 最小 Compile/Run/Probe 与仅测试可构造的 `Slice0ProbeHarness`；正式 CLI 不暴露测试 dispatch capability。
-- 固定 `cpgen-builder/cpgen-runtime/cpgen-transfer` Dockerfile、`docker-direct-v2` 执行协议和 toolchain manifest。
-- `docker-direct-v2` 可行性探针：direct PID 1、精确 memory/no-swap、Engine volume import、quota tmpfs keeper 跨 target stop、只读 export、none+attach 日志，以及基于 test-scoped durable control record 的 detached watchdog 预告计划/deadline Stop/Kill；不在 Slice 0 假装完成 SQLite janitor/TAKEOVER。
-- testlib role adapter。
-- 固定 A+B 题目 fixture。
-- 最小 BlobStore、Package builder 和 `PackageStructuralGate`，使用合成 PrePackage report（无 SQLite run 状态）。
+## 2. Slice 0: execution foundation — completed
 
-### 完成条件
+Delivered:
 
-- `go test ./...` 通过。
-- Docker 可用时完成 compile → validate → differential → package。
-- Slice 0 只产生 probe package，不产生正式 READY run 或 PackageVerificationReceipt。
-- Docker 不可用得到分类后的 blocked probe，而不是 panic。
-- 超过题目内存限制、但低于旧版“限制 + supervisor headroom”的程序稳定得到 MLE；Runner/Engine 进程不计入目标 cgroup。
-- fork 后超时能清理整个容器；目标程序不可访问网络、Docker socket、宿主宽泛 mount、环境秘密或宿主执行记录。
-- Docker Desktop/WSL2 与 Linux Engine 分别记录 capability/measurement profile；无法满足 release cgroup v2 指标时明确返回 blocked probe outcome。
-- ADR-0003 test vectors 全覆盖。
-- ADR-0004/0005 的 direct PID 1、精确 memory/no-swap、跨停止输出、watchdog、日志磁盘上限和外部 Runner 边界测试通过。
-- 每个 import/keeper/target/export `ContainerCreate` 都有独立 ProbeDispatchLedger claim 和 sandbox-run 计量；logical CallTrace 可完整重建。
+- Go 1.24 module and strict domain values;
+- Judge outcome foundation and deterministic precedence;
+- direct Docker target execution with explicit argv;
+- capability checks and typed incompatible-host results;
+- budget and CallTrace evidence;
+- deterministic Docker plan, resource identity, and labels;
+- detached watchdog, deadline, stop, kill, wait, and control-channel EOF behavior;
+- Windows and Docker Desktop probe evidence.
 
-## 3. Slice 1：可恢复骨架
+Completion evidence is recorded in docs/evidence/slice0-verification.md. Slice 1 changes neither the completed code nor that evidence.
 
-### 交付
+## 3. Slice 1 lightweight local workflow
 
-- SQLite migrations 和 Repository。
-- run/step/attempt/event/snapshot 状态机。
-- execution lease/fencing、持久化取消 control request。
-- Blob/PendingArtifact/ArtifactOccurrence、pin/GC 和 `OpenVerified`。
-- CallOperation/AttemptCall 唯一 dispatch claim、成功/typed PortFailure 共用的 MeteredOutcome/CallTrace terminal projection、一次性 writer token/组合 FK、CACHE_PIN/PROBE_CACHE_PIN session、budget settlement 与 active-wall lease 计量。
-- 持久化 SandboxExecution/resource lifecycle、三阶段 recovery intent 和启动 janitor。
-- cleanup-only watchdog TAKEOVER；旧 operation 未完整持久化则停止、ABANDONED并以新 logical operation 重跑。
-- `generate/run/review` CLI 骨架。
-- Fake typed workflow 和 crash recovery。
+Goal: deliver a recoverable single-host foreground core proportional to the product boundary.
 
-### 完成条件
+### Task 1: architecture contract
 
-- event/snapshot/budget 同事务测试通过。
-- 并行预算不会超卖。
-- cache 过期/GC 与 `PinExisting` 并发时先 pin 后校验，物理调用只能由一个 AttemptCall claim 发出。
-- BLOCKED resume 的 probing mode 受正常预算、active wall、CANCEL 和崩溃恢复约束。
-- `BLOCKED/NEEDS_REVIEW` 恢复、waiver 和取消通过。
-- 双 CLI lease 竞争、旧 owner fencing 和失联取消接管通过。
-- 故障注入无半提交 current snapshot。
-- 恢复期间 Docker/OpenVerified 不持 SQLite 写锁；active probe 以延迟 FK 原子换父或退出，READY 只能引用同 run VERIFIED package occurrence。
-- GC claim 先把 RELEASABLE live pin 迁入无 Blob FK 的 history 再删 Blob；pin/occurrence 必须绑定原 producer lease epoch。
+- add ADR-0006 and accept the lightweight design;
+- amend ADR-0001, ADR-0002, ADR-0004, and ADR-0005;
+- reconcile architecture, detailed designs, Phase 1 scope, traceability, README, and TODO;
+- add and pass the executable architecture consistency check.
 
-## 4. Slice 2：创意、题面与查重
+### Task 2: lifecycle values and process locks
 
-### 交付
+- define strict RunState, StageState, StageAttemptState, ReviewDecisionKind, and ReviewDecisionState;
+- implement cross-platform OS-backed locks derived from validated RunID;
+- prove same-run exclusion, different-run concurrency, and release after process death.
 
-- LLM port、Fake adapter、一个真实 provider adapter。
-- prompt 版本目录和结构化输出 Schema。
-- provider 物理尝试计量、严格 JSON 解码、单次 schema repair 和 LLM provenance。
-- digest 固定的 PricingPolicy、LLM data-class privacy policy 与请求前门禁。
-- GenerationRequestV1、IdeaBatch/IdeaCandidate/IdeaSelection、mutation lineage 和 Statement revision typed Steps。
-- Similarity HTTP adapter、yuantiji_v2 protocol。
-- Similarity Evidence/Decision 两级 cache 和 Policy v1。
-- 变异与预算回路。
+### Task 3: SQLite projections
 
-### 完成条件
+- add ordered migrations for runs, stage_records, stage_attempts, run_events, control_requests, and review_decisions;
+- implement expected-version transitions and atomic projection plus event;
+- add active-time accounting timestamps used only for metering;
+- prove review and cancellation constraints.
 
-- 默认 CI 全 Fake、确定性通过。
-- 显式 smoke 可验证真实 provider/Similarity Schema。
-- 服务不可用进入 BLOCKED，Schema 漂移失败关闭。
-- Policy 变化不重复请求 Evidence。
-- prompt/schema/adapter 版本变化正确使 LLM cache miss，结构修复不可绕过预算。
-- 无匹配定价/远端隐私授权时请求数为零；金额预留与结算使用整数固定向量。
-- manual/random 请求、effective seed、候选数量/排序/选择理由及变异父链都有确定性 Schema/fixture；LLM 与 Similarity provenance 使用同一 CallTrace。
+### Task 4: call and budget ledgers
 
-## 5. Slice 3：解法与 Docker 安全执行
+- persist logical operations, physical call records, reservations, settlement, and CallTrace;
+- enforce all configured limits transactionally;
+- preserve stable logical idempotency and conservative unknown-boundary handling;
+- prove concurrent reservations cannot overspend.
 
-### 交付
+### Task 5: Blob CAS and occurrences
 
-- Solution/Brute Steps 及结构化代码 Bundle。
-- 完整 CompileRequest/RunRequest 白名单。
-- release profile cgroup v2 精确计量、容器级 kill/reap 和输出限制。
-- Compile Gate 与 `SampleExecutionSmokeCheck`：BUILTIN checker 使用可信 A+B fixture 自检；reference/brute 只在声明 sample input 上要求 EXITED(0)/输出有界，不比较 expected output、不调用 Validator，失败走 Statement+Solution 联合诊断且不生成正式 Sample Gate evidence。
-- run-scoped Docker capability probe、doctor 静态检查和 blocked/resume。
+- implement private content-addressed Blob publication, verified reads, declarations, writer tokens, pins, and occurrences;
+- bind every occurrence to run, stage attempt, role, revision, and source evidence;
+- prove traversal resistance, corruption detection, deduplication, crash safety, and atomic occurrence attachment.
 
-### 完成条件
+### Task 6: cache, mutation, and maintenance
 
-- CE/RE/TLE/MLE/OLE/INFRA_ERROR fixture 全通过。
-- secret/network/mount 不可见。
-- 输出安全提升攻击测试通过。
-- `step_deadline/run_budget_deadline/program_hard_deadline/watchdog_safety_deadline` 互不混淆；CLI 被强杀后 watchdog 收敛 target，重启 janitor/recovery 可继续。
+- persist cache source calls and artifact references;
+- retain mutation and provenance accounting;
+- make garbage collection an explicit command under the exclusive artifact lock;
+- prove cache hits create complete current-run provenance and cannot race ordinary workflow use.
 
-## 6. Slice 4：数据与差分验证
+### Task 7: Docker identity persistence and reconciliation
 
-### 交付
+- persist SandboxExecution and complete resource plans before Docker create;
+- authorize exact RunID, AttemptID, SandboxExecutionID, logical operation, scope, plan, and engine identities;
+- retain deterministic labels and the detached watchdog;
+- implement a narrow reconciler limited to exact inspect, stop, kill, wait, remove, and settlement;
+- prove unrelated resources are never touched.
 
-- TestPlan、Go/C++ generator、testlib validator。
-- Validator 编译后执行绑定同一 revision 的正式 Sample Gate。
-- 固定 seed 派生、逐测试原子提升、Coverage evidence 和 answer self-check。
-- Validator 正负例门禁。
-- Small-input Differential Gate 和反例制品。
-- 正式测试/答案生成、Coverage 和 Resource Gate。
-- revision/invalidation 全链实现。
+### Task 8: fixed typed Fake pipeline
 
-### 完成条件
+- assemble a concrete typed constructor;
+- implement the local coordinator and immutable RunView;
+- run external work outside SQLite write transactions;
+- implement bounded stage retry, manual resume, current-stage restart, review application, and cancellation;
+- keep READY unavailable before package verification.
 
-- 所有小输入先过 Validator，输出统一经 Checker。
-- 标程变化自动失效旧答案/性能/差分证据。
-- Resource Gate 不复用普通运行 timing cache。
-- 固定 seeds 可重现。
+### Task 9: local CLI and configuration
 
-## 7. Slice 5：打包与端到端验收
+- add strict local runtime, storage, lock, accounting, provider, and sandbox configuration;
+- implement generate, run list/show/events/resume/cancel, and review commands;
+- retain stable exit codes and JSON envelopes;
+- define immediate same-run lock conflict and process-restart semantics.
 
-### 交付
+### Task 10: crash and Docker persistence proof
 
-- `cpgen.package/v1` Schema 和 reverse reader。
-- 原子 Package builder、`MeteredPackageWriter`、Package Gate。
-- Internal exporter、固定目标版本的 Polygon adapter/fixture。
-- 经 MeteredArtifactSink 固定的 manifest/receipt/final Quality report，以及与 Evidence/Decision 交叉绑定的 package-safe Similarity report。
-- 完整 CLI JSON Schema 和 E2E。
+- inject process death at every durable stage boundary;
+- prove no duplicate irreversible effects, budget overspend, event duplication, or artifact corruption;
+- test kill while target runs, stop before export, and death during cleanup;
+- confirm later reconciliation never continues an incomplete old export.
 
-### 完成条件
+### Task 11: boundary audit and checkpoint
 
-- Package Gate 必须在 READY 之前。
-- waiver/revision 失效端到端通过。
-- 从 GenerationRequest 到 READY package 可重复运行。
-- package rename 与 READY 事务之间崩溃可幂等恢复。
-- `mvp` 与 `release` verification report 明确区分。
-- Exporter 只能写静态计划内路径，`max_package_bytes`、manifest exact-byte 绑定和 PendingArtifact pin 故障注入通过。
+- run full tests, vet, race tests, architecture check, Linux cross-build, and Docker-required gates where supported;
+- scan production source for forbidden generic-runtime mechanisms;
+- update traceability and evidence;
+- record the Slice 1 checkpoint without changing Slice 0 history.
 
-## 8. 推荐首批代码顺序
+### Slice 1 completion criteria
 
-1. `internal/domain/outcomes.go` 与 ADR-0003 tests。
-2. `internal/port/sandbox.go` 请求/结果类型。
-3. docker-direct-v2 Runner + pinned builder/runtime/transfer image + watchdog。
-4. `internal/adapter/sandbox/docker`。
-5. `internal/judge/role_adapter.go`。
-6. Slice 0 fixture 与最小 package reader/writer。
-7. 通过 Slice 0 后再引入 SQLite 状态机。
+- one executor can create, pause, resume, review, cancel, and inspect a run locally;
+- a competing same-run process cannot execute stages;
+- process death releases the OS lock and restart reconciles only the current stage;
+- SQLite projections, events, budgets, calls, artifacts, cache, and sandbox resources remain consistent at crash boundaries;
+- cancellation waits for proof that untrusted targets stopped;
+- the Fake pipeline reaches every pause and failure path deterministically;
+- all full repository gates pass.
 
-## 9. 每个 PR 的最低要求
+## 4. Slice 2: idea, statement, model, and similarity
 
-- 关联具体 Slice、ADR/设计章节和验收条件。
-- 更新或新增测试；不得只依赖真实外部服务。
-- 新增持久化字段必须带 migration。
-- 新增 enum/Schema 必须拒绝未知值并有版本。
-- 新增 Docker 权限、mount、环境变量或编译参数必须安全审查。
-- 文档与代码契约不一致时，先通过 ADR/文档变更再合并实现。
+**Historical priority, 2026-09-09 (ordinary-problem loop completed):** complete the usable forward generation loop. Valid Similarity ACCEPT proceeds to Solution; non-accepted business results enter human review. Implement LOOP-01/SOL-01 → DATA-01 → JUDGE-01 → PKG-01 according to the [current executable plan](superpowers/plans/2026-09-09-mvp-generation-loop.md). Automatic mutation and its retained-source/authorization prerequisites are deferred for redesign and do not gate MVP delivery. Existing Quality and PackageGate checks remain required.
 
-## 10. MVP 之后
+Deliver typed GenerationRequest, Idea, Statement, model adapters, prompt registry, strict structured output, similarity adapter, evidence cache, policy decisions, privacy rules, and review routing.
 
-- Phase 2：Wrong Answer/Hack Loop、生成 SPJ、主动审核点。
-- Phase 3：HTTP/Web、远程 Worker、可移植 checkpoint、本地 Similarity Service。
-- 只有出现真实吞吐瓶颈后才引入消息队列或拆分服务。
+Completion requires deterministic Fake E2E coverage, opt-in provider smoke tests, current-policy dependency checks after blocking, complete budget and provenance records, and no package-unsafe content leakage.
+
+The initial [architecture simplification plan](superpowers/plans/2026-09-13-architecture-simplification.md) is followed by [the initial R1–R4 proposal](design/architecture-follow-up-2026-09-14.md), which was reworked after user rejection; current changes and verification are in its [rework record](evidence/architecture-follow-up-2026-09-14.md). The ordinary-problem loop is implemented; its broader historical slice milestones below do not reopen that delivery.
+
+### Historical library integration checkpoints (2026-09-08)
+
+These record the original integration. The 2026-09-13 ADR amendment replaces LangGraphGo with a checked local loop and retains LangChainGo; current dependency requirements are in go.mod.
+
+1. INT-01/INT-02: amend ADR-0006 and current designs; pin LangChainGo v0.1.14 and LangGraphGo v0.8.5 with Go 1.25.0, minimum/current CI, import boundaries and upstream contract probes. Preserve historical Slice 0/1 evidence.
+2. LLM-01: port the provider adapter through the existing MeteredLLM contract, compare canonical requests and typed outcomes to the HTTP adapter, and retain local strict schemas and endpoint policy.
+3. LLM-02 through LLM-06: complete provider configuration, durable physical dispatch and replay, one bounded JSON repair and cache/privacy; wire real stages through the application factory with local HTTP lifecycle evidence. Record opt-in external smoke separately before claiming external-service acceptance.
+4. WF-01 through WF-05: assemble fixed serial graph nodes in internal/application, commit through existing SQLite/Blob protocols, preserve recovery/review/cancel and revision compatibility, and stop at the implemented slice boundary. SQLite remains authoritative; no graph.json or library checkpoint persistence is introduced.
+5. Complete WF-06/WF-07 with Slices 3–5 and the complete eight-stage business graph. No unimplemented stage or library terminal result can substitute for Judge, Quality or PackageGate.
+
+Detailed task status remains in TODO.md. The [provider configuration and durable dispatch checkpoint](evidence/slice2-durable-llm-dispatch.md) adds LLM-02 and LLM-03a. LLM-03b implements private response publication, verified replay and crash recovery; [replay evidence](evidence/slice2-private-llm-replay.md) records full gates. LLM-04 adds one configured format repair with durable sanitized diagnostics and separate accounting; [repair evidence](evidence/slice2-bounded-json-repair.md) records its full gates.
+
+LLM-05 completes [private same-run cache provenance](evidence/slice2-private-llm-cache.md), and WF-01 supplies the [compiled application graph](evidence/slice2-compiled-graph.md). LLM-06a adds [strict content drafts](evidence/slice2-content-drafts.md) whose identities and frozen resource fields are derived locally. Assembly exposed a heartbeat/version conflict in long model calls and cache completion replay; WF-04a addresses it with an [attempt-bound ledger and original command receipts](evidence/slice2-active-llm-ledger.md).
+
+WF-03a completes [typed committed-input recovery](evidence/slice2-committed-generation-inputs.md): current stage/attempt provenance and verified private bytes reconstruct the semantic Idea/Statement chain without provider requests, including after review invalidation and cache reuse. The accepted live preview now composes per-attempt execution, atomic receipt attachment, the explicit workflow selector and recovery/control lifecycle.
+
+Composition status and remaining boundaries:
+
+1. WF-02a's typed executor acceptance is complete, including cache reuse at zero remaining call budget and replay across active-time versions.
+2. SIM-01 and SIM-02 pass complete gates for durable Similarity dispatch, private evidence/replay, committed reads and typed composition against the verified Statement chain. The semantic Similarity input binds problem/snapshot, decision and provider policy, result limit, exact retry settings and cost ceiling before the next attempt. Wire logical identity adds run and attempt; the unknown next attempt is absent from the preceding stage's output binding. The HTTP adapter derives its Idempotency-Key from the request, so exact same-attempt replay preserves identity while a fresh BLOCKED attempt receives a new one. Future evidence-cache reuse remains separate.
+3. The explicit preview selector and frozen content/provider configuration are implemented in production Bootstrap. Omitted-selector Fake snapshots are preserved; provider configuration alone does not select live execution. Full normal tests/vet, production and supplementary lifecycle race verification, Linux build and architecture/format/patch checks pass.
+4. SIM-02 adds `slice2.idea.statement.similarity.checkpoint.v1` with a fourth `slice2_checkpoint` stage; the existing three-stage revision is unchanged. Successful collection returns the private occurrence separately from the policy decision, so Similarity evidence commits before checkpoint routing. SIM-03 must apply the committed Accept/Review/Reject/Blocked decision through the real lifecycle. Existing control-outcome occurrence restrictions remain intact. The checkpoint cannot produce READY or waive unimplemented later gates.
+5. The real preview service preserves the exact RUNNING attempt across before-call, sealed and completed provider boundaries. Typed terminal reconciliation restores existing receipts before cancellation or exhausted-budget release. Same-attempt recovery and terminal cleanup have distinct authorization paths. Fifteen real process-crash scenarios and six failed/lost commit returns pass normal and race verification with exact attempts, occurrences and HTTP counts.
+6. BLOCKED dependency work now starts inside accounting. An authoritative predecessor checkpoint survives restart before call opening and bypasses historical generation cache as proof of recovery; successful generation establishes current availability and supplies the result in the same metered operation. Caller-supplied cancellation versions remain strict, while an accounting heartbeat retries transient version conflicts on its next bounded tick.
+
+The integration tests must stop execution after provider completion, private receipt publication and stage commit independently; resume must preserve request/seed/config identity, HTTP counts and the exact next stage at each boundary. Cancellation and exhausted active-time budgets must settle the same durable calls before final run control transitions.
+
+Lifecycle acceptance also covers the gap after a successful stage commit and before the next attempt begins. That projection is RUNNING with a PENDING current stage and no live attempt. WF-04b adds the narrow terminal transition and authoritative attempt lookup, including the case where a live service still caches its predecessor identity. Failure-first regressions and complete gates pass. Finalization still rejects a genuinely RUNNING attempt and preserves earlier committed history.
+
+For provider recovery, separate ordinary same-attempt continuation from terminal cleanup. Cancellation and active-budget exhaustion may replay/settle original DISPATCHING, SENT or completed receipts, but cannot plan a new transport call, format repair or cache lookup. Unstarted OPEN/PREPARED calls need an explicit no-send settlement path that remains valid after a pending cancel. Do not let stage cancellation release the only sealed response while its provider parent remains nonterminal.
+
+WF-03a recovers the exact submitted request and effective seed, validates current successful-stage occurrence provenance, reconstructs typed outputs and compares their stored semantic digests. The [live preview composition](evidence/slice2-live-preview.md) connects those readers, atomic commits, frozen configuration, fresh dependency admission and receipt cleanup through the existing lifecycle. Its explicit checkpoint remains a non-waivable preview for every retained Similarity decision. LOOP-01 introduces a compatible forward revision using committed evidence directly: ACCEPT to Solution, other business outcomes to review. The former [mutation routing plan](superpowers/plans/2026-09-09-slice2-business-routing.md) is frozen research, not the next work sequence. The [development log](development-log.md) records the completed session and later priority revision. Preview acceptance cannot substitute for full MVP gates.
+
+## 5. Slice 3: solution and Docker Judge
+
+Deliver solution generation, compile/run integration, reference solution verification, checker/SPJ support, and persisted Judge evidence through the Slice 0 Docker boundary.
+
+Completion requires authoritative target measurements, exact sandbox identity, watchdog safety, deterministic Judge precedence, and complete artifacts and CallTrace. The first vertical slice generates Reference/Brute and explanation, compiles in Docker and checks samples. Content/correctness failures retain evidence and stop for review/failure; automatic solution repair is deferred.
+
+## 6. Slice 4: data and quality gates
+
+Deliver reproducible test-data generation, validator, expected outputs, oracle and differential testing, resource-limit evidence, and final quality reports. Advanced mutation/adversarial testing follows the first usable loop and does not delay ordinary sample, boundary, differential or resource checks.
+
+Completion requires deterministic failing seeds, minimized evidence where policy requires it, strict budgets, reproducible reports, and review routing for ambiguous quality failures.
+
+## 7. Slice 5: package and end-to-end acceptance
+
+Deliver internal package staging, canonical manifest, structural and semantic gates, verification receipt, atomic package occurrence, READY binding, export, import verification, and full E2E fixtures.
+
+Completion requires deterministic package bytes, path safety, crash-safe publication, same-run verified occurrence constraints, clean-workspace E2E, and acceptance evidence.
+
+## 8. Per-change minimum gates
+
+Every change runs focused tests first, then:
+
+~~~powershell
+go test ./...
+go vet ./...
+git diff --check
+~~~
+
+Boundary or concurrency changes also run `go test -race -timeout 30m ./...`. The explicit suite timeout accommodates instrumented SQLite migration and crash/replay coverage; the 2026-09-09 expanded application sweep passed at 1199.150 seconds, too close to the former 20-minute package limit. Operation-level HTTP, lock and helper deadlines remain bounded independently. Docker changes run real-engine safety tests in a compatible environment. Documentation changes run scripts/check-slice1-architecture.ps1.
+
+## 9. Deferred work
+
+Automatic Idea mutation, automatic business solution repair and the old BR-01b/BR-02–BR-05 mutation source/authorization chain are deferred under the 2026-09-09 user revision. Completed contracts and migration evidence remain historical assets, not required dependencies for the forward path. Reconsider a simpler mutation design only after a usable package-producing loop exists.
+
+Remote execution, many-host coordination, always-on timers, operational workflow search, arbitrary plugin graphs, and web/API control remain outside the MVP. Any such expansion requires a separate architecture decision and migration plan.

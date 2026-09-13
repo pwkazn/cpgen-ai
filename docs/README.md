@@ -1,65 +1,87 @@
-# CP Problem Generator 文档索引
+# CP Problem Generator Documentation Index
 
-## 文档层级
+The [2026-09-13 architecture simplification plan](superpowers/plans/2026-09-13-architecture-simplification.md) tracks separation of read/export and execution services, explicit stage dependencies, local fixed scheduling, and consolidated historical compatibility. Its implementation and verification records distinguish completed changes from outstanding environment checks. The local scheduler replaces the earlier LangGraphGo wrapper while retaining the persisted revision and transition contracts.
 
-出现冲突时按下列顺序处理：
+The [2026-09-14 architecture follow-up](design/architecture-follow-up-2026-09-14.md) preserves the first proposal, whose implementation was rejected for adding too many abstractions. The [rework record](evidence/architecture-follow-up-2026-09-14.md) covers the simplified coordinator, direct readers, removed configuration layers and current verification. Toolchain snapshots and a separate publication ledger remain independent design decisions.
 
-1. `plan.md`：产品目标和阶段范围。
-2. `ARCHITECTURE.md`：已冻结的系统边界、质量原则和核心状态语义。
-3. `docs/adr/`：不可静默修改的关键技术决策。
-4. `docs/design/`：模块接口、持久化协议和验收设计。
-5. 已发布 Schema、数据库迁移和代码：实现期的机器可执行事实来源。
+## Document hierarchy
 
-实现发现架构级冲突时，先新增 ADR，再修改架构和详细设计；不得只修改代码绕过文档约束。
+1. ARCHITECTURE.md defines the current system boundary.
+2. docs/adr records accepted decisions and their supersession.
+3. docs/design contains component and contract details.
+4. docs/implementation-plan.md defines slice delivery order.
+5. docs/traceability.md maps requirements to design and evidence.
+6. docs/evidence records completed verification.
+7. docs/superpowers/specs contains approved implementation designs.
+8. docs/superpowers/plans contains executable engineering plans.
+
+When documents conflict, the newest accepted ADR and its named authoritative design win. ADR-0006 defines Slice 1 lightweight local workflow.
+
+The user revised the MVP priority on 2026-09-09: [complete a usable generation loop first](superpowers/plans/2026-09-09-mvp-generation-loop.md). Similarity ACCEPT continues to Solution/Data/Docker/Judge/Quality/Package; non-accepted business results enter human review. Mutation is deferred for redesign. This scope amendment takes precedence over mutation-first ordering in older plans and component designs.
+
+The [Solution slice](evidence/mvp-solution-foundation.md), [Data execution](evidence/mvp-data-foundation.md), [Judge answers and differential checks](evidence/mvp-judge-foundation.md), and [Quality with package format v2](evidence/mvp-quality-package-foundation.md) now feed [package assembly, atomic READY and CLI export](evidence/mvp-package-commit-foundation.md). The full MVP configuration passes real Docker and independent CLI acceptance for an ordinary C++ problem, including a process exit inside the package transaction and fresh execution from the exported ZIP. A subsequent [APINode live-provider test](evidence/apinode-live-mvp-2026-09-10.md) passes real model generation through Docker, export and independent revalidation. Similarity remains a local fixture; actual originality has not been checked.
+
+The historical 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the former in-process library amendment and provider boundary tests. Later checkpoints below record preview CLI and durable graph integration; the 2026-09-13 ADR-0006 amendment supersedes the graph-library implementation choice.
+
+The subsequent [provider configuration and durable dispatch checkpoint](evidence/slice2-durable-llm-dispatch.md) records LLM-02 and LLM-03a with independent subagent acceptance. The [private result replay checkpoint](evidence/slice2-private-llm-replay.md), [bounded JSON repair checkpoint](evidence/slice2-bounded-json-repair.md) and [private cache checkpoint](evidence/slice2-private-llm-cache.md) complete LLM-03b through LLM-05 with full gates. The [compiled application graph](evidence/slice2-compiled-graph.md) completes WF-01 with full gates. The [development log](development-log.md) records the active work order.
+
+The [strict content drafts](evidence/slice2-content-drafts.md), [active-time LLM ledger bridge](evidence/slice2-active-llm-ledger.md), [typed committed-stage input recovery](evidence/slice2-committed-generation-inputs.md) and [durable content executor](evidence/slice2-generation-executor.md) complete LLM-06a, WF-04a, WF-03a and WF-02a. The [durable Similarity evidence checkpoint](evidence/slice2-durable-similarity.md) covers physical dispatch, private replay and committed reads. [Typed Similarity execution](evidence/slice2-typed-similarity.md) binds the verified Statement chain to per-attempt evidence and a separate checkpoint; full gates pass. These components now drive the accepted preview service below.
+
+The [stage-gap recovery correction](evidence/slice2-stage-gap-recovery.md) addresses cancellation and stale predecessor identity after a stage has committed and before its successor begins.
+
+The [provider reconciliation component](evidence/slice2-provider-reconciliation.md) adds receipt-only terminal cleanup and prevents stage release before provider settlement; full gates pass.
+
+The [explicit live preview](evidence/slice2-live-preview.md) connects frozen configuration, production Bootstrap, typed graph commits, same-attempt process recovery and provider cancellation/budget cleanup. Normal tests/vet, production and supplementary race verification, Linux build and architecture/format/patch checks pass. The default remains Fake, and the preview ends at non-waivable review. Business routing and later quality/package gates remain open.
+
+The [committed Similarity route plan](evidence/slice2-similarity-route-plan.md) completes read-only decision/quota inspection and corrects omitted logical/package budget limits. Full gates pass. Its mutation-aware routing and the old [business routing plan](superpowers/plans/2026-09-09-slice2-business-routing.md) are retained as deferred research; the forward MVP uses committed decisions directly without mutation quota or authorization.
+
+The [mutation core/intent contracts](evidence/slice2-mutation-contracts.md), [artifact and result-ledger hardening](evidence/slice2-artifact-mutation-records.md), [durable candidate collection](evidence/slice2-idea-candidates.md), [atomic mutation completion and result recovery](evidence/slice2-atomic-mutation-stage.md) and [separate mutation provider contract](evidence/slice2-mutation-prompt.md) retain their completed gates. Further mutation development is paused; these checkpoints do not impose prerequisites on Solution or packaging.
+
+The [application fixture preparation change](evidence/application-fixture-preparation.md) passes complete gates and reduces repeated test setup work while preserving database isolation. The [initial typed batch publisher](evidence/slice2-idea-batch-output.md) also passes complete gates, including real process recovery and review cleanup. It does not alter the preview graph.
 
 ## ADR
 
-- [ADR-0001：静态类型化工作流](./adr/0001-static-typed-workflow.md)
-- [ADR-0002：任务状态、审核与恢复](./adr/0002-run-state-review.md)
-- [ADR-0003：编译、进程和判题结果分层](./adr/0003-judge-outcomes.md)
-- [ADR-0004：目标程序直接运行于独立 Docker cgroup](./adr/0004-docker-direct-execution.md)
-- [ADR-0005：Docker 执行生命周期与跨停止制品传输](./adr/0005-docker-execution-lifecycle.md)
-
-## 详细设计
-
-- [工作流、revision 与预算](./design/workflow.md)
-- [LLM、Prompt 与结构化输出](./design/llm.md)
-- [Idea 与 Statement 契约](./design/idea-statement.md)
-- [SQLite、制品与缓存](./design/storage.md)
-- [DockerSandbox](./design/sandbox.md)
-- [Judge Harness 与 testlib](./design/judge.md)
-- [TestPlan、Generator 与数据流水线](./design/data-pipeline.md)
-- [Similarity Service 与决策策略](./design/similarity.md)
-- [配置模型](./design/configuration.md)
-- [内部题包与导出](./design/package.md)
-- [CLI 契约](./design/cli.md)
-- [测试与验收](./design/testing.md)
-- [实施计划](./implementation-plan.md)
-- [开发 TODO 与阶段目标](../TODO.md)
-
-## 统一术语
-
-| 术语 | 含义 |
+| ADR | Decision |
 |---|---|
-| Agent / Step | 调用 LLM 或确定性工具完成一个类型化工作流节点 |
-| Orchestrator | 唯一能够提交任务状态、预算和制品引用的应用层组件 |
-| Sandbox | 只负责 Docker 编译与进程执行，不产生 WA/PE 等业务判决 |
-| Judge Harness | 解释 solution/validator/checker 结果并执行质量门禁 |
-| Validator | 判断测试输入是否符合题目输入规范 |
-| Checker / SPJ | 判断程序输出是否可接受；MVP 默认使用 exact/token checker |
-| Blob | 按 SHA-256 去重的不可变字节内容 |
-| ArtifactOccurrence | Blob 在某个 run/step/attempt 中产生或被复用的可审计关系 |
-| CallOperation / AttemptCall / CallTrace | 一次逻辑端口调用、其一个或多个物理尝试，以及对二者/缓存来源的公共追踪投影 |
-| RunRelation | `GENERATED/DERIVED/VERIFICATION`；决定内容是否可在当前 run 修订 |
-| InputOrigin | `NONE/SAMPLE/GENERATED_TEST/IMPORTED_TEST/TRUSTED_FIXTURE`；Compile 用 `NONE`，可信 checker 自检用 `TRUSTED_FIXTURE`，参与 Validator/Checker 失败路由 |
-| FailureRouteClass | `SANDBOX_INFRA/TRUSTED_TOOL_INFRASTRUCTURE/VERIFICATION_CONTENT/GENERATED_REPAIR`；只决定回退路径，不覆盖三层 Judge Outcome |
-| SandboxExecution | 可恢复的 Docker logical operation 生命周期；`CLEANUP_PENDING` 时 run 保持 QUIESCING |
-| `BLOCKED` | 外部运行条件暂时不满足，可在条件恢复后继续 |
-| `NEEDS_REVIEW` | 需要人对内容、证据、预算或 waiver 作决定 |
+| 0001 | Static typed CPGen pipeline and activity contracts |
+| 0002 | Seven run states, review, retry, cancellation, and local restart |
+| 0003 | Judge outcomes and deterministic precedence |
+| 0004 | Direct target execution in an isolated Docker cgroup |
+| 0005 | Docker execution lifecycle, watchdog, and cross-stop transfer |
+| 0006 | Lightweight local workflow boundary |
 
-## 当前基线
+## Detailed design
 
-- 核心语言：Go。
-- 不可信程序：统一在 Docker Linux 容器执行。
-- MVP：非 SPJ 题、CLI、SQLite、本地制品存储、原题姬兼容 Similarity Service。
-- 架构冻结状态：当前已知 P0/P1/P2/P3 评审项均已闭环；后续架构级变化必须新增 ADR。
+| File | Scope |
+|---|---|
+| workflow.md | compiled stages, retry, resume, review, cancellation |
+| storage.md | SQLite projections and CPGen domain ledgers |
+| testing.md | deterministic, subprocess, crash, and Docker acceptance |
+| cli.md | commands, exit codes, restart behavior |
+| configuration.md | local runtime, storage, provider, and sandbox values |
+| llm.md | prompts, strict structured output, accounting, privacy |
+| similarity.md | adapter, evidence, cache, and decision policy |
+| sandbox.md | direct Docker protocol, watchdog, exact reconciliation |
+| judge.md | checker and verdict contracts |
+| package.md | internal package, gates, verification, export |
+| data-pipeline.md | data generation and differential validation |
+| idea-statement.md | request, idea, and statement models |
+
+## Current baseline
+
+Slice 0 is completed and its evidence remains authoritative. Slice 1 uses one foreground local CLI executor for a run, an OS-backed run lock, compiled typed stages, short SQLite transactions, CPGen-specific ledgers, and the retained Docker watchdog.
+
+The accepted design is docs/superpowers/specs/2026-08-31-lightweight-local-workflow-design.md. The implementation plan is docs/superpowers/plans/2026-08-31-slice1-lightweight-local-workflow.md.
+
+## Vocabulary
+
+- Run: one immutable request and its durable current projection.
+- Stage: one named compiled CPGen transformation.
+- Stage attempt: one physical execution of the current stage.
+- RunView: immutable values and read-only remaining budgets visible to a stage.
+- CallTrace: physical external-call evidence.
+- Blob: immutable digest-addressed bytes.
+- ArtifactOccurrence: run-scoped provenance for a Blob.
+- SandboxExecution: persisted Docker logical operation and complete resource plan.
+- ReviewDecision: immutable human action applied by a later resume.
+- PackageOccurrence: a run relation to a staged or verified package.

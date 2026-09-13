@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25.0', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Verify dependencies
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Check formatting
+        shell: bash
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+      - name: Test
+        run: go test -race -timeout 30m ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Architecture contract
+        shell: pwsh
+        run: ./scripts/check-slice1-architecture.ps1
+      - name: Cross-build host commands
+        shell: bash
+        run: |
+          GOOS=linux CGO_ENABLED=0 go build ./cmd/...
+          GOOS=windows CGO_ENABLED=0 go build ./cmd/...

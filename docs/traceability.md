@@ -1,50 +1,62 @@
-# 需求与设计追踪矩阵
+# Requirements and Design Traceability
 
-## MVP 功能
+Status: Current under ADR-0006
 
-| 需求 | 主要设计 | 实施切片 | 核心验收 |
-|---|---|---|---|
-| F01 接收出题请求 | [配置](./design/configuration.md)、[Idea/Statement](./design/idea-statement.md)、[CLI](./design/cli.md) | Slice 1/2 | manual/random 规则、effective seed、未知字段拒绝、有效配置快照 |
-| F02 创意生成与选择 | [Idea/Statement](./design/idea-statement.md)、[工作流](./design/workflow.md)、[LLM/Prompt](./design/llm.md)、ADR-0001 | Slice 2 | 多候选、确定性排序/选择理由、预算变异、父链/provenance |
-| F03 结构化题面 | [Idea/Statement](./design/idea-statement.md)、[LLM/Prompt](./design/llm.md)、[工作流](./design/workflow.md) | Slice 2/4 | 严格 Schema、revision/字段校验；Validator 就绪后执行正式 Sample Gate |
-| F04 语义查重 | [Similarity](./design/similarity.md) | Slice 2 | Evidence/Decision 分离、缓存版本、失败关闭 |
-| F05 解法生成 | [LLM/Prompt](./design/llm.md)、[Judge](./design/judge.md)、[Sandbox](./design/sandbox.md) | Slice 3/4 | 结构化代码候选、标程/暴力编译、Slice 3 sample smoke、Slice 4 正式样例 verdict、复杂度证据 |
-| F06 数据工具 | [数据流水线](./design/data-pipeline.md)、[Sandbox](./design/sandbox.md)、[Judge](./design/judge.md) | Slice 4 | seed 派生、确定性 Generator、Validator 正负例、原子测试提升 |
-| F07 自动判题 | ADR-0003、[Judge](./design/judge.md)、[数据流水线](./design/data-pipeline.md) | Slice 0/3/4 | Compile/Process/Judge 分层、Differential/Resource Gates |
-| F08 质量门禁 | [Judge](./design/judge.md)、[工作流](./design/workflow.md) | Slice 4–5 | 不可豁免门禁、current revision evidence、VERIFICATION 不修改被验内容 |
-| F09 题目包导出 | [题包](./design/package.md)、[存储](./design/storage.md) | Slice 0/5 | 内容身份/验证 occurrence 分离、原子发布、反向读取、Package Gate 先于 READY |
-| F10 缓存与恢复 | [存储](./design/storage.md)、ADR-0002 | Slice 1 | 原子事务、ABANDONED、幂等和分层缓存 |
-| F11 异常审核 | ADR-0002、[CLI](./design/cli.md) | Slice 1/5 | revise/retry/waive/reject、waiver 自动失效 |
+Slice 1 checkpoint: **complete**. Slice 2's explicitly selected Idea/Statement/Similarity preview passes full lifecycle gates and ends at non-waivable review. The user now prioritizes ACCEPT → Solution/Data/Docker/Judge/Quality/Package and non-accepted business results → review. Automatic mutation is deferred for redesign. See [Slice 1 evidence](evidence/slice1-verification.md), [preview evidence](evidence/slice2-live-preview.md) and the [current implementation plan](superpowers/plans/2026-09-09-mvp-generation-loop.md).
 
-## 非功能要求
+## MVP functional requirements
 
-| 要求 | 设计位置 | 验收 |
+| Requirement | Decision/design | Verification |
 |---|---|---|
-| Go-first | ADR-0001、[实施计划](./implementation-plan.md) | 静态 typed Step，无 `map[string]any` Registry |
-| Docker-only | [Sandbox](./design/sandbox.md)、ADR-0004/0005 | 无 host fallback；逐 ContainerCreate 计量；daemon 不可用为 BLOCKED |
-| 安全隔离 | [Sandbox](./design/sandbox.md)、[测试](./design/testing.md) | 禁网、非 root、精确 target cgroup、跨停止配额输出、watchdog、日志/提升攻击测试 |
-| 可追溯 | [存储](./design/storage.md)、[题包](./design/package.md) | CallOperation/AttemptCall/CallTrace、Blob/Occurrence 分离、manifest/provenance |
-| 成本控制 | [工作流](./design/workflow.md) | 并发预留、结算、UNKNOWN 保守计费 |
-| LLM 定价与隐私 | [LLM/Prompt](./design/llm.md)、[配置](./design/configuration.md) | 固定 PricingPolicy、data-class allowlist、未授权零请求 |
-| 可恢复 | ADR-0002、[存储](./design/storage.md) | checkpoint、原 step resume、crash injection |
-| 外部服务可替换 | [Similarity](./design/similarity.md)、端口架构 | base_url/protocol，业务层不依赖供应商字段 |
-| OJ 可交付 | [题包](./design/package.md) | internal package v1、固定 Polygon contract fixture |
+| Structured request to verified package | ARCHITECTURE sections 1, 6, 12; Phase 1 design | fixed-pipeline E2E and package-gate tests |
+| Typed stage boundaries | ADR-0001; workflow design | compile-time and source-boundary tests |
+| Single-host foreground execution | ADR-0006; CLI design | real subprocess command tests |
+| One mutating executor per run | ADR-0006; workflow/storage design | same-run lock race and process-death release |
+| Durable pause and manual resume | ADR-0002; workflow design | crash at every stage boundary |
+| Human review | ADR-0002; workflow/storage/CLI | decision lifecycle and stale-binding tests |
+| Responsive cancellation | ADR-0002; workflow/CLI/sandbox | concurrent cancel and target-stop proof |
+| Model calls with structured output | LLM design | strict content drafts, private response/diagnostic recovery, bounded repair and local domain binding; [draft evidence](evidence/slice2-content-drafts.md) |
+| LangChainGo provider boundary | ADR-0006 amendment; LLM design | canonical HTTP parity, strict validation, durable physical ledger, exact private replay, usage, cancellation and redaction; [dispatch evidence](evidence/slice2-durable-llm-dispatch.md) and [active ledger evidence](evidence/slice2-active-llm-ledger.md) |
+| In-process LangGraphGo execution | ADR-0006 amendment; workflow design | typed serial routing, checked production commits, same-attempt restart and cancellation; [graph evidence](evidence/slice2-compiled-graph.md) and [preview evidence](evidence/slice2-live-preview.md) |
+| Private model response recovery | LLM design; artifact and budget protocols | internal/application/llm_replay_test.go and llm_replay_process_test.go: verified replay, no resend, budget/cancel/commit failure; artifact_reader_test.go: populated migration and exact reader bindings; full checkpoint gates pass |
+| Bounded JSON-format repair | LLM design; strict provider configuration | physical_repair_test.go: eligible sanitized diagnostics; llm_validation_test.go: private failure receipts; llm_structured_test.go and llm_structured_process_test.go: one immutable repair, separate traces/usage, budget/cancel/crash recovery and atomic attachment; full checkpoint gates pass |
+| Similarity evidence and policy | Similarity design | durable physical/private evidence, typed committed input, fresh dependency checks and all decision/quota plans; [typed evidence](evidence/slice2-typed-similarity.md) and [read-only route plan](evidence/slice2-similarity-route-plan.md); actual business route remains open |
+| Accepted Similarity to usable package | Current generation-loop plan LOOP-01/SOL-01 through PKG-01 | Pending: ACCEPT continues to real Solution/data/Judge/package; REJECT/review/insufficient business evidence stops for human review with zero mutation calls; complete exported-package E2E |
+| Direct Docker Judge execution | ADR-0004; sandbox design | Slice 0 plus real-engine tests |
+| CLI-loss target safety | ADR-0005; sandbox design | watchdog deadline/EOF and kill tests |
+| Immutable artifacts and provenance | storage design | Blob/writer/pin and corruption tests; declared and cached metadata binding, settled-write attachment without double charge; [artifact evidence](evidence/slice2-artifact-mutation-records.md) |
+| Deterministic package and READY | package design | structural/semantic gates and same-run constraint |
 
-## 架构评审 P2 落点
+## Non-functional requirements
 
-| 评审项 | 已落文档 |
-|---|---|
-| Workflow 依赖和失效 | [workflow.md](./design/workflow.md#4-依赖与失效规则) |
-| BLOCKED/checkpoint/ABANDONED | [workflow.md](./design/workflow.md#6-blocked-恢复)、[storage.md](./design/storage.md#7-崩溃恢复) |
-| Metered StepServices | [workflow.md](./design/workflow.md#7-metered-stepservices) |
-| Prompt/Schema/LLM provenance | [llm.md](./design/llm.md) |
-| TestPlan/seed/数据提升 | [data-pipeline.md](./design/data-pipeline.md) |
-| SQLite 单写者事务 | [storage.md](./design/storage.md#5-原子提交顺序) |
-| testlib role adapter | [judge.md](./design/judge.md#3-role-adapter) |
-| Docker direct-run/cgroup/提升 | [sandbox.md](./design/sandbox.md)、[ADR-0004](./adr/0004-docker-direct-execution.md)、[ADR-0005](./adr/0005-docker-execution-lifecycle.md) |
-| 缓存协议 | [storage.md](./design/storage.md#9-缓存规范) |
-| Similarity 两级缓存 | [similarity.md](./design/similarity.md#7-evidence-cache) |
-| ReviewDecision/revision | [workflow.md](./design/workflow.md#8-reviewdecision-应用) |
-| Package/Export | [package.md](./design/package.md) |
-| Slice 0 夹具 | [testing.md](./design/testing.md#2-slice-0-固定夹具) |
-| CLI/E2E | [cli.md](./design/cli.md)、[testing.md](./design/testing.md#9-packagecli-测试) |
+Mutation core/intent, result ledger, candidate retention, atomic mutation completion and typed initial batch publication keep their [historical evidence](superpowers/plans/2026-09-09-slice2-business-routing.md). Their unfinished source readers/authorization/loop are deferred research, not MVP functional requirements.
+
+| Requirement | Design mechanism | Verification |
+|---|---|---|
+| No external I/O in write transactions | workflow and storage protocols | transaction instrumentation |
+| Conservative budget accounting | budget and call ledgers | concurrent reservation and unknown-boundary tests |
+| Stable idempotency | stage attempt and call identities | duplicate command and restart tests |
+| Exact Docker cleanup scope | SandboxExecution resource plan | unrelated-resource refusal tests |
+| Process crash recovery | OS lock plus domain ledgers | forced subprocess termination suite |
+| Security and privacy | strict configuration, private paths, adapter redaction | path, secret, HTTP, and package-safe tests |
+| Reproducibility | revisions, canonical digests, image/toolchain identity | deterministic fixtures and package bytes |
+| Auditability | run events, attempts, CallTrace, occurrences, receipts | cross-ledger integrity tests |
+| Local concurrency | per-run locks plus expected versions | same-run conflict and different-run concurrency |
+| Go release quality | repository gates | test, vet, race, cross-build, patch check |
+
+## Slice checkpoints
+
+| Slice | Scope | Evidence |
+|---|---|---|
+| 0 | direct Docker execution, watchdog, Judge foundation | docs/evidence/slice0-verification.md |
+| 1 | lightweight local workflow, persistence, ledgers, Fake pipeline, CLI | [Slice 1 verification evidence](evidence/slice1-verification.md) and architecture check |
+| 2 | request, idea, statement, model, similarity | [accepted live preview](evidence/slice2-live-preview.md), [remaining routing plan](superpowers/plans/2026-09-09-slice2-business-routing.md); no READY |
+| 3 | solution and Docker Judge | compile/run/checker evidence |
+| 4 | data and quality | differential and gate evidence |
+| 5 | package and E2E | verification receipt and reproducible package |
+
+## Architecture boundary checks
+
+scripts/check-slice1-architecture.ps1 discovers current ADRs, designs, Phase 1 specifications, architecture, plan, traceability, README files, and TODO. It enforces accepted lightweight terminology and rejects active documentation that reintroduces the superseded general-runtime mechanisms. Rejected alternatives remain documented only in the two current decision records or explicitly delimited historical ADR notes.
+
+The library amendment adds required in-process/authoritative-storage documentation checks. internal/workflow/source_boundary_test.go enforces provider/scheduler import locations across production Go source, including nested directories. CI runs both checks, full race tests and vet, verifies module tidiness and cross-builds Windows and Linux without enabling paid-provider smoke tests.

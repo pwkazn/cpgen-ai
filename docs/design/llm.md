@@ -1,181 +1,133 @@
-# LLM、Prompt 与结构化输出设计
+# LLM, Prompt, and Structured-output Design
 
-## 1. 边界
+Status: Current under ADR-0006
 
-LLM 只提出 `IdeaCandidate/ProblemSpec/SolutionBundle/TestPlan` 等候选，不决定质量门禁是否通过。Step 负责领域语义校验，Orchestrator 负责状态和制品提交，编译器/Judge/Similarity Policy 等确定性组件负责可执行验证。
+Real Idea/Statement assembly uses strict versioned content drafts and local domain binding. Models do not calculate domain hashes or choose request/resource identities. Built-in historical prompt versions remain available for receipt validation; the new draft prompts and their one-call format repairs have separate exact schema/template references. See [content draft evidence](../evidence/slice2-content-drafts.md).
 
-MVP 实现一个 provider adapter；普通 Step 只依赖 `MeteredLLM`，PROBING 路径只依赖 Orchestrator 专用的 `MeteredDependencyProber`，二者再调用本文件的低层 `LLMAdapter`。所谓 OpenAI-compatible 仅是 adapter protocol 名称，不允许业务代码依赖供应商字段。
+## 1. Boundary
 
-## 2. 请求与响应契约
+Model calls are ordinary stage-local effects through MeteredLLM. The coordinator and stage code depend on a provider-neutral interface; provider fields remain inside adapters. Model output is always a candidate that deterministic validation may reject.
 
-```go
-type GenerateRequest struct {
-	Prompt        PromptRef
-	Schema        OutputSchemaRef
-	Variables     json.RawMessage
-	Sampling      SamplingPolicy
-	MaxOutput     OutputLimit
-}
+The model port cannot access SQLite, artifact directories, Docker, run locks, or unrestricted logs.
 
-type LLMAdapter interface {
-	Generate(ctx context.Context, auth DispatchAuthorization, req GenerateRequest) (LLMAttemptOutcome, error)
-	Probe(ctx context.Context, auth DispatchAuthorization, req LLMProbeRequest) (CapabilityAttemptOutcome, error)
-}
+The 2026-09-08 ADR-0006 amendment selects LangChainGo `v0.1.14`, confined to `internal/agent`, with `port.MeteredLLM` unchanged. `NewLangChain` shares the existing HTTP adapter's endpoint, canonical identity, prompt/schema registry, error classification and strict response validation. Contract tests compare both adapters before application wiring changes.
 
-type LLMAttemptOutcome struct {
-	CallID   AttemptCallID
-	Response *LLMAttemptResponse
-	Failure  *PhysicalPortFailure
-}
+The library's HTTP doer is restricted to one physical request per invocation. CPGen restores the admitted top_p value (dropped by this library version), selects max_tokens explicitly, rejects other semantic request rewrites, and forwards only canonical CPGen headers/body to the policy-controlled transport. Ambient OpenAI environment configuration cannot override the configured provider or add organization headers. SDK error strings and lossy response DTOs are never persisted; the original capped bytes determine validation and missing-usage accounting. Explicit non-completion finish reasons, including length and content_filter, reject even syntactically valid JSON.
 
-type LLMAttemptResponse struct {
-	RawJSON       json.RawMessage
-	RawBlob       *PendingArtifact
-	ProviderMeta  ProviderResponseMetadata
-	Usage         Usage
-}
+The standalone adapter does not provide durable metering by itself. The LLM-03 dispatch checkpoint adds `port.PhysicalLLM` and `application.LLMCalls`: planning validates the same request and endpoint policies without I/O; one `GeneratePhysical` call performs at most one HTTP exchange and returns accounting even on failure. CallCoordinator reserves the complete retry plan, supplies physical identities, settles each response and returns the database CallTrace. Logical response usage sums settled reservations across attempts. Missing usage and cost without verified pricing are charged at their explicit reservation ceilings; this is conservative accounting, not a provider invoice.
 
-type GenerateResponse struct {
-	Structured    json.RawMessage
-	RawBlob       *PendingArtifact
-	ProviderMeta  ProviderResponseMetadata
-	Usage         Usage
-	Provenance    LLMProvenance
-}
-```
+Only a newly issued grant from a PREPARED row authorizes a send. Resuming DISPATCHING/SENT without a sealed receipt resolves to UNKNOWN without another HTTP request. `NewReplayableLLMCalls` reserves private response artifact slots before provider dispatch and publishes a request-bound receipt through the existing Blob writer/pin protocol. Recovery finishes SEALED publication, verifies bytes and revalidates the strict schema before restoring provider accounting. A sealed publication failure keeps its reservations for local reconciliation. The executor must hold the run lock and shared artifact-maintenance lock. The ledger-only constructor retains `ErrLLMReplayUnavailable`; neither constructor recreates completed responses with another paid request.
 
-请求中不得出现任意执行身份、工具、shell、文件路径、网络地址或动态 JSON Schema。Step 只能从编译进程序的 allowlist 选择 `PromptRef`、`OutputSchemaRef` 和 `SamplingPolicy`；用户输入只进入经过编码的 `Variables`。Step-facing MeteredLLM 接收该请求，创建/claim AttemptCall 后才把 sealed DispatchAuthorization 与请求分别传给低层 LLMAdapter。
+Private receipt bodies contain structured output, allowlisted metadata and accounting; credentials and prompt variables are excluded. The returned `RawBlob` is pending occurrence evidence for atomic stage commit, not a package export. Unused slots release byte reservations; finalized receipts remain pinned until attachment. Local publication receives its own artifact grant and reaches a terminal producing call atomically with stage attachment and byte settlement. Rejected-stage cleanup charges already-published physical bytes and releases the private pin. Full verification status is tracked in [replay evidence](../evidence/slice2-private-llm-replay.md) and the later cache checkpoint. Bounded JSON repair and private cache provenance are implemented as described below. Explicit preview, Solution and full MVP selectors now wire real stages through the CLI; omitted selection retains Fake behavior. See [MVP acceptance](../evidence/mvp-package-commit-foundation.md).
 
-底层 adapter 每次只执行一个已授权 HTTP attempt，`LLMAttemptOutcome` 的 Response/Failure 恰有一个并始终回显物理 `CallID`；429/5xx、协议错误和供应商拒绝是 typed `PhysicalPortFailure`，普通 `error` 只用于 context/内部错误。Adapter 不知道重试、cache 或 logical operation，也不能构造公共 CallTrace。响应/失败 Blob 只能写入该 authorization 预声明的 `MeteredArtifactSink` writer。Metered proxy 核对 CallID、执行传输/大小/usage 校验，把所有物理尝试组装为 `MeteredOutcome[GenerateResponse]`；成功 provenance 内的 CallTrace 必须与 wrapper 相同，失败也保留决定性 result call，Step 再按固定顺序解析 Schema 和领域规则。
+After a dispatch attempt, receipt settlement uses a bounded five-second context that survives caller cancellation. SQLite accepts a stale receipt version only when the run advanced exactly once due to a matching pending cancel, and the same stage/attempt remains RUNNING; other version conflicts remain errors. Planning, authorization and retry waits retain the caller's cancellation context. Retry waits honor the later of persisted backoff and the adapter's Retry-After value, capped separately at one minute.
 
-Idea Prompt 只输出 `IdeaCandidate[]` 候选字段，不能输出或覆盖 `IdeaSelection`、feasibility verdict、effective seed、request digest 或 revision；这些由确定性 Idea Step 按 [Idea/Statement 契约](./idea-statement.md) 计算。Statement Prompt 只接收 `StatementInput` 已解析出的 selected candidate 和允许公开的 request 约束字段，输出 ProblemSpec 候选；request snapshot、batch/selection/selected idea/policy 的 digest 链由 Step 包装并在提交时校验，不能信任模型自行回显。
+## 2. Request and response contracts
 
-## 3. Prompt 版本
+~~~text
+LLMRequest
+  operation_kind
+  prompt_ref
+  prompt_version
+  template_digest
+  model_policy_ref
+  canonical_messages
+  response_schema_ref
+  response_schema_digest
+  temperature
+  max_output_tokens
+  logical_idempotency_key
+  privacy_classification
 
-目录约定：
+LLMResult
+  structured_value
+  canonical_response_digest
+  provider_request_id?
+  usage
+  finish_reason
+  CallTrace
+  safety_metadata
+~~~
 
-```text
-prompts/<step>/<version>/
-├── system.tmpl
-├── user.tmpl
-├── output.schema.json
-├── policy.yaml
-└── README.md
-```
+Messages use typed roles and canonical UTF-8 encoding. Tool calls, images, streaming, or provider extensions are disabled unless a later version explicitly adds them.
 
-- 模板使用 Go `text/template`，启用 `missingkey=error`；变量先按目标格式编码，禁止把用户内容解释为模板片段。
-- `PromptRef` 绑定 step、语义版本和上述文件的组合 digest。运行时文件与编译时登记 digest 不一致则失败关闭。
-- system/user 消息边界由 adapter protocol 固定；不得让模型输出覆盖 system prompt、Schema、预算或工具权限。
-- `policy.yaml` 声明允许的模型能力、采样范围、最大输出、最多结构修复次数和敏感字段策略，内容 digest 进入 PromptRef。
-- `policy.yaml` 还必须按变量字段声明本 prompt 的 data classes；渲染前 Privacy Gate 验证它们是 ApplicationConfig `llm.privacy_policy.allowed_data_classes` 的子集。
-- Prompt 的行为变化必须增加版本；只改注释且 digest 变化仍会 cache miss，避免猜测是否有语义影响。
+## 3. Prompt versions
 
-## 4. 严格结构化输出
+Every prompt has a stable reference, semantic version, template digest, expected input type, output schema, and migration policy. Run records store the prompt reference and digest used by each call.
 
-每个 Schema 必须：
+Templates are rendered from typed values. Untrusted request text is delimited as data and cannot change system policy, tool access, artifact paths, or budget rules.
 
-- 有稳定 `$id/schema_version`，对象默认 `additionalProperties: false`。
-- 限制字符串、数组、嵌套深度和总代码字节数。
-- 对 enum、语言、checker kind、复杂度格式和安全相对路径使用 allowlist。
-- 将 Markdown、源码和样例拆成显式字段，不能从自由文本中反向猜结构。
+## 4. Strict structured output
 
-处理顺序：
+Adapters request the narrowest supported structured-output mode, then independently validate:
 
-1. 限制响应字节数，校验 Content-Type/供应商 envelope 和 finish reason。
-2. 只接受一个 JSON document；UTF-8、重复 key、非有限数字、尾随内容或未知字段均拒绝。
-3. 按登记的 JSON Schema 校验。
-4. 反序列化为对应 Go DTO，再执行跨字段/领域校验。
-5. 领域对象只有在 Step 成功且 Orchestrator attempt 事务提交后才成为 current output。
+- maximum encoded bytes;
+- UTF-8 and JSON syntax;
+- exact schema version;
+- unknown and duplicate fields;
+- required fields and enum values;
+- string normalization and length;
+- integer ranges and finite numbers;
+- cross-field domain invariants.
 
-不得用宽松 `map[string]any`、Markdown code-fence 抽取或静默默认值让无效响应通过。
+A provider claiming schema success does not bypass local validation. Invalid output becomes a typed stage result with sanitized evidence.
 
-## 5. 修复与重试
+## 5. Stage-local repair and retry
 
-- 传输层 connect reset、429 和明确可重试 5xx 按 provider policy 重试；每个物理 HTTP attempt 都先取得独立预算 reservation。
-- 供应商明确未开始生成时可按预算策略释放 usage 预留；是否已执行未知则标记 `UNKNOWN` 并保守结算。
-- JSON/Schema 无效不会作为同一 HTTP 请求的透明重试。Step 可以发起最多一次版本化的 `schema_repair` LLM 调用，输入只含按数据字段编码且受原响应上限约束的无效响应、其 Blob digest、截断后的结构错误和原任务必要上下文；它是新的物理调用、attempt-call ID 和预算记录。
-- 确定性修复仅允许移除 UTF-8 BOM 等不改变 JSON 数据模型的规范化，并必须记录修复器版本；禁止猜引号、字段或代码。
-- 修复后仍无效，Step 返回 `RetryableFailure(schema_invalid)`；是否重新生成由 Policy 和阶段预算决定。
-- 内容违反领域约束时走定向 revision/Agent 重试，不伪装成网络故障。Provider/模型能力暂不可用为 `Blocked`，认证或不兼容配置为 `PermanentFailure`。
+`application.StructuredLLMCalls` permits at most one configured JSON-format repair. Before the original call it binds the complete repair policy, compiled prompt version and implementation revision into the provider policy digest, and preflights both prompt/schema bindings. Recovery with a different allowance or prompt is rejected. Configuration defaults to zero repairs and accepts only zero or one.
 
-## 6. 计量、缓存与幂等
+The repair request includes the original task variables and canonical local error codes. It never includes rejected model output, provider-controlled field paths or fragments. Eligible errors are JSON syntax, duplicate/unknown fields, schema version and typed decoding failures. Domain-semantic rejection, HTTP/envelope failures, truncation, oversized output, invalid UTF-8 and missing local validators do not trigger format repair.
 
-### PricingPolicyRef
+Eligible validation failures are persisted as bounded `cpgen.llm-validation/v1` private receipts containing code-only diagnostics and accounting. `ReadFormatRepair` verifies the receipt against the exact terminal physical failure before it can authorize repair planning. The one repair has its own deterministic logical identity and full durable transport plan; it cannot recursively repair its own rejection. `StructuredLLMResult` returns each call's trace and artifact separately and sums settled usage across both calls. The final response keeps the producing call's trace and usage. A successful stage must attach both validation evidence and repaired output in its atomic occurrence commit.
 
-`max_cost_usd` 使用版本化本地定价策略确定性核算，不假设 Provider 会返回可信金额：
+Transient transport failures may be retried within the same foreground stage attempt and budget. Every physical call gets a CallTrace record while the logical idempotency key stays stable. Retry stops on success, blocking, review, permanent failure, cancellation, or budget exhaustion.
 
-```text
-PricingPolicy
-  schema_version, policy_id, currency(USD), accounting_unit(micro_usd)
-  rates[]
-    effective_model_identity
-    usage_category(input|cached_input|output|reasoning|...)
-    micro_usd_per_million_units
-  input_counter_ref/version, policy_digest
-```
+If the provider send boundary is unknown, the adapter queries the original provider identity when possible. Otherwise it conservatively settles the reservation and returns a typed review, blocking, or failure outcome. It never sends the same logical work under a new key merely because the process restarted.
 
-- Policy 文件和 digest 进入去密配置快照、reservation 与 `LLMProvenance`。每个 effective model 及 Provider 可能返回的每种 billable usage category 必须精确匹配；无匹配项在物理请求前失败关闭。
-- 调用前使用版本化 tokenizer/counter 得到 input units；无法精确计数时使用配置证明安全的 context 上限。output/reasoning 使用请求允许的最大值，cached input 未知时按普通 input 较高费率预留，保证预留是上界。
-- 结算使用 Provider 返回且通过一致性校验的 usage units × 固定整数费率；Provider 若返回可信 billed amount 只作对账证据，不替代本地 Policy。usage 缺失/矛盾时按已预留上限结算并 warning。
-- 所有乘除法使用溢出检查、整数 micro-USD 和明确向上取整。Policy 变化影响新 reservation/成本报告，但不改变已缓存模型字节；历史 provenance 保留原 Policy digest。
-- 该预算是固定 Policy 下的可审计成本上限，不宣称等同供应商最终账单、税费或汇率结果。非 USD 计费必须新增明确 currency policy，MVP 不做动态汇率换算。
+## 6. Metering and accounting
 
-### Cache key
+Before a physical request, MeteredLLM reserves:
 
-LLM cache key 至少包含：
+- one model call;
+- maximum input and output tokens under the selected tokenizer policy;
+- maximum configured cost;
+- optional artifact bytes for captured package-safe evidence.
 
-```text
-provider protocol + service identity + effective model identity
-prompt digest + output Schema digest + normalized variables digest
-sampling + max output + adapter version
-```
+After response or failure it settles actual usage where trustworthy and stores pricing policy, tokenizer revision, request digest, provider identity, timings, retry classification, and CallTrace. Missing provider usage is derived conservatively under a versioned rule.
 
-- cache value 保存结构化响应 Blob、原始响应 Blob（若保留）、usage、finish reason 和完整 provenance；命中时仍由 Orchestrator 为当前 run 创建新的 ArtifactOccurrence。
-- `effective model identity` 在请求前由配置、别名解析规则和未过期 capability snapshot 得到。响应的 reported model 必须与允许的 identity/alias 集一致，否则响应失败关闭且不写正常 cache；reported value 只进入 provenance，不能在请求后反向改变本次预查键。
-- cache 命中不消耗 provider call/token/cost，但必须重新执行当前 Schema 和领域校验；Schema/prompt/adapter 任一 digest 改变即 miss。
-- 非零采样结果也可作为“精确重放缓存”复用；不能把同一输入可能产生相同结果称为模型确定性。
-- 每个物理请求有稳定 idempotency key。供应商支持时传递该 key；不支持时仅用于本地审计，超时后的远端执行状态仍按 UNKNOWN 结算。
-- Provider usage 缺失或自相矛盾时按预留上限结算并产生 warning，不用估算值伪装成实际账单。
+Stage code sees only the typed result and read-only remaining-budget summary.
 
-## 7. Provenance 与隐私
+## 7. Cache
 
-`LLMProvenance` 至少记录：
+The canonical cache key includes adapter protocol, provider and model identity, prompt reference and digest, canonical messages, response schema digest, sampling parameters, policy digest, and privacy partition.
 
-```text
-provider/protocol/service_identity, requested_model, reported_model
-prompt_ref/digest, schema_ref/digest, variables_digest, sampling
-call_trace(CallTrace), logical_ordinal, logical_idempotency_key
-request_started_at, response_finished_at, usage, finish_reason
-raw_request_digest?, raw_response_digest?, adapter_version
-pricing_policy_ref/digest, reserved_micro_usd, settled_micro_usd
-privacy_policy_version/digest, declared_data_classes[]
-```
+A cache hit must:
 
-- 密钥、Authorization header 和供应商请求 ID 中的敏感部分不得进入日志或题包。
-- 未发布题面、源码和完整 prompt 默认只保存在本地 BlobStore；普通日志只写 digest、大小、耗时和错误码。
-- 发送到模型的每个字段必须被 PromptRef data-class 声明覆盖，并匹配 provider 的版本化 privacy policy。remote endpoint 只有显式 `allow_remote_submission=true` 才可发送；缺失/越权时不创建物理 reservation、不发网络请求，Step 返回 `NeedsReview(llm_remote_submission_not_authorized|data_class_not_allowed)`。
-- `api_key/secret`、完整第三方题面/检索正文、宿主路径和未脱敏环境信息是不可授权类别，禁止进入任何 prompt。Similarity 风险反馈只能使用 package-safe 元数据/本地 reason code，不复制第三方正文。
-- `doctor` 展示 endpoint identity/class、Policy version 和允许的数据类别，但不发送题目或 prompt。
-- 模型返回的 URL、文件名、命令、依赖和“工具调用”都只是字符串数据；除非对应 Step Schema 明确允许并由类型化端口重新校验，否则不得执行。
+- verify policy and optional expiry;
+- retain the source call;
+- verify referenced Blobs;
+- create current-run logical call and artifact provenance;
+- apply the documented logical accounting;
+- pass the same local schema and domain validation.
 
-## 8. Provider capability 与故障
+Private prompts or responses are never placed in a shared cache partition.
 
-启动/首次调用验证：
+`application.StructuredLLMCache` implements a private, same-run response cache. It normalizes logical call identity while retaining the original provider request policy and all semantic inputs. Only stage-committed successful output can be published; a repaired success is verified through its original rejection and deterministic repair call. The source is the terminal local artifact-producing call, and its private receipt retains the exact original provider call.
 
-- endpoint 可达、TLS/认证配置有效。
-- 目标模型可用，支持所需最大上下文/输出和结构化 JSON 模式。
-- adapter 能取得或可靠推导 finish reason、usage 和模型标识。
+`CacheService.ReuseValidated` performs the owning adapter's strict validation before creating current-call provenance. A hit returns a zero-usage response with a CACHE_HIT trace and `PendingCacheReuse`, with no new writer token or provider physical calls. Later attempts in the same run are allowed by migration 21; cross-run sources remain forbidden. Cache keys are immutable and private entries have no configured TTL in this bridge. Missing/corrupt files, invalidated entries and changed policies cannot silently provide an output. The application factory still needs to compose this bridge with generation and stage commits.
 
-健康快照有短 TTL，不能永久证明模型仍可用。运行中暂时不可达、限流窗口耗尽或模型暂时下线时，在有限物理重试后返回 `Blocked(dependency=llm_provider)`；请求 Schema、认证或 adapter protocol 不兼容则失败关闭。恢复从原 Step 和输入 digest 继续。
+## 8. Provenance and privacy
 
-## 9. 测试
+Raw prompts and responses are private by default. Logs contain IDs, digests, sizes, timings, usage, and sanitized error codes. Package-safe projections must be explicitly declared and independently reviewed before they can become package occurrences.
 
-- Fake provider 覆盖成功、截断、空响应、重复 key、尾随文本、未知字段、Schema/领域错误和错误 finish reason。
-- 429/5xx/timeout 的每个物理请求均有 reservation；额度耗尽后不再请求。
-- schema repair 只运行一次并独立计费；修复失败返回可审计 RetryableFailure。
-- prompt/template/schema digest 任一变化都 cache miss；cache hit 重新校验并创建当前 occurrence。
-- provider 报告不同模型、缺失/矛盾 usage、未知执行状态时失败关闭或保守结算。
-- effective model/usage category 无定价、Policy digest 变化、整数舍入/溢出和最大 input/output 预留均有固定成本向量；无定价时请求数为零。
-- prompt injection、伪造路径/命令/工具调用不能越过 DTO、Schema 和 StepServices 权限。
-- public/private remote 未显式授权或 PromptRef data class 超出 allowlist 时，reservation/网络请求数为零并产生可审核证据；不可授权类别始终拒绝。
-- 日志、CLI JSON、QualityReport 和题包中不存在密钥或完整敏感请求。
+Secrets, API keys, authorization headers, local paths, and private source content are removed from errors, traces, and exported reports.
+
+## 9. Provider capability and failure
+
+At command start or first use, an adapter may perform an ordinary metered capability check for endpoint reachability, model compatibility, response-schema support, and policy constraints. Failure blocks the current stage with dependency identity, policy digest, evidence, and retry-after time.
+
+Manual resume starts a fresh attempt of the same stage and repeats the relevant check through MeteredLLM before sending ordinary work. Prior health data is diagnostic only.
+
+## 10. Tests
+
+Tests use a deterministic Fake adapter and cover canonical request encoding, schema validation, repair bounds, stable identity, physical CallTrace sequence, cancellation, timeout, response-size cap, unknown send boundary, conservative usage, cache provenance, privacy redaction, and fresh dependency checks after a blocked restart.
