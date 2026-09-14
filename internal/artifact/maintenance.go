@@ -1,4 +1,4 @@
-package application
+package artifact
 
 import (
 	"context"
@@ -11,20 +11,20 @@ import (
 	"cpgen/internal/runlock"
 )
 
-type ArtifactMaintenance struct {
+type Maintenance struct {
 	locks    *runlock.Manager
 	metadata port.GCMetadataStore
 	blobs    *blob.Store
 }
 
-func NewArtifactMaintenance(locks *runlock.Manager, metadata port.GCMetadataStore, blobs *blob.Store) (*ArtifactMaintenance, error) {
+func NewMaintenance(locks *runlock.Manager, metadata port.GCMetadataStore, blobs *blob.Store) (*Maintenance, error) {
 	if locks == nil || metadata == nil || blobs == nil {
 		return nil, errors.New("artifact maintenance dependencies are required")
 	}
-	return &ArtifactMaintenance{locks: locks, metadata: metadata, blobs: blobs}, nil
+	return &Maintenance{locks: locks, metadata: metadata, blobs: blobs}, nil
 }
 
-func (m *ArtifactMaintenance) CollectGarbage(ctx context.Context) (domain.GCReport, error) {
+func (m *Maintenance) CollectGarbage(ctx context.Context) (domain.GCReport, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.GCReport{}, err
 	}
@@ -64,7 +64,7 @@ func (m *ArtifactMaintenance) CollectGarbage(ctx context.Context) (domain.GCRepo
 	return report, nil
 }
 
-func (m *ArtifactMaintenance) ReconcileTrash(ctx context.Context) (domain.GCReport, error) {
+func (m *Maintenance) ReconcileTrash(ctx context.Context) (domain.GCReport, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.GCReport{}, err
 	}

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
@@ -19,8 +19,8 @@ func TestSandboxArtifactPublicationReplaysAndAttachesWithoutDoubleCharge(t *test
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000f4", LogicalOperationID: "solution-source", Kind: domain.CallSandboxCompile, ScopeDigest: domain.SumBytes([]byte("accepted solution source")), ExpectedRunVersion: 2}
-	newSink := func() *application.SandboxArtifactSink {
-		sink, err := application.NewSandboxArtifactSink(f.store, blobs, f.clock, identity)
+	newSink := func() *sandboxexec.ArtifactSink {
+		sink, err := sandboxexec.NewArtifactSink(f.store, blobs, f.clock, identity)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -73,7 +73,7 @@ func TestSandboxArtifactAbortReleasesUnusedBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000f5", LogicalOperationID: "compile", Kind: domain.CallSandboxCompile, ScopeDigest: domain.SumBytes([]byte("compile")), ExpectedRunVersion: 2}
-	sink, err := application.NewSandboxArtifactSink(f.store, blobs, f.clock, identity)
+	sink, err := sandboxexec.NewArtifactSink(f.store, blobs, f.clock, identity)
 	if err != nil {
 		t.Fatal(err)
 	}

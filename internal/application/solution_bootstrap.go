@@ -7,14 +7,15 @@ import (
 	"path/filepath"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/config"
 )
 
 // Bootstrap pins the local Engine and image lock before any live generation.
 // Only the explicit forward revision calls this assembly function.
-func bootstrapSolutionSandbox(ctx context.Context, cfg config.Config) (DockerSandboxConfig, func() error, error) {
-	var empty DockerSandboxConfig
+func bootstrapSolutionSandbox(ctx context.Context, cfg config.Config) (sandboxexec.Config, func() error, error) {
+	var empty sandboxexec.Config
 	if cfg.Sandbox == nil {
 		return empty, nil, errors.New("Solution workflow requires sandbox configuration")
 	}
@@ -46,5 +47,5 @@ func bootstrapSolutionSandbox(ctx context.Context, cfg config.Config) (DockerSan
 		_ = engine.Close()
 		return empty, nil, err
 	}
-	return DockerSandboxConfig{Engine: engine, Config: engineConfig, Lock: lock, EngineIdentity: static.EngineIdentityDigest, Watchdog: watchdog, Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: cfg.Runtime.CleanupWait}}, engine.Close, nil
+	return sandboxexec.Config{Engine: engine, Config: engineConfig, Lock: lock, EngineIdentity: static.EngineIdentityDigest, Watchdog: watchdog, Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: cfg.Runtime.CleanupWait}}, engine.Close, nil
 }

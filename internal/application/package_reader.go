@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
 	"cpgen/internal/judge"
 	"cpgen/internal/packageprobe"
@@ -187,7 +188,7 @@ func (s *PackageReader) ReadArchive(ctx context.Context, runID domain.RunID) ([]
 	if item.OccurrenceID != record.OccurrenceID || item.Blob.Blob != record.Binding.Archive || item.Blob.LogicalPath != "package/problem.zip" || item.Blob.Role != domain.ArtifactOutput || item.Blob.MediaType != "application/zip" || item.Blob.Provenance.SchemaVersion != "cpgen.package/v2" || item.Blob.Provenance.Producer != generationPackageProducer || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != qualityDigest {
 		return nil, empty, errors.New("package archive provenance differs")
 	}
-	raw, err := readSolutionVerificationBlob(ctx, s.blobs, record.Binding.Archive, 65<<20)
+	raw, err := artifact.ReadVerified(ctx, s.blobs, record.Binding.Archive, 65<<20)
 	if err != nil {
 		return nil, empty, err
 	}

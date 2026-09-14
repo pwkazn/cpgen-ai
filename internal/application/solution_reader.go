@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/similarity"
 )
@@ -22,7 +24,7 @@ type CommittedSimilarityReader interface {
 type SolutionReader struct {
 	similarity CommittedSimilarityReader
 	generation *GenerationReader
-	calls      CommittedDraftReader
+	calls      durable.CommittedDraftReader
 	store      SandboxEvidenceReadStore
 	blobs      port.VerifiedBlobReader
 	revision   string
@@ -100,7 +102,7 @@ type solutionVerificationReadStore interface {
 // sample execution requests, Docker receipts, retained artifacts and cleanup.
 // Configuration supplies the frozen toolchain/Engine policy only; this method
 // never starts Docker, writes artifacts, or calls either external provider.
-func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunID, config SandboxReadPolicy) (SolutionVerificationReport, error) {
+func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunID, config sandboxexec.ReadPolicy) (SolutionVerificationReport, error) {
 	var empty SolutionVerificationReport
 	store := s.store
 	input, err := s.ReadInput(ctx, runID)
@@ -142,7 +144,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 			return nil, fmt.Errorf("verification artifact is absent or differs: %s", path)
 		}
 		used[path] = true
-		return readSolutionVerificationBlob(ctx, blobs, expected, limit)
+		return artifact.ReadVerified(ctx, blobs, expected, limit)
 	}
 	item, found := items["solution/verification.json"]
 	if !found || item.Blob.Blob.Digest != *attempt.OutputDigest || item.Blob.MediaType != "application/vnd.cpgen.solution-verification+json" || item.Blob.Provenance.SchemaVersion != solutionVerificationSchema || item.Blob.Provenance.Producer != "solution-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != content.ContentDigest {
@@ -185,7 +187,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		return err
 	}
 	verifyResult := func(kind domain.CallKind, request any, result any, build func(docker.PlanIdentity) (port.ContainerPlan, error)) error {
-		identity, planIdentity, err := sandboxReadOperationIdentity(config, kind, request)
+		identity, planIdentity, err := sandboxexec.ReadOperationIdentity(config, kind, request)
 		if err != nil {
 			return err
 		}
@@ -202,7 +204,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		if err != nil {
 			return err
 		}
-		var receipt sandboxResultReceipt[json.RawMessage]
+		var receipt sandboxexec.ResultReceipt[json.RawMessage]
 		if err := json.Unmarshal(encoded, &receipt); err != nil {
 			return err
 		}
@@ -213,7 +215,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		if receipt.Schema != "cpgen.sandbox-result/v1" || receipt.Scope != identity.ScopeDigest || receipt.Plan != plan.PlanDigest || !bytes.Equal(receipt.Result, expected) {
 			return errors.New("verification result differs from its Docker receipt")
 		}
-		return verifySandboxCleaned(ctx, store, identity, plan)
+		return sandboxexec.VerifyCleaned(ctx, store, identity, plan)
 	}
 	language, filename, _, compiler, err := solutionCompiler(content.Language, config.Lock)
 	if err != nil {
@@ -270,7 +272,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 			}
 		}
 		if sample.ActualTokenDigest != "" {
-			actual, err := readSolutionVerificationBlob(ctx, blobs, sample.Result.Stdout.Blob, 1<<20)
+			actual, err := artifact.ReadVerified(ctx, blobs, sample.Result.Stdout.Blob, 1<<20)
 			if err != nil {
 				return empty, err
 			}
@@ -283,22 +285,4 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		return empty, errors.New("verification stage contains unrelated artifacts")
 	}
 	return report, nil
-}
-
-func readSolutionVerificationBlob(ctx context.Context, blobs port.VerifiedBlobReader, ref domain.BlobRef, limit int64) ([]byte, error) {
-	if ref.Size > limit {
-		return nil, errors.New("verification artifact exceeds byte bound")
-	}
-	reader, err := blobs.OpenVerified(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	raw, readErr := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err := errors.Join(readErr, reader.Close()); err != nil {
-		return nil, err
-	}
-	if int64(len(raw)) > limit {
-		return nil, errors.New("verification artifact exceeds byte bound")
-	}
-	return raw, nil
 }

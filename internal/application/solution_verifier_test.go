@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
@@ -26,7 +27,7 @@ func TestSolutionVerifierCompilesBothProgramsAndChecksSamples(t *testing.T) {
 				t.Fatal(err)
 			}
 			identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000d8", LogicalOperationID: "solution-verification", Kind: domain.CallSandboxCompile, ScopeDigest: content.ContentDigest, ExpectedRunVersion: 2}
-			publisher, err := application.NewSandboxArtifactSink(f.store, blobs, f.clock, identity)
+			publisher, err := sandboxexec.NewArtifactSink(f.store, blobs, f.clock, identity)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,7 +134,7 @@ func solutionTestLock(t *testing.T) toolchain.Lock {
 }
 
 type solutionSandboxFixture struct {
-	publisher      *application.SandboxArtifactSink
+	publisher      *sandboxexec.ArtifactSink
 	mode, expected string
 	compiles, runs int
 	artifacts      []domain.PendingArtifact

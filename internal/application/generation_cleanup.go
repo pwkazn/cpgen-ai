@@ -7,6 +7,7 @@ import (
 
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -15,13 +16,13 @@ func (s *DraftExecution) draftCall(runID domain.RunID, version int64, attempt do
 	if err != nil {
 		return domain.OpenCallRequest{}, port.GenerateRequest{}, err
 	}
-	logical := coordinatorMutationID("generation", runID, attempt.AttemptID, attempt.StageName, "draft/v1")
+	logical := durable.MutationID("generation", runID, attempt.AttemptID, attempt.StageName, "draft/v1")
 	request := port.GenerateRequest{Prompt: prompt, Schema: schema, Variables: append(json.RawMessage(nil), variables...), Sampling: s.config.Content.Sampling, MaxOutput: s.config.Content.MaxOutput, LogicalIdempotencyKey: logical, ProviderPolicyDigest: s.config.Content.ProviderPolicyDigest, PrivacyClassification: "private"}
 	plan, err := s.config.LLM.PlanGenerate(request)
 	if err != nil {
 		return domain.OpenCallRequest{}, request, err
 	}
-	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallLLMGenerate, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: s.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
+	open := domain.OpenCallRequest{ID: domain.CallRecordID(durable.MutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallLLMGenerate, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: s.config.RetryPolicy, IdempotencyKey: durable.MutationID("open", logical), At: attempt.StartedAt}
 	return open, request, nil
 }
 
@@ -93,7 +94,7 @@ func (s *DraftExecution) reconcileDraftRequest(ctx context.Context, current doma
 	if err != nil {
 		return err
 	}
-	ledger, err := NewRunBoundLLMLedger(s.config.Store, runID, attempt.StageName, attempt.AttemptID)
+	ledger, err := durable.NewRunLedger(s.config.Store, runID, attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return err
 	}
@@ -104,11 +105,11 @@ func (s *DraftExecution) reconcileDraftRequest(ctx context.Context, current doma
 	if existing.Kind == domain.CallCacheReuse {
 		// Cache admission is atomic and has no partially dispatched state. Check
 		// its exact immutable identity without performing another cache lookup.
-		cache, err := NewStructuredLLMCache(calls, s.config.Store, s.config.Locks)
+		cache, err := durable.NewStructuredLLMCache(calls, s.config.Store, s.config.Locks)
 		if err != nil {
 			return err
 		}
-		bound, _, key, _, err := cache.identity(open, request)
+		bound, _, key, _, err := cache.Identity(open, request)
 		if err != nil {
 			return err
 		}

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -41,7 +41,7 @@ func TestDispatchCoordinatorRetriesCompletedFailureAndReturnsDatabaseTrace(t *te
 			},
 		},
 	}
-	coordinator, err := application.NewCallCoordinator[string](fixture.store, adapter, fixture.clock)
+	coordinator, err := durable.NewCallCoordinator[string](fixture.store, adapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestMeteredOutcomeEveryTypedPortFailureHasTerminalDatabaseTrace(t *testing.
 				plan:       domain.CallPlanDecision{Plan: &domain.CallPlan{Digest: domain.SumBytes([]byte("one call plan")), Calls: []domain.PhysicalCallPlan{coordinatorPhysicalPlan(1, 1)}}},
 				executions: []domain.PhysicalExecution[int]{execution},
 			}
-			coordinator, err := application.NewCallCoordinator[int](fixture.store, adapter, fixture.clock)
+			coordinator, err := durable.NewCallCoordinator[int](fixture.store, adapter, fixture.clock)
 			if err != nil {
 				t.Fatalf("NewCallCoordinator: %v", err)
 			}
@@ -126,7 +126,7 @@ func TestDispatchCoordinatorPersistsPolicyPreRejectionWithoutPhysicalCall(t *tes
 	fixture := newCoordinatorFixture(t, "30", domain.BudgetLimits{MaxActiveTimeMilliseconds: 1000})
 	failure := domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}
 	adapter := &scriptedCallAdapter[int]{plan: domain.CallPlanDecision{Failure: &failure}}
-	coordinator, err := application.NewCallCoordinator[int](fixture.store, adapter, fixture.clock)
+	coordinator, err := durable.NewCallCoordinator[int](fixture.store, adapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestCallCoordinatorResumesEveryDurableBoundaryWithoutReplanning(t *testing.
 			adapter := &scriptedCallAdapter[string]{
 				plan: domain.CallPlanDecision{Plan: &plan}, executions: []domain.PhysicalExecution[string]{execution},
 			}
-			coordinator, err := application.NewCallCoordinator[string](fixture.store, adapter, fixture.clock)
+			coordinator, err := durable.NewCallCoordinator[string](fixture.store, adapter, fixture.clock)
 			if err != nil {
 				t.Fatalf("NewCallCoordinator: %v", err)
 			}
@@ -225,7 +225,7 @@ func TestCallCoordinatorTerminalReplayReturnsDurableFailureWithoutPlanning(t *te
 		}},
 		executions: []domain.PhysicalExecution[int]{{Boundary: domain.BoundaryUnknown, Failure: &failure}},
 	}
-	coordinator, err := application.NewCallCoordinator[int](fixture.store, firstAdapter, fixture.clock)
+	coordinator, err := durable.NewCallCoordinator[int](fixture.store, firstAdapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestCallCoordinatorTerminalReplayReturnsDurableFailureWithoutPlanning(t *te
 	}
 
 	replayAdapter := &scriptedCallAdapter[int]{plan: firstAdapter.plan}
-	replayCoordinator, err := application.NewCallCoordinator[int](fixture.store, replayAdapter, fixture.clock)
+	replayCoordinator, err := durable.NewCallCoordinator[int](fixture.store, replayAdapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator replay: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestCallCoordinatorTerminalSuccessReplayUsesOriginalPhysicalIdentity(t *tes
 	firstAdapter := &scriptedCallAdapter[string]{
 		plan: domain.CallPlanDecision{Plan: &plan}, executions: []domain.PhysicalExecution[string]{execution},
 	}
-	coordinator, err := application.NewCallCoordinator[string](fixture.store, firstAdapter, fixture.clock)
+	coordinator, err := durable.NewCallCoordinator[string](fixture.store, firstAdapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestCallCoordinatorTerminalSuccessReplayUsesOriginalPhysicalIdentity(t *tes
 	}
 
 	replayAdapter := &scriptedCallAdapter[string]{executions: []domain.PhysicalExecution[string]{execution}}
-	replayCoordinator, err := application.NewCallCoordinator[string](fixture.store, replayAdapter, fixture.clock)
+	replayCoordinator, err := durable.NewCallCoordinator[string](fixture.store, replayAdapter, fixture.clock)
 	if err != nil {
 		t.Fatalf("NewCallCoordinator replay: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestDispatchCoordinatorPreservesPreparationFailureWithoutDispatch(t *testin
 			adapter := &scriptedCallAdapter[string]{plan: domain.CallPlanDecision{Plan: &domain.CallPlan{
 				Digest: domain.SumBytes([]byte("prepare failure")), Calls: []domain.PhysicalCallPlan{coordinatorPhysicalPlan(1, 1)},
 			}}}
-			coordinator, err := application.NewCallCoordinator[string](prepareFailureLedger{fixture.store, failure}, adapter, fixture.clock)
+			coordinator, err := durable.NewCallCoordinator[string](prepareFailureLedger{fixture.store, failure}, adapter, fixture.clock)
 			if err != nil {
 				t.Fatal(err)
 			}

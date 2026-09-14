@@ -23,6 +23,7 @@ import (
 	"cpgen/internal/clock"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/packageprobe"
 	"cpgen/internal/similarity"
 )
@@ -105,7 +106,7 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	content, retry, err := application.BuildGenerationExecutionSettings(cfg)
 	must(err)
 	gc := application.GenerationExecutorConfig{Store: store, Blobs: blobs, LLM: model, Clock: clock.Real{}, Locks: app.Locks, Content: content, RetryPolicy: retry, CostUpperBoundMicroUSD: cfg.Workflow.LLMCostUpperBoundMicroUSD}
-	for step, target := range map[string]*application.FormatRepairPolicy{"idea.draft": &gc.IdeaRepair, "statement.draft": &gc.StatementRepair, "solution.draft": &gc.SolutionRepair, "data.draft": &gc.DataRepair} {
+	for step, target := range map[string]*durable.FormatRepairPolicy{"idea.draft": &gc.IdeaRepair, "statement.draft": &gc.StatementRepair, "solution.draft": &gc.SolutionRepair, "data.draft": &gc.DataRepair} {
 		*target, err = application.BuildFormatRepairPolicy(cfg, step)
 		must(err)
 	}

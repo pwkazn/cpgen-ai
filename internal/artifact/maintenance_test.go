@@ -1,4 +1,4 @@
-package application
+package artifact
 
 import (
 	"context"
@@ -58,7 +58,7 @@ func TestArtifactMaintenanceHoldsExclusiveGuardThroughFilesystemCommit(t *testin
 	}
 	defer locks.Close()
 	metadata := &fakeGCMetadata{items: []domain.GCItem{{Ref: pending.Blob, CanonicalRelativePath: filepath.ToSlash(filepath.Join("blobs", "sha256", hex[:2], hex))}}}
-	maintenance, err := NewArtifactMaintenance(locks, metadata, store)
+	maintenance, err := NewMaintenance(locks, metadata, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestArtifactMaintenanceReconcileTrashRejectsReplacementWithoutFollowingIt(t
 	}
 	defer locks.Close()
 	metadata := &fakeGCMetadata{items: []domain.GCItem{{Ref: ref}}}
-	maintenance, err := NewArtifactMaintenance(locks, metadata, store)
+	maintenance, err := NewMaintenance(locks, metadata, store)
 	if err != nil {
 		t.Fatal(err)
 	}

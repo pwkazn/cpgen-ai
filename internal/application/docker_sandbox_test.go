@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/application"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -30,7 +30,7 @@ func TestDockerSandboxSessionCompilesRunsAndReplaysWithSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000f6", LogicalOperationID: "verified-solution", Kind: domain.CallSandboxCompile, ScopeDigest: domain.SumBytes([]byte("source content")), ExpectedRunVersion: 2}
-	sources, err := application.NewSandboxArtifactSink(f.store, blobs, clock.Real{}, identity)
+	sources, err := sandboxexec.NewArtifactSink(f.store, blobs, clock.Real{}, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,10 +44,10 @@ func TestDockerSandboxSessionCompilesRunsAndReplaysWithSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newSession := func() *application.DockerSandboxSession {
+	newSession := func() *sandboxexec.Session {
 		config := base
 		config.Store, config.Blobs, config.Clock, config.Identity = f.store, blobs, clock.Real{}, identity
-		session, err := application.NewDockerSandboxSession(config)
+		session, err := sandboxexec.NewSession(config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestDockerSandboxSessionCompilesRunsAndReplaysWithSQLite(t *testing.T) {
 	runDockerSandboxSessionCanary(t, ctx, f, blobs, sources, decl, source, manifest, newSession)
 }
 
-func newDockerSandboxTestConfig(t *testing.T, ctx context.Context) application.DockerSandboxConfig {
+func newDockerSandboxTestConfig(t *testing.T, ctx context.Context) sandboxexec.Config {
 	t.Helper()
 	if os.Getenv("CPGEN_RUN_DOCKER_CANARY") != "1" {
 		t.Skip("real Docker canary is opt-in")
@@ -102,10 +102,10 @@ func newDockerSandboxTestConfig(t *testing.T, ctx context.Context) application.D
 	if err != nil {
 		t.Fatal(err)
 	}
-	return application.DockerSandboxConfig{Engine: engine, Config: config, Lock: lock, EngineIdentity: static.EngineIdentityDigest, Watchdog: watchdog, Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: 15 * time.Second}}
+	return sandboxexec.Config{Engine: engine, Config: config, Lock: lock, EngineIdentity: static.EngineIdentityDigest, Watchdog: watchdog, Limits: docker.ControlLimits{HelperMemoryBytes: 128 << 20, HelperPIDs: 16, MaxTransferBytes: 64 << 20, CleanupTimeout: 15 * time.Second}}
 }
 
-func runDockerSandboxSessionCanary(t *testing.T, ctx context.Context, f coordinatorFixture, blobs *blob.Store, sources *application.SandboxArtifactSink, decl port.ArtifactDeclaration, source domain.PendingArtifact, manifest port.SourceBundleManifest, newSession func() *application.DockerSandboxSession) {
+func runDockerSandboxSessionCanary(t *testing.T, ctx context.Context, f coordinatorFixture, blobs *blob.Store, sources *sandboxexec.ArtifactSink, decl port.ArtifactDeclaration, source domain.PendingArtifact, manifest port.SourceBundleManifest, newSession func() *sandboxexec.Session) {
 	t.Helper()
 	request := port.CompileRequest{Language: port.LanguageCPP20, Role: port.RoleSolution, SourceBundle: manifest, Toolchain: "cpp20-gcc-bookworm-v1", Limits: port.CompileLimits{Time: 30 * time.Second, MemoryBytes: 512 << 20, PIDs: 64, OutputBytes: 8 << 20}, ExpectedOutput: "result/files/main"}
 	worker := newSession()

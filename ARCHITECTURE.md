@@ -36,7 +36,7 @@ Different runs may execute concurrently in separate CLI processes. A single run 
 
 ## 3. System context
 
-The user interacts through the cpgen CLI. Read commands use local storage assembly without stage executors, provider transports or Docker preflight. Package export acquires the shared run lock and then the shared artifact lock, reconstructs committed proof using the run's frozen settings, and verifies the archive. Historical runs still require their original local toolchain lock file because its content was not persisted in the run; missing or changed lock bytes cause export to fail.
+The user interacts through the cpgen CLI. Read commands use local storage assembly without stage executors, provider transports or Docker preflight. Package export acquires the shared run lock and then the shared artifact lock, reconstructs committed proof using the run's frozen settings, and verifies the archive. New runs retain a verified toolchain lock snapshot in their frozen configuration. Older runs without a snapshot still require the original local lock file and its matching digest.
 
 Execution commands load configuration, open and migrate SQLite, acquire the run-specific execution lock and shared artifact-usage lock, reconcile unfinished sandbox resources when required, perform one command, and exit. Explicit artifact maintenance acquires the exclusive global artifact lock, takes no per-run lock, and never executes a run stage. It is currently an application API, not an exposed CLI subcommand.
 
@@ -56,6 +56,13 @@ The application uses a fixed loop, one run coordinator and explicit business sta
 - LocalRunService owns run locks, attempts, start/finish, cancellation, review and recovery. Its stageControl helper owns joined accounting/cancellation pollers. Runtime state is not copied into separate lifecycle, termination or recovery objects.
 - `fixedStages` contains typed input/result dispatch and the explicit recovery switch. Business executors use their own Reader; they do not contain upstream executors. Each Reader's methods and proof verification live together.
 - Read-only model and sandbox policies remain separate from transports. Artifact publication takes the existing admitted attempt and run version, then uses the unchanged ledger internally.
+
+The package boundary follows ownership of work:
+
+- `internal/application` owns business stages, run coordination and composition. Stage reports live with their validators; draft configuration and stage execution are not split into one-use files.
+- `internal/execution` owns metered LLM/Similarity calls, bounded retry, receipts, cache reuse and the run-bound call ledger. It has no application import or workflow progression. Its store contract reads the current run and attempt but cannot create or finish a workflow stage; cache writes are supplied separately where needed.
+- `internal/adapter/sandbox` owns Docker sessions, artifact publication and settlement of retained sandbox calls. Application admission and cleanup-proof checks precede that settlement. It depends on the durable call protocol, never on stage executor internals.
+- `internal/artifact` owns prepared writer sessions, bounded verified reads and explicit garbage collection. Callers use it directly; application contains no compatibility alias or forwarding constructor.
 
 `GenerationRunConfig` supplies owner resources once. Composition validates shared storage, admission, clock, locks and frozen policy before directly assembling stage structs. Historical constructor helpers exist only in tests; immutable `workflow.Definition` preserves persisted revisions and stage sequences without upgrading old runs.
 

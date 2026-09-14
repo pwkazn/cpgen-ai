@@ -1,6 +1,8 @@
 package cli
 
 import (
+	sandboxexec "cpgen/internal/adapter/sandbox"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -668,7 +670,7 @@ func writeStateError(stdout, stderr io.Writer, code int, errorCode string, err e
 
 func codeForError(err error) string {
 	switch {
-	case errors.Is(err, application.ErrCleanupPending):
+	case errors.Is(err, sandboxexec.ErrCleanupPending):
 		return "cleanup_pending"
 	case errors.Is(err, runlock.ErrBusy):
 		return "lock_busy"
@@ -687,7 +689,7 @@ func codeForError(err error) string {
 
 func exitForError(err error) int {
 	switch {
-	case errors.Is(err, application.ErrCleanupPending):
+	case errors.Is(err, sandboxexec.ErrCleanupPending):
 		return 10
 	case errors.Is(err, runlock.ErrBusy):
 		return 4

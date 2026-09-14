@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -165,14 +165,14 @@ func (a *similarityCallAdapter) Plan(ctx context.Context, record domain.CallReco
 	}
 	calls := make([]domain.PhysicalCallPlan, record.RetryPolicy.MaxAttempts)
 	for i := range calls {
-		id := domain.AttemptCallID(coordinatorMutationID("call", record.ID, i+1))
-		call := domain.PhysicalCallPlan{ID: id, Ordinal: int64(i + 1), RetryGroup: "similarity-transport", RetryOrdinal: int64(i + 1), Kind: domain.PhysicalSimilarityRequest, Provider: a.plan.Provider, RequestDigest: a.plan.RequestDigest, IdempotencyKey: coordinatorMutationID("physical", record.ID, i+1)}
+		id := domain.AttemptCallID(MutationID("call", record.ID, i+1))
+		call := domain.PhysicalCallPlan{ID: id, Ordinal: int64(i + 1), RetryGroup: "similarity-transport", RetryOrdinal: int64(i + 1), Kind: domain.PhysicalSimilarityRequest, Provider: a.plan.Provider, RequestDigest: a.plan.RequestDigest, IdempotencyKey: MutationID("physical", record.ID, i+1)}
 		for _, dimension := range []domain.BudgetDimension{domain.BudgetSimilarityCalls, domain.BudgetSimilarityCostMicroUSD} {
 			upper := a.costUpperBound
 			if dimension == domain.BudgetSimilarityCalls {
 				upper = 1
 			}
-			call.Reservations = append(call.Reservations, domain.ReservationPlan{ID: domain.ReservationID(coordinatorMutationID("res", id, dimension)), Dimension: dimension, Subkey: "request", UpperBound: upper})
+			call.Reservations = append(call.Reservations, domain.ReservationPlan{ID: domain.ReservationID(MutationID("res", id, dimension)), Dimension: dimension, Subkey: "request", UpperBound: upper})
 		}
 		calls[i] = call
 	}

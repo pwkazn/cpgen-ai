@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -19,7 +20,7 @@ import (
 // are selected by compiled constructors, preserving historical receipt IDs.
 type privateResponseSession struct {
 	privateResponseBinding
-	ledger LLMArtifactLedger
+	ledger ArtifactCallLedger
 	blobs  *blob.Store
 	clock  clock.Clock
 }
@@ -64,17 +65,17 @@ func (s privateResponseBinding) declaration(ordinal int64) domain.ArtifactDeclar
 	if role == "" {
 		role = domain.ArtifactEvidence
 	}
-	providerID := domain.AttemptCallID(coordinatorMutationID("call", s.open.ID, ordinal))
-	physicalID := domain.AttemptCallID(coordinatorMutationID("artifact", s.callID, ordinal))
-	return domain.ArtifactDeclarationRecord{ID: domain.ArtifactDeclarationID(coordinatorMutationID("decl", s.prefix, providerID)), RunID: s.open.RunID, StageName: s.open.StageName, AttemptID: s.open.AttemptID,
-		CallRecordID: s.callID, AttemptCallID: physicalID, ReservationID: domain.ReservationID(coordinatorMutationID("res", physicalID, "response")), ReservationSubkey: "response",
+	providerID := domain.AttemptCallID(MutationID("call", s.open.ID, ordinal))
+	physicalID := domain.AttemptCallID(MutationID("artifact", s.callID, ordinal))
+	return domain.ArtifactDeclarationRecord{ID: domain.ArtifactDeclarationID(MutationID("decl", s.prefix, providerID)), RunID: s.open.RunID, StageName: s.open.StageName, AttemptID: s.open.AttemptID,
+		CallRecordID: s.callID, AttemptCallID: physicalID, ReservationID: domain.ReservationID(MutationID("res", physicalID, "response")), ReservationSubkey: "response",
 		MediaType: s.mediaType, Role: role, LogicalPath: domain.SafeRelPath(s.pathPrefix + string(providerID) + ".json"), MaxBytes: s.maxBytes,
 		Provenance: domain.ProvenanceCandidate{SchemaVersion: s.schema, Producer: string(s.schema), InputDigest: &s.binding}, CreatedAt: s.open.At}
 }
 
 func (s privateResponseBinding) artifactOpen() domain.OpenCallRequest {
 	open := s.open
-	open.ID, open.IdempotencyKey = s.callID, coordinatorMutationID("open", s.callID)
+	open.ID, open.IdempotencyKey = s.callID, MutationID("open", s.callID)
 	open.LogicalOperationID, open.Provider, open.RequestDigest = s.prefix+":"+string(s.open.ID), "private-blob", s.binding
 	return open
 }
@@ -92,14 +93,14 @@ func (s *privateResponseSession) prepare(ctx context.Context) (*domain.PortFailu
 		calls := make([]domain.PhysicalCallPlan, s.open.RetryPolicy.MaxAttempts)
 		for i := range calls {
 			decl := s.declaration(int64(i + 1))
-			calls[i] = domain.PhysicalCallPlan{ID: decl.AttemptCallID, Ordinal: int64(i + 1), RetryGroup: s.prefix, RetryOrdinal: int64(i + 1), Kind: domain.PhysicalLocalArtifactWrite, Provider: "private-blob", RequestDigest: s.binding, IdempotencyKey: coordinatorMutationID("physical", decl.AttemptCallID), Reservations: []domain.ReservationPlan{{ID: decl.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: decl.ReservationSubkey, UpperBound: s.maxBytes}}}
+			calls[i] = domain.PhysicalCallPlan{ID: decl.AttemptCallID, Ordinal: int64(i + 1), RetryGroup: s.prefix, RetryOrdinal: int64(i + 1), Kind: domain.PhysicalLocalArtifactWrite, Provider: "private-blob", RequestDigest: s.binding, IdempotencyKey: MutationID("physical", decl.AttemptCallID), Reservations: []domain.ReservationPlan{{ID: decl.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: decl.ReservationSubkey, UpperBound: s.maxBytes}}}
 		}
 		raw, err := json.Marshal(calls)
 		if err != nil {
 			return nil, err
 		}
 		prepared, err = s.ledger.PrepareCalls(ctx, domain.PrepareCallsRequest{RunID: open.RunID, ExpectedRunVersion: open.ExpectedRunVersion, StageName: open.StageName, AttemptID: open.AttemptID, CallRecordID: open.ID,
-			PlanDigest: domain.SumBytes(raw), Calls: calls, IdempotencyKey: coordinatorMutationID("prepare", open.ID), At: s.clock.Now()})
+			PlanDigest: domain.SumBytes(raw), Calls: calls, IdempotencyKey: MutationID("prepare", open.ID), At: s.clock.Now()})
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +125,7 @@ func (s *privateResponseSession) prepare(ctx context.Context) (*domain.PortFailu
 }
 
 func (s privateResponseBinding) boundDeclaration(ctx context.Context, ledger PrivateReceiptReadStore, grant domain.DispatchGrant) (domain.ArtifactDeclarationRecord, domain.PreparedCalls, error) {
-	if grant.CallRecordID != s.open.ID || grant.RunID != s.open.RunID || grant.StageName != s.open.StageName || grant.AttemptID != s.open.AttemptID || grant.Ordinal < 1 || grant.Ordinal > s.open.RetryPolicy.MaxAttempts || grant.AttemptCallID != domain.AttemptCallID(coordinatorMutationID("call", s.open.ID, grant.Ordinal)) {
+	if grant.CallRecordID != s.open.ID || grant.RunID != s.open.RunID || grant.StageName != s.open.StageName || grant.AttemptID != s.open.AttemptID || grant.Ordinal < 1 || grant.Ordinal > s.open.RetryPolicy.MaxAttempts || grant.AttemptCallID != domain.AttemptCallID(MutationID("call", s.open.ID, grant.Ordinal)) {
 		return domain.ArtifactDeclarationRecord{}, domain.PreparedCalls{}, errors.New("response artifact scope differs from dispatch")
 	}
 	prepared, err := ledger.LoadCall(ctx, s.callID)
@@ -142,7 +143,7 @@ func (s *privateResponseSession) writer(ctx context.Context, grant domain.Dispat
 	if err != nil {
 		return nil, err
 	}
-	session, err := NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
+	session, err := artifact.NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +159,7 @@ func (s *privateResponseSession) writer(ctx context.Context, grant domain.Dispat
 }
 
 func (s *privateResponseSession) beginArtifact(ctx context.Context, decl domain.ArtifactDeclarationRecord) (domain.DispatchGrant, error) {
-	return s.ledger.BeginDispatch(ctx, domain.BeginDispatchRequest{RunID: s.open.RunID, ExpectedRunVersion: s.open.ExpectedRunVersion, StageName: s.open.StageName, AttemptID: s.open.AttemptID, CallRecordID: s.callID, AttemptCallID: decl.AttemptCallID, IdempotencyKey: coordinatorMutationID("begin", decl.AttemptCallID), At: s.clock.Now()})
+	return s.ledger.BeginDispatch(ctx, domain.BeginDispatchRequest{RunID: s.open.RunID, ExpectedRunVersion: s.open.ExpectedRunVersion, StageName: s.open.StageName, AttemptID: s.open.AttemptID, CallRecordID: s.callID, AttemptCallID: decl.AttemptCallID, IdempotencyKey: MutationID("begin", decl.AttemptCallID), At: s.clock.Now()})
 }
 
 // abort records that no private response was published. It also releases the
@@ -168,7 +169,7 @@ func (s *privateResponseSession) abort(ctx context.Context, grant domain.Dispatc
 		return err
 	}
 	decl := s.declaration(grant.Ordinal)
-	return s.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: s.open.RunID, ExpectedRunVersion: s.open.ExpectedRunVersion, StageName: s.open.StageName, AttemptID: s.open.AttemptID, CallRecordID: s.callID, AttemptCallID: decl.AttemptCallID, State: domain.PhysicalAbortedNoDispatch, Outcome: domain.PhysicalOutcomeNoSend, Failure: &domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}, IdempotencyKey: coordinatorMutationID("abort", decl.AttemptCallID), At: s.clock.Now()})
+	return s.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: s.open.RunID, ExpectedRunVersion: s.open.ExpectedRunVersion, StageName: s.open.StageName, AttemptID: s.open.AttemptID, CallRecordID: s.callID, AttemptCallID: decl.AttemptCallID, State: domain.PhysicalAbortedNoDispatch, Outcome: domain.PhysicalOutcomeNoSend, Failure: &domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}, IdempotencyKey: MutationID("abort", decl.AttemptCallID), At: s.clock.Now()})
 }
 
 func (s *privateResponseSession) markPublished(ctx context.Context, ordinal int64) error {
@@ -207,7 +208,7 @@ func (s *privateResponseSession) markPublished(ctx context.Context, ordinal int6
 // schema, provider result and request binding before marking it published.
 func (s *privateResponseSession) readReceipt(ctx context.Context, grant domain.DispatchGrant) ([]byte, domain.PendingArtifact, bool, error) {
 	return s.privateResponseBinding.readReceipt(ctx, s.ledger, s.blobs, grant, func(decl domain.ArtifactDeclarationRecord, prepared domain.PreparedCalls) error {
-		session, err := NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
+		session, err := artifact.NewPreparedArtifactSession(s.ledger, s.blobs, prepared)
 		if err != nil {
 			return err
 		}

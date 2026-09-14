@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
@@ -143,7 +144,7 @@ func assertQualityReportRejectsMissingProof(t *testing.T, runID domain.RunID, in
 	}
 }
 
-func assertQualityCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base application.DockerSandboxConfig, runID domain.RunID) {
+func assertQualityCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base sandboxexec.Config, runID domain.RunID) {
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"quality/checker/main.cpp", "quality/canaries/wa/output.txt"} {
 		changed := generationConfig

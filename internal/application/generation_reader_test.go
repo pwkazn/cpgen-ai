@@ -18,6 +18,7 @@ import (
 	"cpgen/internal/application"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
 	"cpgen/internal/workflow"
@@ -81,9 +82,9 @@ func TestGenerationReaderReopensDatabaseWithoutNewProviderWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	services := map[string]*application.StructuredLLMCalls{}
+	services := map[string]*durable.StructuredLLMCalls{}
 	for _, stage := range []string{"idea", "statement"} {
-		calls, err := application.NewReplayableLLMCalls(store, f.model, f.blobs, f.clock, 100)
+		calls, err := durable.NewReplayableLLMCalls(store, f.model, f.blobs, f.clock, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +92,7 @@ func TestGenerationReaderReopensDatabaseWithoutNewProviderWork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		services[stage], err = application.NewStructuredLLMCalls(calls, policy)
+		services[stage], err = durable.NewStructuredLLMCalls(calls, policy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +163,7 @@ func (s substitutedGenerationReadStore) ReadCommittedLLMStage(ctx context.Contex
 
 type generationReaderFixture struct {
 	coordinatorFixture
-	ideaCalls, statementCalls *application.StructuredLLMCalls
+	ideaCalls, statementCalls *durable.StructuredLLMCalls
 	options                   application.GenerationReaderOptions
 	snapshot                  domain.GenerationRequestSnapshotV1
 	batch                     domain.IdeaBatch
@@ -273,7 +274,7 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	services := map[domain.StageName]*application.StructuredLLMCalls{}
+	services := map[domain.StageName]*durable.StructuredLLMCalls{}
 	var ideaOpen domain.OpenCallRequest
 	var ideaRequest port.GenerateRequest
 	for index, stage := range []domain.StageName{"idea", "statement"} {
@@ -295,11 +296,11 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 		if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: f.runID, ExpectedRunVersion: version, StageName: stage, AttemptID: attemptID, InputDigest: inputDigest, IdempotencyKey: coordinatorID("begin", string(stage)), At: clock.Now()}); err != nil {
 			t.Fatal(err)
 		}
-		ledger, err := application.NewRunBoundLLMLedger(store, f.runID, stage, attemptID)
+		ledger, err := durable.NewRunLedger(store, f.runID, stage, attemptID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		calls, err := application.NewReplayableLLMCalls(ledger, model, blobs, clock, 100)
+		calls, err := durable.NewReplayableLLMCalls(ledger, model, blobs, clock, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +308,7 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		service, err := application.NewStructuredLLMCalls(calls, policy)
+		service, err := durable.NewStructuredLLMCalls(calls, policy)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -350,7 +351,7 @@ func TestGenerationReaderRestoresCurrentCacheUseAfterReviewInvalidation(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	cache, err := application.NewStructuredLLMCache(f.ideaCalls, f.store, locks)
+	cache, err := durable.NewStructuredLLMCache(f.ideaCalls, f.store, locks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,11 +397,11 @@ func TestGenerationReaderRestoresCurrentCacheUseAfterReviewInvalidation(t *testi
 	if _, err := f.store.BeginStage(ctx, domain.BeginStageCommand{RunID: f.runID, ExpectedRunVersion: revised.Version, StageName: "idea", AttemptID: currentAttempt, InputDigest: f.snapshot.SnapshotDigest, IdempotencyKey: coordinatorID("begin", "cached-idea"), At: f.clock.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	ledger, err := application.NewRunBoundLLMLedger(f.store, f.runID, "idea", currentAttempt)
+	ledger, err := durable.NewRunLedger(f.store, f.runID, "idea", currentAttempt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,11 +409,11 @@ func TestGenerationReaderRestoresCurrentCacheUseAfterReviewInvalidation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, repair)
+	service, err := durable.NewStructuredLLMCalls(calls, repair)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache, err = application.NewStructuredLLMCache(service, ledger, locks)
+	cache, err = durable.NewStructuredLLMCache(service, f.store, locks)
 	if err != nil {
 		t.Fatal(err)
 	}

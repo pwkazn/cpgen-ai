@@ -2,11 +2,13 @@ package application
 
 import (
 	"context"
+	"errors"
+
 	"cpgen/internal/agent"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/similarity"
-	"errors"
 )
 
 // CommittedPackageReader constructs the evidence chain from each run's frozen
@@ -15,8 +17,8 @@ import (
 type CommittedPackageReadStore interface {
 	FrozenReadPolicyStore
 	GenerationReadStore
-	CommittedLLMReadStore
-	SimilarityReadStore
+	durable.CommittedLLMReadStore
+	durable.SimilarityReadStore
 	SimilarityContentReadStore
 	SandboxEvidenceReadStore
 	PackageEvidenceReadStore
@@ -51,13 +53,13 @@ func (r *CommittedPackageReader) ReadArchive(ctx context.Context, runID domain.R
 	if err != nil {
 		return nil, empty, err
 	}
-	drafts := make(map[domain.StageName]CommittedDraftReader, 4)
+	drafts := make(map[domain.StageName]durable.CommittedDraftReader, 4)
 	for _, stage := range []domain.StageName{"idea", "statement", "solution", "data"} {
 		repair, err := BuildFormatRepairPolicy(cfg, string(stage)+".draft")
 		if err != nil {
 			return nil, empty, err
 		}
-		drafts[stage], err = NewCommittedLLMReader(r.store, r.blobs, model, repair)
+		drafts[stage], err = durable.NewCommittedLLMReader(r.store, r.blobs, model, repair)
 		if err != nil {
 			return nil, empty, err
 		}
@@ -74,7 +76,7 @@ func (r *CommittedPackageReader) ReadArchive(ctx context.Context, runID domain.R
 	if err != nil {
 		return nil, empty, err
 	}
-	evidence, err := NewSimilarityReader(r.store, r.blobs, provider)
+	evidence, err := durable.NewSimilarityReader(r.store, r.blobs, provider)
 	if err != nil {
 		return nil, empty, err
 	}

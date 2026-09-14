@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"cpgen/internal/agent"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -36,7 +36,7 @@ func TestDurableLLMCountsHTTPRetriesAndSettlesEveryReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	open.Provider, open.RequestDigest, open.PolicyDigest = plan.Provider, plan.RequestDigest, request.ProviderPolicyDigest
-	callsService, err := application.NewLLMCalls(fixture.store, model, fixture.clock, 100)
+	callsService, err := durable.NewLLMCalls(fixture.store, model, fixture.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

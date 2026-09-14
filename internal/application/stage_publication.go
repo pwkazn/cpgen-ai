@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -17,13 +19,13 @@ type StageArtifactPublisher interface {
 
 type StagePublisher func(domain.StageAttempt, int64) (StageArtifactPublisher, error)
 
-func newStagePublisher(store RunLLMStore, blobs *blob.Store, source clock.Clock) StagePublisher {
+func newStagePublisher(store durable.Store, blobs *blob.Store, source clock.Clock) StagePublisher {
 	return func(attempt domain.StageAttempt, version int64) (StageArtifactPublisher, error) {
 		identity, err := stagePublicationIdentity(attempt, version)
 		if err != nil {
 			return nil, err
 		}
-		return NewSandboxArtifactSink(store, blobs, source, identity)
+		return sandboxexec.NewArtifactSink(store, blobs, source, identity)
 	}
 }
 
@@ -54,5 +56,5 @@ func stagePublicationIdentity(a domain.StageAttempt, version int64) (port.Sandbo
 
 func packagePublicationIdentity(attempt domain.StageAttempt, version int64) port.SandboxAuthorizationIdentity {
 	const operation = "package-publication"
-	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(coordinatorMutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
+	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(durable.MutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
 }

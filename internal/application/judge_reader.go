@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
@@ -76,7 +77,7 @@ func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.Run
 				return err
 			}
 			if token != "" {
-				raw, err := readSolutionVerificationBlob(ctx, s.blobs, result.Stdout.Blob, 1<<20)
+				raw, err := artifact.ReadVerified(ctx, s.blobs, result.Stdout.Blob, 1<<20)
 				if err != nil {
 					return err
 				}
@@ -95,7 +96,7 @@ func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.Run
 			}
 		}
 		if check.Answer != nil {
-			raw, err := readSolutionVerificationBlob(ctx, s.blobs, *check.Answer, 1<<20)
+			raw, err := artifact.ReadVerified(ctx, s.blobs, *check.Answer, 1<<20)
 			if err != nil {
 				return empty, err
 			}

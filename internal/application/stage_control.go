@@ -2,11 +2,12 @@ package application
 
 import (
 	"context"
+	"errors"
+	"time"
+
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
-	"errors"
-	"time"
 )
 
 // stageControl owns active-time accounting and the two bounded pollers. The

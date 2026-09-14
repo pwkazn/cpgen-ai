@@ -38,11 +38,6 @@ type RunRecovery interface {
 	RecoverRun(context.Context, domain.RunID) error
 }
 
-// ErrCleanupPending means the exact external sandbox resources are still
-// unresolved. It is deliberately separate from a generic host failure so the
-// CLI can report exit code 10 while preserving the RUNNING projection.
-var ErrCleanupPending = errors.New("sandbox cleanup is pending")
-
 type CurrentStageAttemptReader interface {
 	CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
 }

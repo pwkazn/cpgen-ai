@@ -7,13 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
 
-func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *application.SandboxArtifactSink) {
+func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *sandboxexec.ArtifactSink) {
 	t.Helper()
 	f := newCoordinatorFixtureWithStages(t, "dc", domain.BudgetLimits{MaxArtifactBytes: 32 << 20, MaxActiveTimeMilliseconds: 100000}, []domain.StageName{"prepare", "exercise"})
 	operation, err := domain.NewID("call")
@@ -21,7 +22,7 @@ func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *a
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000dc", LogicalOperationID: operation, Kind: domain.CallSandboxRun, ScopeDigest: domain.SumBytes([]byte("test input")), ExpectedRunVersion: 2}
-	publisher, err := application.NewSandboxArtifactSink(f.store, blobs, f.clock, identity)
+	publisher, err := sandboxexec.NewArtifactSink(f.store, blobs, f.clock, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func assertJudgeReportRejectsMissingProof(t *testing.T, input application.JudgeI
 	}
 }
 
-func assertJudgeCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base application.DockerSandboxConfig, runID domain.RunID) {
+func assertJudgeCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base sandboxexec.Config, runID domain.RunID) {
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"judge/dataset.json", "judge/generated/001.out", "judge/samples/001.out"} {
 		changed := generationConfig

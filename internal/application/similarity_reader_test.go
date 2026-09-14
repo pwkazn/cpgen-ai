@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/similarity"
 )
@@ -17,7 +17,7 @@ import (
 func TestSimilarityReaderRequiresCommittedExactEvidence(t *testing.T) {
 	f := newSimilarityReplayFixture(t)
 	result := f.search(t, f.service)
-	reader, err := application.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
+	reader, err := durable.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestSimilarityReaderRequiresCommittedExactEvidence(t *testing.T) {
 	if _, err := reader.Read(ctx, f.runID, "prepare", changed); err == nil {
 		t.Fatal("different request restored committed output")
 	}
-	policyReader, err := application.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, changedSimilarityPolicy{PhysicalProvider: f.provider})
+	policyReader, err := durable.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, changedSimilarityPolicy{PhysicalProvider: f.provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestSimilarityReaderRejectsSubstitutedMetadata(t *testing.T) {
 			if _, err := f.store.FinishStage(context.Background(), f.finish(result)); err != nil {
 				t.Fatal(err)
 			}
-			reader, err := application.NewSimilarityReader(similarityReadFacade{store: f.store, mode: mode}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
+			reader, err := durable.NewSimilarityReader(similarityReadFacade{store: f.store, mode: mode}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestSimilarityReaderRejectsHistoryAfterReviewInvalidation(t *testing.T) {
 	if _, err := f.store.ApplyReview(ctx, domain.ApplyReviewCommand{RunID: f.runID, ExpectedRunVersion: decision.RunVersion, ReviewDecisionID: decision.ID, StageName: "exercise", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, NewInputDigest: &newInput, NewConfigJSON: config, NewConfigDigest: &configDigest, InvalidatedStages: []domain.StageName{"prepare", "exercise"}, IdempotencyKey: coordinatorID("apply", "similarity-reader"), At: f.clock.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := application.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
+	reader, err := durable.NewSimilarityReader(similarityReadFacade{store: f.store}, f.blobs, noSimilarityExchange{PhysicalProvider: f.provider})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSimilarityReaderRejectsHistoryAfterReviewInvalidation(t *testing.T) {
 // This facade has no mutating methods; neither committed reading nor its
 // provider interface can recover a writer or send an exchange in these tests.
 type similarityReadFacade struct {
-	store application.SimilarityReadStore
+	store durable.SimilarityReadStore
 	mode  string
 }
 

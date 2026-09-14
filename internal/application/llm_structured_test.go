@@ -17,8 +17,8 @@ import (
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/agent"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -58,7 +58,7 @@ func TestStructuredLLMValidatesRepairPromptBeforeAnyPaidCall(t *testing.T) {
 	f := newStructuredLLMFixture(t, false)
 	policy := f.policy
 	policy.Prompt.Version = "missing"
-	service, err := application.NewStructuredLLMCalls(f.calls, policy)
+	service, err := durable.NewStructuredLLMCalls(f.calls, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestStructuredLLMBindsRepairPolicyBeforeFirstCall(t *testing.T) {
 	f := newStructuredLLMFixture(t, false)
 	disabled := f.policy
 	disabled.MaxRepairs = 0
-	service, err := application.NewStructuredLLMCalls(f.calls, disabled)
+	service, err := durable.NewStructuredLLMCalls(f.calls, disabled)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestStructuredLLMRejectsUnboundedRepairPolicy(t *testing.T) {
 	for _, count := range []int64{-1, 2, 8} {
 		policy := f.policy
 		policy.MaxRepairs = count
-		if _, err := application.NewStructuredLLMCalls(f.calls, policy); err == nil {
+		if _, err := durable.NewStructuredLLMCalls(f.calls, policy); err == nil {
 			t.Fatalf("accepted %d format repairs", count)
 		}
 	}
@@ -135,11 +135,11 @@ func TestStructuredLLMCancellationBetweenCallsPreservesPaidReceipt(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ledger := &cancelStructuredLLMLedger{Store: f.store, cancel: cancel}
-	calls, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, f.policy)
+	service, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +182,11 @@ func TestStructuredLLMRestartAndAtomicOccurrenceAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	calls, err := application.NewReplayableLLMCalls(store, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(store, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, f.policy)
+	service, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,9 +229,9 @@ func TestStructuredLLMRestartAndAtomicOccurrenceAttachment(t *testing.T) {
 
 type structuredLLMFixture struct {
 	coordinatorFixture
-	calls      *application.LLMCalls
-	structured *application.StructuredLLMCalls
-	policy     application.FormatRepairPolicy
+	calls      *durable.LLMCalls
+	structured *durable.StructuredLLMCalls
+	policy     durable.FormatRepairPolicy
 	open       domain.OpenCallRequest
 	request    port.GenerateRequest
 	httpCalls  *atomic.Int32
@@ -315,12 +315,12 @@ func newStructuredLLMOptionsFixture(t *testing.T, options structuredLLMOptions) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := application.FormatRepairPolicy{MaxRepairs: 1, Prompt: port.PromptRef{Step: definition.Step, Version: definition.Version, Digest: definition.TemplateDigest}}
-	structured, err := application.NewStructuredLLMCalls(service, policy)
+	policy := durable.FormatRepairPolicy{MaxRepairs: 1, Prompt: port.PromptRef{Step: definition.Step, Version: definition.Version, Digest: definition.TemplateDigest}}
+	structured, err := durable.NewStructuredLLMCalls(service, policy)
 	if err != nil {
 		t.Fatal(err)
 	}

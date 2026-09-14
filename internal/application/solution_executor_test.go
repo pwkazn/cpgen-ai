@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -99,7 +100,7 @@ func TestSolutionExecutorVerificationRequiresCommittedDraftAndCurrentAttempt(t *
 				if identity.StageName != "solution_verify" || identity.RunID != f.runID || identity.ScopeDigest.Validate() != nil {
 					t.Fatal("sandbox scope was not derived from the verification attempt")
 				}
-				publisher, err := application.NewSandboxArtifactSink(f.store, f.executorConfig.Blobs, f.clock, identity)
+				publisher, err := sandboxexec.NewArtifactSink(f.store, f.executorConfig.Blobs, f.clock, identity)
 				if err != nil {
 					return nil, toolchain.Lock{}, err
 				}

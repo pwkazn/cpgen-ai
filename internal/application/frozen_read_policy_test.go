@@ -3,16 +3,17 @@ package application
 import (
 	"bytes"
 	"context"
-	"cpgen/internal/config"
-	"cpgen/internal/domain"
-	"cpgen/internal/port"
-	"cpgen/internal/toolchain"
-	"cpgen/internal/workflow"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"cpgen/internal/config"
+	"cpgen/internal/domain"
+	"cpgen/internal/port"
+	"cpgen/internal/toolchain"
+	"cpgen/internal/workflow"
 )
 
 type frozenPolicyFixture struct {

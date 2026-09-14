@@ -24,6 +24,7 @@ import (
 	"cpgen/internal/clock"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/packageprobe"
 	"cpgen/internal/similarity"
 	"cpgen/internal/workflow"
@@ -211,7 +212,7 @@ func verifyPublicGenerationCLI(t *testing.T, mvp bool) {
 		t.Fatal(err)
 	}
 	generationConfig := application.GenerationExecutorConfig{Store: pause, Blobs: blobs, LLM: model, Clock: clock.Real{}, Locks: app.Locks, Content: content, RetryPolicy: retry, CostUpperBoundMicroUSD: cfg.Workflow.LLMCostUpperBoundMicroUSD}
-	for step, target := range map[string]*application.FormatRepairPolicy{"idea.draft": &generationConfig.IdeaRepair, "statement.draft": &generationConfig.StatementRepair, "solution.draft": &generationConfig.SolutionRepair, "data.draft": &generationConfig.DataRepair} {
+	for step, target := range map[string]*durable.FormatRepairPolicy{"idea.draft": &generationConfig.IdeaRepair, "statement.draft": &generationConfig.StatementRepair, "solution.draft": &generationConfig.SolutionRepair, "data.draft": &generationConfig.DataRepair} {
 		*target, err = application.BuildFormatRepairPolicy(cfg, step)
 		if err != nil {
 			t.Fatal(err)

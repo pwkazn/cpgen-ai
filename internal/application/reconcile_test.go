@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/domain"
 )
 
@@ -49,7 +50,7 @@ func TestReconcileFailureWithoutEvidenceRemainsGeneric(t *testing.T) {
 	if err := service.reconcileForTerminal(context.Background(), runID); err == nil {
 		t.Fatal("reconcileForTerminal unexpectedly succeeded")
 	} else {
-		if errors.Is(err, ErrCleanupPending) {
+		if errors.Is(err, sandboxexec.ErrCleanupPending) {
 			t.Fatalf("generic reconciliation error was classified as cleanup pending: %v", err)
 		}
 		if !errors.Is(err, rootErr) {
@@ -60,7 +61,7 @@ func TestReconcileFailureWithoutEvidenceRemainsGeneric(t *testing.T) {
 	snapshot := domain.RunSnapshot{RunID: runID}
 	if _, err := (&LocalRunService{reconciler: service.reconciler}).recover(context.Background(), snapshot, "", false); err == nil {
 		t.Fatal("recoverRunning unexpectedly succeeded")
-	} else if errors.Is(err, ErrCleanupPending) || !errors.Is(err, rootErr) {
+	} else if errors.Is(err, sandboxexec.ErrCleanupPending) || !errors.Is(err, rootErr) {
 		t.Fatalf("recovery error = %v, want generic wrapped inspection failure", err)
 	}
 }
@@ -71,7 +72,7 @@ func TestReconcileFailureWithEvidenceRemainsCleanupPending(t *testing.T) {
 		return domain.SandboxReconcileReport{RunID: runID, Pending: 1, Executions: []domain.SandboxExecution{{ID: "exec-1"}}}, errors.New("cleanup still running")
 	})}
 	err := service.reconcileForTerminal(context.Background(), runID)
-	if !errors.Is(err, ErrCleanupPending) {
+	if !errors.Is(err, sandboxexec.ErrCleanupPending) {
 		t.Fatalf("error = %v, want cleanup pending", err)
 	}
 	if !strings.Contains(err.Error(), "cleanup still running") {
@@ -84,10 +85,10 @@ func TestZeroReconcileReportDoesNotBecomeCleanupPending(t *testing.T) {
 	service := &LocalRunService{reconciler: reconcileFunc(func(context.Context, domain.RunID) (domain.SandboxReconcileReport, error) {
 		return domain.SandboxReconcileReport{}, nil
 	})}
-	if err := service.reconcileForTerminal(context.Background(), runID); err == nil || errors.Is(err, ErrCleanupPending) {
+	if err := service.reconcileForTerminal(context.Background(), runID); err == nil || errors.Is(err, sandboxexec.ErrCleanupPending) {
 		t.Fatalf("terminal reconciliation error = %v, want generic incomplete-report error", err)
 	}
-	if _, err := (&LocalRunService{reconciler: service.reconciler}).recover(context.Background(), domain.RunSnapshot{RunID: runID}, "", false); err == nil || errors.Is(err, ErrCleanupPending) {
+	if _, err := (&LocalRunService{reconciler: service.reconciler}).recover(context.Background(), domain.RunSnapshot{RunID: runID}, "", false); err == nil || errors.Is(err, sandboxexec.ErrCleanupPending) {
 		t.Fatalf("recovery reconciliation error = %v, want generic incomplete-report error", err)
 	}
 }

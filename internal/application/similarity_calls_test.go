@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/similarity"
 )
 
@@ -35,7 +35,7 @@ func TestDurableSimilarityCountsOnlyLedgerRetriesAndSettlesExactCost(t *testing.
 		t.Fatal(err)
 	}
 	open.Kind, open.Provider, open.RequestDigest, open.PolicyDigest = domain.CallSimilaritySearch, plan.Provider, plan.RequestDigest, plan.PolicyDigest
-	calls, err := application.NewSimilarityCalls(f.store, provider, f.clock, 100)
+	calls, err := durable.NewSimilarityCalls(f.store, provider, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestDurableSimilarityCountsOnlyLedgerRetriesAndSettlesExactCost(t *testing.
 		t.Fatalf("settled count=%d cost=%d", count, cost)
 	}
 	_, err = calls.Search(context.Background(), open, request)
-	if !errors.Is(err, application.ErrSimilarityReplayUnavailable) || sends.Load() != 2 {
+	if !errors.Is(err, durable.ErrSimilarityReplayUnavailable) || sends.Load() != 2 {
 		t.Fatalf("unavailable private replay sent again: %v HTTP=%d", err, sends.Load())
 	}
 }
@@ -82,7 +82,7 @@ func TestDurableSimilarityRejectsOverBudgetBeforeHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	open.Kind, open.Provider, open.RequestDigest, open.PolicyDigest = domain.CallSimilaritySearch, plan.Provider, plan.RequestDigest, plan.PolicyDigest
-	calls, err := application.NewSimilarityCalls(f.store, provider, f.clock, 100)
+	calls, err := durable.NewSimilarityCalls(f.store, provider, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestDurableSimilarityRecoveredDispatchNeverRegainsSendAuthority(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := application.NewSimilarityCalls(f.store, provider, f.clock, 100)
+	calls, err := durable.NewSimilarityCalls(f.store, provider, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -84,3 +84,44 @@ go test -race ./internal/workflow ./internal/adapter/fake ./internal/application
 ```
 
 首次全量检查发现批量导入更新给 similarity 测试误加了一个未使用的 fake import；已移除，随后重跑全量通过。本次没有修改 Docker、账本或数据迁移行为，未重跑真实 Docker canary、全量 race、Go 1.25 或 Linux 构建；前一节这些结果属于前一次返工验证。
+
+
+## Application 包边界收敛
+
+本轮从已合并工具链冻结修复的 `b0b623a` 开始，分支为 `codex/application-boundaries`。用户要求继续整理 application 的职责，而不是只减少目录中的可见文件。
+
+- application 保留业务阶段、运行协调、冻结策略及装配。Data/Quality/Judge 报告与对应验证器合并，Data 验证入口与执行器合并，LLM 草稿注册与配置合并。
+- `internal/execution` 接管 LLM/Similarity 的计量调用、重试、私有回执、缓存和 RunLedger。共享 Store 不再嵌入完整 RuntimeStore 或缓存写入接口；业务装配另外提供实际需要的能力。
+- `internal/adapter/sandbox` 接管执行会话、制品发布和物理调用结算。fixedStages 先完成准入和精确清理证据检查，再调用 ReconcileStageCalls，不再构造或访问发布器的私有字段。
+- `internal/artifact` 接管制品维护和有界的已验证读取；删除 application 的 PreparedArtifactSession 别名及转发构造器。独立单测随所属实现迁移，调用/恢复/业务组合测试仍验证实际跨包路径。
+- 删除无调用的 NewCacheReuseService 转发，以及只有自身测试使用的实验性 CollectIdeaCandidatesWithOutput 和对应测试。实际生成与恢复流程从未调用该入口；已有 revision、JSON、摘要前缀、账本和数据迁移未改变。
+
+统计包含迁出的全部生产代码，行数包括注释及空行：
+
+| 范围 | 清理前文件 | 清理后文件 | 清理前行数 | 清理后行数 |
+|---|---:|---:|---:|---:|
+| application | 69 | 43 | 12275 | 7846 |
+| execution | 0 | 13 | 0 | 3097 |
+| sandbox 会话层（不含原 docker 引擎） | 0 | 3 | 0 | 1028 |
+| artifact | 1 | 2 | 260 | 405 |
+| 全部 internal 生产代码 | 234 | 225 | 50581 | 50424 |
+
+全部生产类型 681 → 680；没有通过增加镜像接口或兼容门面替代原有跨文件访问。新增对外方法是实际业务读取/恢复所需的调用协议操作。
+
+已完成验证：全量 `go test ./... -count=1 -timeout 15m`（application 48.383s、sqlite 34.544s、integration 9.385s），`go vet ./...`，Linux 宿主命令构建，gofmt、`git diff --check`、27 份规范文档架构检查和本地链接检查。迁移前后生产代码的 AST 比较未发现新增的非 import 字面量；排除命名变化后，实际控制流变化集中在结算逻辑的归属移动和两个无调用入口的删除。
+
+迁移中修正了 sandbox 单测的相对夹具路径；两处缓存测试改为向缓存传入原 store、向物理调用传入 RunLedger，与生产装配一致。缓存完成仍使用原 RunLedger 的版本协调，原有跨 heartbeat 回放和调用次数断言保持。
+
+完整 `go test -race ./... -count=1 -timeout 30m` 已通过：application 509.806s、sqlite 626.896s、integration 114.372s；无 race 报告。真实 Docker 正常流程恢复与证据替换拒绝通过（164.58s，pass 子用例 161.90s），公开 CLI 中断恢复/冻结工具链离线导出通过（192.84s），中断取消的 unsealed_source 与 compile_receipt 窗口通过（合计 7.48s）。Docker 起初未启动，经本机 Docker Desktop 启动并确认 Engine 29.7.2 就绪后，容器用例在完整 race 结束后串行运行；供应商使用本地 HTTP 夹具。新运行的工具链快照及旧运行的文件回退均保持原实现，离线读取不增加 Docker 或供应商初始化。
+
+
+本轮真实容器命令：
+
+```powershell
+$env:CPGEN_RUN_DOCKER_CANARY='1'
+$env:CPGEN_DOCKER_TOOLCHAIN_LOCK='D:/cpgen-private/toolchains/docker-v1.lock.json'
+go test ./internal/application -run '^TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft$/^pass$' -count=1 -timeout 20m -v
+go test ./internal/application -run '^Test(MVPPublicCLIResumesDataDraftAndExportsVerifiedPackage|SolutionRunServiceCancelsInterruptedVerificationWithoutRedispatch)$' -count=1 -timeout 20m -v
+```
+
+本轮未创建提交或推送，改动保留在工作区供审阅。

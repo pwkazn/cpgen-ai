@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/clock"
@@ -32,7 +33,7 @@ type GenerationRunConfig struct {
 	Reconciler          SandboxReconciler
 	Recovery            RunRecovery
 	EffectiveConfigJSON []byte
-	SolutionSandbox     *DockerSandboxConfig
+	SolutionSandbox     *sandboxexec.Config
 }
 
 func NewGenerationRunService(config GenerationRunConfig) (*LocalRunService, error) {
@@ -102,12 +103,12 @@ func newGenerationRunService(config GenerationRunConfig) (*LocalRunService, erro
 		service.stages.solution = &SolutionExecutor{publisher: publisher, blobs: config.Blobs, reader: solutionReader, drafts: config.Generation.DraftExecution}
 
 		base := *config.SolutionSandbox
-		store, ok := config.Store.(DockerSandboxStore)
+		store, ok := config.Store.(sandboxexec.Store)
 		if !ok {
 			return nil, errors.New("forward Solution workflow requires Docker lifecycle storage")
 		}
 		base.Store, base.Blobs, base.Clock = store, config.Blobs, config.Clock
-		if err := validateDockerSandboxDependencies(base); err != nil {
+		if err := sandboxexec.ValidateDependencies(base); err != nil {
 			return nil, err
 		}
 		rawLock, err := base.Lock.MarshalIndent()
@@ -213,11 +214,11 @@ type stageExecution struct {
 	publishCache func(context.Context) error
 }
 
-func solutionSandboxFactory(base DockerSandboxConfig) SolutionSandboxFactory {
+func solutionSandboxFactory(base sandboxexec.Config) SolutionSandboxFactory {
 	return func(_ context.Context, identity port.SandboxAuthorizationIdentity) (SolutionSandbox, toolchain.Lock, error) {
 		config := base
 		config.Identity = identity
-		sandbox, err := NewDockerSandboxSession(config)
+		sandbox, err := sandboxexec.NewSession(config)
 		return sandbox, config.Lock, err
 	}
 }

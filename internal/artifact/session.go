@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"cpgen/internal/adapter/storage/blob"
@@ -258,3 +259,21 @@ func (w *sessionWriter) isFinalized() bool {
 }
 
 var _ PreparedArtifactSession = (*preparedArtifactSession)(nil)
+
+func ReadVerified(ctx context.Context, blobs port.VerifiedBlobReader, ref domain.BlobRef, limit int64) ([]byte, error) {
+	if ref.Size > limit {
+		return nil, errors.New("verification artifact exceeds byte bound")
+	}
+	reader, err := blobs.OpenVerified(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err := errors.Join(readErr, reader.Close()); err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, errors.New("verification artifact exceeds byte bound")
+	}
+	return raw, nil
+}

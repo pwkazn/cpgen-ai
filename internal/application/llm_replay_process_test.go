@@ -11,8 +11,8 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -21,7 +21,7 @@ type llmReplayProcessConfig struct {
 	Open                                   domain.OpenCallRequest
 	Request                                port.GenerateRequest
 	Now                                    time.Time
-	RepairPolicy                           *application.FormatRepairPolicy
+	RepairPolicy                           *durable.FormatRepairPolicy
 	CrashOccurrence                        int
 }
 
@@ -94,12 +94,12 @@ func TestLLMReplayProcessHelper(t *testing.T) {
 	}
 	provider, _ := durableTestProvider(t, configuration.Endpoint, prompts...)
 	ledger := &crashingLLMReplayLedger{Store: store, boundary: configuration.Boundary, occurrence: configuration.CrashOccurrence}
-	service, err := application.NewReplayableLLMCalls(ledger, provider, blobs, clock, 100)
+	service, err := durable.NewReplayableLLMCalls(ledger, provider, blobs, clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if configuration.RepairPolicy != nil {
-		structured, err := application.NewStructuredLLMCalls(service, *configuration.RepairPolicy)
+		structured, err := durable.NewStructuredLLMCalls(service, *configuration.RepairPolicy)
 		if err != nil {
 			t.Fatal(err)
 		}

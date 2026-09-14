@@ -18,8 +18,8 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -57,7 +57,7 @@ func TestLLMReplaySurvivesRestartAndAttachesPrivateOccurrence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewReplayableLLMCalls(reopened, f.model, blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(reopened, f.model, blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestLLMReplayRecoversReceiptAfterLedgerWriteFailure(t *testing.T) {
 		t.Run(boundary, func(t *testing.T) {
 			f := newLLMReplayFixture(t)
 			ledger := &interruptedLLMReplayLedger{Store: f.store, boundary: boundary}
-			service, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+			service, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +248,7 @@ func TestLLMReplayBudgetRejectionDoesNotSendOrHoldUnusedBytes(t *testing.T) {
 				f.open.RequestDigest = plan.RequestDigest
 			} else {
 				var err error
-				service, err = application.NewReplayableLLMCalls(f.store, f.model, f.blobs, f.clock, 100000)
+				service, err = durable.NewReplayableLLMCalls(f.store, f.model, f.blobs, f.clock, 100000)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -299,7 +299,7 @@ func TestLLMReplayPersistsReceiptAfterPendingCancellation(t *testing.T) {
 		}
 		cancel()
 	}}
-	service, err := application.NewReplayableLLMCalls(f.store, provider, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(f.store, provider, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ type llmReplayFixture struct {
 	open      domain.OpenCallRequest
 	blobs     *blob.Store
 	blobRoot  string
-	service   *application.LLMCalls
+	service   *durable.LLMCalls
 	httpCalls *atomic.Int32
 	endpoint  string
 }
@@ -379,7 +379,7 @@ func newLLMReplayContentFixture(t *testing.T, content string, statuses ...int) l
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestLLMReplayTransportRetryReleasesFailedResponseWriter(t *testing.T) {
 func TestLLMReplayRetainsSealedReceiptOnPublicationError(t *testing.T) {
 	f := newLLMReplayFixture(t)
 	ledger := &llmPublicationFailureLedger{Store: f.store}
-	service, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func (l *llmPublicationFailureLedger) FinalizeArtifact(context.Context, domain.A
 func TestLLMReplayCannotReleaseSlotsWhileProviderCallIsPending(t *testing.T) {
 	f := newLLMReplayFixture(t)
 	ledger := &interruptedLLMReplayLedger{Store: f.store, boundary: "sent"}
-	service, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestLLMReplayCannotReleaseSlotsWhileProviderCallIsPending(t *testing.T) {
 	f.generate(t, f.service)
 }
 
-func (f llmReplayFixture) generate(t *testing.T, service *application.LLMCalls) domain.MeteredOutcome[port.GenerateResponse] {
+func (f llmReplayFixture) generate(t *testing.T, service *durable.LLMCalls) domain.MeteredOutcome[port.GenerateResponse] {
 	t.Helper()
 	result, err := service.Generate(context.Background(), f.open, f.request)
 	if err != nil || result.Value == nil {

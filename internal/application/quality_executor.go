@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -17,7 +18,7 @@ type QualityExecutor struct {
 
 func qualityVerificationIdentity(attempt domain.StageAttempt, version int64) port.SandboxAuthorizationIdentity {
 	const operation = "quality-verification"
-	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(coordinatorMutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
+	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(durable.MutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
 }
 
 func (s *QualityExecutor) Run(ctx context.Context, view domain.RunView, factory SolutionSandboxFactory) (QualityVerificationResult, error) {

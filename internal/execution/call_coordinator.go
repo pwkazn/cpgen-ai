@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -62,7 +62,7 @@ func (c *CallCoordinator[T]) Execute(ctx context.Context, request domain.OpenCal
 			RunID: request.RunID, ExpectedRunVersion: request.ExpectedRunVersion,
 			StageName: request.StageName, AttemptID: request.AttemptID, CallRecordID: record.ID,
 			PlanDigest: decision.Plan.Digest, Calls: decision.Plan.Calls,
-			IdempotencyKey: coordinatorMutationID("prepare", record.ID, decision.Plan.Digest), At: c.clock.Now(),
+			IdempotencyKey: MutationID("prepare", record.ID, decision.Plan.Digest), At: c.clock.Now(),
 		})
 	} else {
 		prepared, err = c.ledger.LoadCall(ctx, record.ID)
@@ -184,7 +184,7 @@ func (c *CallCoordinator[T]) dispatchGrant(ctx context.Context, record domain.Ca
 		RunID: record.RunID, ExpectedRunVersion: expectedVersion,
 		StageName: record.StageName, AttemptID: record.AttemptID, CallRecordID: record.ID,
 		AttemptCallID:  physical.ID,
-		IdempotencyKey: coordinatorMutationID("begin", record.ID, physical.ID), At: c.clock.Now(),
+		IdempotencyKey: MutationID("begin", record.ID, physical.ID), At: c.clock.Now(),
 	})
 }
 
@@ -215,7 +215,7 @@ func (c *CallCoordinator[T]) replaySuccessfulPhysical(ctx context.Context, expec
 	if err := execution.Validate(); err != nil {
 		return nil, fmt.Errorf("validate reconciled physical execution: %w", err)
 	}
-	if execution.Boundary != domain.BoundaryCompleted || execution.Value == nil || execution.ProviderRequestID != physical.ProviderRequestID || !digestsMatch(execution.ResponseDigest, physical.ResponseDigest) {
+	if execution.Boundary != domain.BoundaryCompleted || execution.Value == nil || execution.ProviderRequestID != physical.ProviderRequestID || !DigestsMatch(execution.ResponseDigest, physical.ResponseDigest) {
 		return nil, errors.New("reconciled physical execution differs from durable completion")
 	}
 	return execution.Value, nil
@@ -243,7 +243,7 @@ func (c *CallCoordinator[T]) replayTerminal(ctx context.Context, expectedVersion
 	return domain.MeteredOutcome[T]{}, errors.New("terminal call result does not reference a loaded physical call")
 }
 
-func digestsMatch(left, right *domain.Digest) bool {
+func DigestsMatch(left, right *domain.Digest) bool {
 	return left != nil && right != nil && *left == *right
 }
 
@@ -253,7 +253,7 @@ func (c *CallCoordinator[T]) complete(ctx context.Context, record domain.CallRec
 		StageName: record.StageName, AttemptID: record.AttemptID, CallRecordID: record.ID,
 		AttemptCallID: grant.AttemptCallID, Failure: execution.Failure,
 		ProviderRequestID: execution.ProviderRequestID, ResponseDigest: execution.ResponseDigest, Usage: execution.Usage,
-		IdempotencyKey: coordinatorMutationID("complete", record.ID, grant.AttemptCallID), At: c.clock.Now(),
+		IdempotencyKey: MutationID("complete", record.ID, grant.AttemptCallID), At: c.clock.Now(),
 	}
 	switch execution.Boundary {
 	case domain.BoundaryCompleted:
@@ -294,7 +294,7 @@ func finishRequest(record domain.CallRecord, expectedVersion int64, dispatch dom
 		RunID: record.RunID, ExpectedRunVersion: expectedVersion, StageName: record.StageName,
 		AttemptID: record.AttemptID, CallRecordID: record.ID, DispatchKind: dispatch,
 		ResultAttemptCallID: resultID, Failure: failure,
-		IdempotencyKey: coordinatorMutationID("finish", record.ID, dispatch), At: at,
+		IdempotencyKey: MutationID("finish", record.ID, dispatch), At: at,
 	}
 }
 
@@ -311,10 +311,36 @@ func callIDPointer(id domain.AttemptCallID) *domain.AttemptCallID {
 	return &result
 }
 
-func coordinatorMutationID(prefix string, values ...any) string {
+func MutationID(prefix string, values ...any) string {
 	hash := sha256.New()
 	for _, value := range values {
 		_, _ = fmt.Fprintln(hash, value)
 	}
 	return fmt.Sprintf("%s_%x", prefix, hash.Sum(nil)[:16])
+}
+
+// Only BeginDispatch reached from a PREPARED row can issue local send authority.
+// Recovered DISPATCHING receipts never grant another provider send. Each
+// foreground logical call owns its guard; physical operations remain serial.
+type freshDispatchLedger struct {
+	port.CallLedger
+	grants map[domain.AttemptCallID]domain.DispatchGrant
+}
+
+func (l *freshDispatchLedger) BeginDispatch(ctx context.Context, request domain.BeginDispatchRequest) (domain.DispatchGrant, error) {
+	prepared, err := l.LoadCall(ctx, request.CallRecordID)
+	if err != nil {
+		return domain.DispatchGrant{}, err
+	}
+	fresh := false
+	for _, call := range prepared.PhysicalCalls {
+		if call.ID == request.AttemptCallID {
+			fresh = call.State == domain.PhysicalPrepared
+		}
+	}
+	grant, err := l.CallLedger.BeginDispatch(ctx, request)
+	if err == nil && fresh {
+		l.grants[grant.AttemptCallID] = grant
+	}
+	return grant, err
 }

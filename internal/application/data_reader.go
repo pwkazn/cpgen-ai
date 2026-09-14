@@ -7,15 +7,18 @@ import (
 	"errors"
 	"fmt"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
 type DataReader struct {
 	solution   *SolutionReader
-	sandbox    SandboxReadPolicy
+	sandbox    sandboxexec.ReadPolicy
 	generation *GenerationReader
-	calls      CommittedDraftReader
+	calls      durable.CommittedDraftReader
 	store      SandboxEvidenceReadStore
 	blobs      port.VerifiedBlobReader
 }
@@ -234,7 +237,7 @@ func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (
 			}
 		}
 		if generated.Input != nil {
-			raw, err := readSolutionVerificationBlob(ctx, s.blobs, *generated.Input, 1<<20)
+			raw, err := artifact.ReadVerified(ctx, s.blobs, *generated.Input, 1<<20)
 			if err != nil {
 				return empty, err
 			}

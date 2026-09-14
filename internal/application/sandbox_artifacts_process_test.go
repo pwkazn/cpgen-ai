@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -50,7 +51,7 @@ func TestSandboxArtifactDeterministicPublicationRecoversUnsealedProcessCrash(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			sink, err := application.NewSandboxArtifactSink(f.store, blobs, f.clock, identity)
+			sink, err := sandboxexec.NewArtifactSink(f.store, blobs, f.clock, identity)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,11 +110,11 @@ func TestSandboxArtifactCrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ledger application.RunLLMStore = store
+	var ledger durable.Store = store
 	if config.Boundary == "before_dispatch" {
 		ledger = sandboxBeforeDispatchCrashStore{store}
 	}
-	sink, err := application.NewSandboxArtifactSink(ledger, blobs, clock, config.Identity)
+	sink, err := sandboxexec.NewArtifactSink(ledger, blobs, clock, config.Identity)
 	if err != nil {
 		t.Fatal(err)
 	}

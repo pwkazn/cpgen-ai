@@ -9,6 +9,7 @@ import (
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/runlock"
 	"cpgen/internal/similarity"
 	"cpgen/internal/workflow"
@@ -35,7 +36,7 @@ type SimilarityStageConfig struct {
 type SimilarityExecutor struct {
 	reader    *SimilarityContentReader
 	admission *StageAdmission
-	store     RunLLMStore
+	store     durable.Store
 	blobs     *blob.Store
 	clock     clock.Clock
 	locks     *runlock.Manager
@@ -79,7 +80,7 @@ func NewSimilarityExecutorWithConfig(config SimilarityStageConfig) (*SimilarityE
 	if config.RetryPolicy.MaxAttempts > 8 {
 		return nil, errors.New("similarity transport retry bound exceeds eight attempts")
 	}
-	reader, err := NewSimilarityReader(config.Store, config.Blobs, config.Provider)
+	reader, err := durable.NewSimilarityReader(config.Store, config.Blobs, config.Provider)
 	if err != nil {
 		return nil, err
 	}
@@ -120,16 +121,16 @@ func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunV
 	if plan.PolicyDigest != input.ProviderPolicyDigest {
 		return result, errors.New("similarity provider policy changed after input planning")
 	}
-	ledger, err := NewRunBoundLLMLedger(s.store, view.RunID(), attempt.StageName, attempt.AttemptID)
+	ledger, err := durable.NewRunLedger(s.store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err
 	}
-	calls, err := NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
+	calls, err := durable.NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return result, err
 	}
 	logical := request.LogicalIdempotencyKey
-	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: view.RunID(), ExpectedRunVersion: view.Version(), StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
+	open := domain.OpenCallRequest{ID: domain.CallRecordID(durable.MutationID("callrec", logical)), RunID: view.RunID(), ExpectedRunVersion: view.Version(), StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: durable.MutationID("open", logical), At: attempt.StartedAt}
 	searched, err := calls.SearchWithArtifacts(ctx, open, request)
 	result.CallTrace = searched.Outcome.CallTrace
 	if err != nil {
@@ -143,7 +144,7 @@ func (s *SimilarityExecutor) RunSimilarity(ctx context.Context, view domain.RunV
 		return result, nil
 	}
 	if searched.Artifact == nil {
-		return result, ErrSimilarityReplayUnavailable
+		return result, durable.ErrSimilarityReplayUnavailable
 	}
 	decision := similarity.Evaluate(s.reader.config.Policy, *searched.Outcome.Value)
 	if err := decision.Validate(); err != nil {

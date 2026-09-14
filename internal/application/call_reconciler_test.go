@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 )
 
 type reconciliationReceipt struct {
@@ -39,9 +39,9 @@ func TestCallReconcilerClosesUnstartedCallsWithoutPlanningOrDispatch(t *testing.
 		receipt := &reconciliationReceipt{err: errors.New("unstarted call must not read a receipt")}
 		// The facade has no opening, planning or dispatch-start methods.
 		ledger := struct {
-			application.CallReconciliationLedger
+			durable.CallReconciliationLedger
 		}{f.store}
-		service, err := application.NewCallReconciler[string](ledger, receipt, f.clock)
+		service, err := durable.NewCallReconciler[string](ledger, receipt, f.clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestCallReconcilerSettlesOnlyExistingDispatchAndNeverStartsNextRetry(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			service, err := application.NewCallReconciler[string](f.store, receipt, f.clock)
+			service, err := durable.NewCallReconciler[string](f.store, receipt, f.clock)
 			if err != nil {
 				t.Fatal(err)
 			}

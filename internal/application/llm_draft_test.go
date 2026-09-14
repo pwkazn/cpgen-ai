@@ -13,6 +13,7 @@ import (
 	"cpgen/internal/agent"
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -147,7 +148,7 @@ func TestBuiltinDraftsUseDurableRepairAndLocalDomainBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			calls, err := application.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
+			calls, err := durable.NewReplayableLLMCalls(fixture.store, model, blobs, fixture.clock, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,7 +157,7 @@ func TestBuiltinDraftsUseDurableRepairAndLocalDomainBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			for replay := 0; replay < 2; replay++ {
-				structured, err := application.NewStructuredLLMCalls(calls, policy)
+				structured, err := durable.NewStructuredLLMCalls(calls, policy)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/similarity"
@@ -31,7 +32,7 @@ func NewSolutionExecutor(evidence *SimilarityExecutor, generation *GenerationExe
 	return &SolutionExecutor{publisher: newStagePublisher(generation.config.Store, generation.config.Blobs, generation.config.Clock), blobs: generation.config.Blobs, reader: reader, drafts: generation.DraftExecution}, nil
 }
 
-func NewDataExecutor(solution *SolutionExecutor, sandbox DockerSandboxConfig) (*DataExecutor, error) {
+func NewDataExecutor(solution *SolutionExecutor, sandbox sandboxexec.Config) (*DataExecutor, error) {
 	if solution == nil || solution.reader.revision != workflow.GenerationRevision {
 		return nil, errors.New("data executor requires the forward MVP workflow")
 	}
@@ -103,7 +104,7 @@ type Slice2RunServiceConfig struct {
 	Reconciler          SandboxReconciler
 	Recovery            RunRecovery
 	EffectiveConfigJSON []byte
-	SolutionSandbox     *DockerSandboxConfig
+	SolutionSandbox     *sandboxexec.Config
 }
 
 // NewSlice2RunService is the compatibility entry for persisted preview and

@@ -5,12 +5,13 @@ import (
 	"errors"
 
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
 func judgeVerificationIdentity(attempt domain.StageAttempt, version int64) port.SandboxAuthorizationIdentity {
 	const operation = "judge-verification"
-	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(coordinatorMutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxRun, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
+	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID, SandboxExecutionID: domain.SandboxExecutionID(durable.MutationID("sandbox", operation, attempt.RunID, attempt.AttemptID, attempt.InputDigest)), LogicalOperationID: operation, Kind: domain.CallSandboxRun, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
 }
 
 func (s *DataExecutor) RunJudge(ctx context.Context, view domain.RunView, factory SolutionSandboxFactory) (JudgeVerificationResult, error) {
