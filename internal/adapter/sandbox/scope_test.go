@@ -1,4 +1,4 @@
-package application
+package sandbox
 
 import (
 	"os"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestGeneratorCaseChangesSandboxOperationScope(t *testing.T) {
-	file, err := os.Open(filepath.Join("..", "..", "config", "toolchains", "docker-v1.lock.json"))
+	file, err := os.Open(filepath.Join("..", "..", "..", "config", "toolchains", "docker-v1.lock.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestGeneratorCaseChangesSandboxOperationScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := DockerSandboxConfig{Lock: lock, EngineIdentity: domain.SumBytes([]byte("engine"))}
+	base := Config{Lock: lock, EngineIdentity: domain.SumBytes([]byte("engine"))}
 	base.Identity = port.SandboxAuthorizationIdentity{RunID: "run_00000000000000000000000000000001", StageName: "data_verify", AttemptID: "attempt_00000000000000000000000000000001", SandboxExecutionID: "sandbox_00000000000000000000000000000001", LogicalOperationID: "data-verification", Kind: domain.CallSandboxRun, ScopeDigest: domain.SumBytes([]byte("data content")), ExpectedRunVersion: 1}
 	seed := ^uint64(0)
 	request := port.RunRequest{Role: port.RoleGenerator, Program: domain.BlobRef{Digest: domain.SumBytes([]byte("program")), Size: 7}, Seed: &seed, Limits: port.RunLimits{Time: time.Second, MemoryBytes: 256 << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 4096}, Args: port.RoleArgs{GeneratorCase: &port.GeneratorCaseArgs{Ordinal: 1, Kind: domain.DataCaseSmall}}}

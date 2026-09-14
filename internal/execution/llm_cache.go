@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -47,9 +47,9 @@ func NewStructuredLLMCache(structured *StructuredLLMCalls, ledger LLMCacheLedger
 	return &StructuredLLMCache{structured: structured, ledger: ledger, locks: locks, cache: cache}, nil
 }
 
-func (s *StructuredLLMCache) identity(open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, domain.CacheKey, domain.Digest, error) {
+func (s *StructuredLLMCache) Identity(open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, domain.CacheKey, domain.Digest, error) {
 	var key domain.CacheKey
-	open, request, err := s.structured.bind(open, request)
+	open, request, err := s.structured.Bind(open, request)
 	if err != nil {
 		return open, request, key, "", err
 	}
@@ -85,7 +85,7 @@ func (s *StructuredLLMCache) Put(ctx context.Context, open domain.OpenCallReques
 	if ctx == nil {
 		return domain.CacheKey{}, errors.New("LLM cache context is required")
 	}
-	open, request, key, input, err := s.identity(open, request)
+	open, request, key, input, err := s.Identity(open, request)
 	if err != nil {
 		return key, err
 	}
@@ -123,7 +123,7 @@ func (s *StructuredLLMCache) Put(ctx context.Context, open domain.OpenCallReques
 	if err != nil {
 		return key, err
 	}
-	if item.Blob != response.RawBlob.Blob || item.Role != domain.ArtifactEvidence || item.MediaType != llmResponseMediaType || item.LogicalPath != response.RawBlob.LogicalPath || !strings.HasPrefix(string(item.LogicalPath), "private/llm/") || item.Provenance.SchemaVersion != response.RawBlob.Provenance.SchemaVersion || item.Provenance.Producer != response.RawBlob.Provenance.Producer || !digestsMatch(item.Provenance.InputDigest, response.RawBlob.Provenance.InputDigest) {
+	if item.Blob != response.RawBlob.Blob || item.Role != domain.ArtifactEvidence || item.MediaType != llmResponseMediaType || item.LogicalPath != response.RawBlob.LogicalPath || !strings.HasPrefix(string(item.LogicalPath), "private/llm/") || item.Provenance.SchemaVersion != response.RawBlob.Provenance.SchemaVersion || item.Provenance.Producer != response.RawBlob.Provenance.Producer || !DigestsMatch(item.Provenance.InputDigest, response.RawBlob.Provenance.InputDigest) {
 		return key, errors.New("cache source is not the committed private response")
 	}
 	entry := domain.CacheEntry{Key: key, Kind: key.Kind, SchemaVersion: request.Schema.SchemaVersion, PolicyDigest: request.ProviderPolicyDigest, InputDigest: input, State: domain.CacheEntryValid, CreatedAt: s.structured.calls.clock.Now(), Source: source, Blobs: []domain.CacheBlob{item}}
@@ -144,7 +144,7 @@ func matchesSuccessfulProviderReceipt(prepared domain.PreparedCalls, id domain.A
 	}
 	for _, physical := range prepared.PhysicalCalls {
 		if physical.ID == id {
-			return physical.Kind == domain.PhysicalLLMRequest && physical.State == domain.PhysicalCompleted && physical.Outcome != nil && *physical.Outcome == domain.PhysicalOutcomeSuccess && physical.ProviderRequestID == execution.ProviderRequestID && digestsMatch(physical.ResponseDigest, execution.ResponseDigest)
+			return physical.Kind == domain.PhysicalLLMRequest && physical.State == domain.PhysicalCompleted && physical.Outcome != nil && *physical.Outcome == domain.PhysicalOutcomeSuccess && physical.ProviderRequestID == execution.ProviderRequestID && DigestsMatch(physical.ResponseDigest, execution.ResponseDigest)
 		}
 	}
 	return false
@@ -157,7 +157,7 @@ func (s *StructuredLLMCache) Reuse(ctx context.Context, open domain.OpenCallRequ
 	if ctx == nil {
 		return result, errors.New("LLM cache context is required")
 	}
-	open, request, key, input, err := s.identity(open, request)
+	open, request, key, input, err := s.Identity(open, request)
 	if err != nil {
 		return result, err
 	}
@@ -165,8 +165,8 @@ func (s *StructuredLLMCache) Reuse(ctx context.Context, open domain.OpenCallRequ
 	open.Kind = domain.CallCacheReuse
 	open.Provider = "private-llm-cache"
 	open.RequestDigest = key.Digest
-	finish := domain.FinishCallRequest{RunID: open.RunID, ExpectedRunVersion: open.ExpectedRunVersion, StageName: open.StageName, AttemptID: open.AttemptID, CallRecordID: open.ID, IdempotencyKey: coordinatorMutationID("finish", open.ID, "private-llm-cache"), At: open.At}
-	reuse := domain.CommitCacheReuse{CacheReuseRecordID: domain.CacheReuseRecordID(coordinatorMutationID("reuse", open.ID, "private-llm-cache"))}
+	finish := domain.FinishCallRequest{RunID: open.RunID, ExpectedRunVersion: open.ExpectedRunVersion, StageName: open.StageName, AttemptID: open.AttemptID, CallRecordID: open.ID, IdempotencyKey: MutationID("finish", open.ID, "private-llm-cache"), At: open.At}
+	reuse := domain.CommitCacheReuse{CacheReuseRecordID: domain.CacheReuseRecordID(MutationID("reuse", open.ID, "private-llm-cache"))}
 	var response *port.GenerateResponse
 	hit, err := s.cache.ReuseValidated(ctx, domain.CacheReuseRequest{Lookup: lookup, OpenCall: open, FinishCall: finish, Reuse: reuse}, func(candidate domain.CacheCandidate) error {
 		var err error

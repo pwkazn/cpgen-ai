@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -32,7 +32,7 @@ func TestLLMValidationReceiptRetainsSafeRepairEvidenceAcrossRestart(t *testing.T
 			t.Fatalf("private data leaked: %s", private)
 		}
 	}
-	service, err := application.NewReplayableLLMCalls(f.store, f.model, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(f.store, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestLLMValidationReceiptRetainsSafeRepairEvidenceAcrossRestart(t *testing.T
 func TestLLMValidationReceiptRecoversBeforePhysicalAccounting(t *testing.T) {
 	f := newLLMReplayContentFixture(t, `{"title":"private-response"}`)
 	ledger := &interruptedLLMReplayLedger{Store: f.store, boundary: "complete"}
-	service, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

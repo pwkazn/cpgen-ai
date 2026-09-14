@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -27,7 +28,7 @@ type GenerationReaderOptions struct {
 
 type GenerationReader struct {
 	store           GenerationReadStore
-	idea, statement CommittedDraftReader
+	idea, statement durable.CommittedDraftReader
 	options         GenerationReaderOptions
 }
 
@@ -50,7 +51,7 @@ type GenerationStatementContent struct {
 	Problem domain.ProblemSpec
 }
 
-func NewGenerationReader(store GenerationReadStore, idea, statement CommittedDraftReader, options GenerationReaderOptions) (*GenerationReader, error) {
+func NewGenerationReader(store GenerationReadStore, idea, statement durable.CommittedDraftReader, options GenerationReaderOptions) (*GenerationReader, error) {
 	if store == nil || idea == nil || statement == nil {
 		return nil, errors.New("generation reader requires typed storage and both structured response readers")
 	}
@@ -179,7 +180,7 @@ func (r *GenerationReader) ReadStatement(ctx context.Context, runID domain.RunID
 	return GenerationStatementContent{idea, problem}, nil
 }
 
-func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, stage domain.StageName, inputDigest domain.Digest, variables []byte, service CommittedDraftReader) ([]byte, domain.Digest, error) {
+func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, stage domain.StageName, inputDigest domain.Digest, variables []byte, service durable.CommittedDraftReader) ([]byte, domain.Digest, error) {
 	committed, err := r.store.ReadCommittedLLMStage(ctx, runID, stage)
 	if err != nil {
 		return nil, "", err
@@ -234,7 +235,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 			return nil, "", err
 		}
 		open := domain.OpenCallRequest{ID: candidate.ID, RunID: candidate.RunID, ExpectedRunVersion: 1, StageName: candidate.StageName, AttemptID: candidate.AttemptID, LogicalOperationID: candidate.LogicalOperationID, Kind: candidate.Kind, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: candidate.RetryPolicy, IdempotencyKey: candidate.IdempotencyKey, At: candidate.OpenedAt}
-		bound, _, err := service.bind(open, request)
+		bound, _, err := service.Bind(open, request)
 		if err != nil {
 			return nil, "", err
 		}
@@ -257,7 +258,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 		if err != nil {
 			return nil, "", err
 		}
-		if actualSource != selected.Source || item.SourceOccurrenceID != selected.Blob.SourceOccurrenceID || item.Blob != selected.Blob.Blob || item.MediaType != selected.Blob.MediaType || item.Role != selected.Blob.Role || item.LogicalPath != selected.Blob.LogicalPath || item.Provenance.SchemaVersion != selected.Blob.Provenance.SchemaVersion || item.Provenance.Producer != selected.Blob.Provenance.Producer || !digestsMatch(item.Provenance.InputDigest, selected.Blob.Provenance.InputDigest) {
+		if actualSource != selected.Source || item.SourceOccurrenceID != selected.Blob.SourceOccurrenceID || item.Blob != selected.Blob.Blob || item.MediaType != selected.Blob.MediaType || item.Role != selected.Blob.Role || item.LogicalPath != selected.Blob.LogicalPath || item.Provenance.SchemaVersion != selected.Blob.Provenance.SchemaVersion || item.Provenance.Producer != selected.Blob.Provenance.Producer || !durable.DigestsMatch(item.Provenance.InputDigest, selected.Blob.Provenance.InputDigest) {
 			return nil, "", errors.New("committed draft response differs from current stage provenance")
 		}
 		return append([]byte(nil), response.Structured...), *attempt.OutputDigest, nil

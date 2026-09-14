@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/domain"
 	"cpgen/internal/judge"
 	"cpgen/internal/port"
@@ -16,7 +17,7 @@ type QualityReader struct {
 	data       *DataReader
 	store      SandboxEvidenceReadStore
 	blobs      port.VerifiedBlobReader
-	sandbox    SandboxReadPolicy
+	sandbox    sandboxexec.ReadPolicy
 	similarity CommittedSimilarityReader
 }
 

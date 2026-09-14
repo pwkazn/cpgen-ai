@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
 )
@@ -65,7 +66,7 @@ func (s *SolutionExecutor) VerifyDraft(ctx context.Context, view domain.RunView,
 
 func solutionVerificationIdentity(attempt domain.StageAttempt, version int64) port.SandboxAuthorizationIdentity {
 	return port.SandboxAuthorizationIdentity{RunID: attempt.RunID, StageName: attempt.StageName, AttemptID: attempt.AttemptID,
-		SandboxExecutionID: domain.SandboxExecutionID(coordinatorMutationID("sandbox", "solution-verification", attempt.RunID, attempt.AttemptID, attempt.InputDigest)),
+		SandboxExecutionID: domain.SandboxExecutionID(durable.MutationID("sandbox", "solution-verification", attempt.RunID, attempt.AttemptID, attempt.InputDigest)),
 		LogicalOperationID: "solution-verification", Kind: domain.CallSandboxCompile, ScopeDigest: attempt.InputDigest, ExpectedRunVersion: version}
 }
 

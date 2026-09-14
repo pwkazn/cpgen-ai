@@ -2,9 +2,10 @@ package application_test
 
 import (
 	"context"
-	"cpgen/internal/application"
 	"reflect"
 	"testing"
+
+	durable "cpgen/internal/execution"
 )
 
 func TestStructuredLLMCommittedReadRequiresAttachmentAndNeverGenerates(t *testing.T) {
@@ -18,9 +19,9 @@ func TestStructuredLLMCommittedReadRequiresAttachmentAndNeverGenerates(t *testin
 			f := newStructuredLLMOptionsFixture(t, options)
 			// Deliberately expose only read methods; no dispatcher or writer is
 			// available to this composition, even through interface assertions.
-			reader, err := application.NewCommittedLLMReader(struct {
-				application.CommittedLLMReadStore
-			}{f.store}, f.blobs, struct{ application.LLMReadPolicy }{f.model}, f.policy)
+			reader, err := durable.NewCommittedLLMReader(struct {
+				durable.CommittedLLMReadStore
+			}{f.store}, f.blobs, struct{ durable.LLMReadPolicy }{f.model}, f.policy)
 			if err != nil {
 				t.Fatal(err)
 			}

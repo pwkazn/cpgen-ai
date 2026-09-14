@@ -11,12 +11,15 @@ import (
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
 )
 
 type GenerationExecutionStore interface {
-	RunLLMStore
+	durable.Store
+	durable.LLMCacheLedger
+	port.RuntimeStore
 	port.GenerationStore
 }
 
@@ -27,9 +30,9 @@ type GenerationExecutorConfig struct {
 	Clock                       clock.Clock
 	Locks                       *runlock.Manager
 	Content                     GenerationReaderOptions
-	IdeaRepair, StatementRepair FormatRepairPolicy
-	SolutionRepair              FormatRepairPolicy
-	DataRepair                  FormatRepairPolicy
+	IdeaRepair, StatementRepair durable.FormatRepairPolicy
+	SolutionRepair              durable.FormatRepairPolicy
+	DataRepair                  durable.FormatRepairPolicy
 	RetryPolicy                 domain.RetryPolicy
 	CostUpperBoundMicroUSD      int64
 }
@@ -61,7 +64,7 @@ type GenerationStageResult[T any] struct {
 }
 
 type generationCachePublication struct {
-	cache   *StructuredLLMCache
+	cache   *durable.StructuredLLMCache
 	open    domain.OpenCallRequest
 	request port.GenerateRequest
 }
@@ -105,8 +108,8 @@ func NewGenerationExecutor(config GenerationExecutorConfig) (*GenerationExecutor
 
 func (s *GenerationExecutor) Reader() *GenerationReader { return s.reader }
 
-func (s *DraftExecution) calls(ledger LLMArtifactLedger, stage domain.StageName) (*StructuredLLMCalls, error) {
-	calls, err := NewReplayableLLMCalls(ledger, s.config.LLM, s.config.Blobs, s.config.Clock, s.config.CostUpperBoundMicroUSD)
+func (s *DraftExecution) calls(ledger durable.ArtifactCallLedger, stage domain.StageName) (*durable.StructuredLLMCalls, error) {
+	calls, err := durable.NewReplayableLLMCalls(ledger, s.config.LLM, s.config.Blobs, s.config.Clock, s.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +123,7 @@ func (s *DraftExecution) calls(ledger LLMArtifactLedger, stage domain.StageName)
 	if stage == "data" {
 		policy = s.config.DataRepair
 	}
-	return NewStructuredLLMCalls(calls, policy)
+	return durable.NewStructuredLLMCalls(calls, policy)
 }
 
 func (s *GenerationExecutor) RunIdea(ctx context.Context, view domain.RunView, input domain.GenerationRequestSnapshotV1) (GenerationStageResult[domain.IdeaBatch], error) {
@@ -253,7 +256,7 @@ func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
 
 func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
 	var result generatedDraft
-	ledger, err := NewRunBoundLLMLedger(s.config.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
+	ledger, err := durable.NewRunLedger(s.config.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err
 	}
@@ -261,7 +264,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	if err != nil {
 		return result, err
 	}
-	cache, err := NewStructuredLLMCache(service, s.config.Store, s.config.Locks)
+	cache, err := durable.NewStructuredLLMCache(service, s.config.Store, s.config.Locks)
 	if err != nil {
 		return result, err
 	}
@@ -297,7 +300,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 			return result, hit.Outcome.Validate()
 		}
 		if readErr == nil {
-			return result, ErrLLMReplayUnavailable
+			return result, durable.ErrLLMReplayUnavailable
 		}
 	}
 	generated, err := service.Generate(ctx, open, request)

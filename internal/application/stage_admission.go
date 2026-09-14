@@ -2,10 +2,11 @@ package application
 
 import (
 	"context"
+	"errors"
+
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
 	"cpgen/internal/workflow"
-	"errors"
 )
 
 // StageAdmission validates the active run, frozen policy, budget and current attempt.

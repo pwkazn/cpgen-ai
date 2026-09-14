@@ -12,6 +12,7 @@ import (
 
 	"cpgen/internal/cli"
 	"cpgen/internal/domain"
+
 	sqlitedriver "modernc.org/sqlite"
 )
 

@@ -6,6 +6,7 @@ import (
 
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 )
 
 // ReconcileStage restores the exact existing Similarity operation. Its input
@@ -42,17 +43,17 @@ func (s *SimilarityExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 		return errors.New("similarity cleanup provider policy differs")
 	}
 	logical := request.LogicalIdempotencyKey
-	open := domain.OpenCallRequest{ID: domain.CallRecordID(coordinatorMutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: current.Version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: coordinatorMutationID("open", logical), At: attempt.StartedAt}
+	open := domain.OpenCallRequest{ID: domain.CallRecordID(durable.MutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: current.Version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallSimilaritySearch, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: plan.PolicyDigest, RetryPolicy: s.reader.config.RetryPolicy, IdempotencyKey: durable.MutationID("open", logical), At: attempt.StartedAt}
 	if _, err := s.store.ReadLogicalCall(ctx, open.ID); errors.Is(err, sqlite.ErrNotFound) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	ledger, err := NewRunBoundLLMLedger(s.store, runID, attempt.StageName, attempt.AttemptID)
+	ledger, err := durable.NewRunLedger(s.store, runID, attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return err
 	}
-	calls, err := NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
+	calls, err := durable.NewReplayableSimilarityCalls(ledger, s.provider, s.blobs, s.clock, s.reader.config.CostUpperBoundMicroUSD)
 	if err != nil {
 		return err
 	}

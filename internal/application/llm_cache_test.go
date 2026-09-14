@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
 )
@@ -100,7 +100,7 @@ func TestStructuredLLMCacheStoresOriginalSuccessWithRepairDisabled(t *testing.T)
 	f := newStructuredLLMOptionsFixture(t, structuredLLMOptions{firstContent: `{"schema_version":"cpgen.idea/v1","title":"original"}`, maxCalls: 1})
 	f.policy.MaxRepairs = 0
 	var err error
-	f.structured, err = application.NewStructuredLLMCalls(f.calls, f.policy)
+	f.structured, err = durable.NewStructuredLLMCalls(f.calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,11 +227,11 @@ func TestStructuredLLMCacheResumesFailedReuseCommitWithoutAnotherCall(t *testing
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	f.store = reopened
-	f.calls, err = application.NewReplayableLLMCalls(reopened, f.model, f.blobs, f.clock, 100)
+	f.calls, err = durable.NewReplayableLLMCalls(reopened, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.structured, err = application.NewStructuredLLMCalls(f.calls, f.policy)
+	f.structured, err = durable.NewStructuredLLMCalls(f.calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,25 +250,25 @@ func (l *interruptedLLMCacheLedger) CommitReuseCollection(context.Context, domai
 	return nil, errors.New("injected reuse commit failure")
 }
 
-func structuredCacheService(t *testing.T, f structuredLLMFixture) *application.StructuredLLMCache {
+func structuredCacheService(t *testing.T, f structuredLLMFixture) *durable.StructuredLLMCache {
 	return structuredCacheServiceWithLedger(t, f, f.store)
 }
 
-func structuredCacheServiceWithLedger(t *testing.T, f structuredLLMFixture, ledger application.LLMCacheLedger) *application.StructuredLLMCache {
+func structuredCacheServiceWithLedger(t *testing.T, f structuredLLMFixture, ledger durable.LLMCacheLedger) *durable.StructuredLLMCache {
 	t.Helper()
 	locks, err := runlock.NewManager(t.TempDir(), runlock.Options{PollInterval: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	cache, err := application.NewStructuredLLMCache(f.structured, ledger, locks)
+	cache, err := durable.NewStructuredLLMCache(f.structured, ledger, locks)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cache
 }
 
-func commitStructuredSource(t *testing.T, f structuredLLMFixture, result application.StructuredLLMResult) (domain.OpenCallRequest, port.GenerateRequest) {
+func commitStructuredSource(t *testing.T, f structuredLLMFixture, result durable.StructuredLLMResult) (domain.OpenCallRequest, port.GenerateRequest) {
 	t.Helper()
 	output := domain.SumBytes(result.Outcome.Value.Structured)
 	finish := domain.FinishStageCommand{RunID: f.runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: f.attemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, IdempotencyKey: "finish_00000000000000000000000000000902", At: f.clock.Now()}

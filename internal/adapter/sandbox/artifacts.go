@@ -1,4 +1,4 @@
-package application
+package sandbox
 
 import (
 	"context"
@@ -11,38 +11,40 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
 // SandboxArtifactSink owns one operation's local publications. Its caller
 // holds the run and artifact-maintenance locks. Every write has its own byte
 // reservation; container identities never replace artifact writer identities.
-type SandboxArtifactSink struct {
-	ledger   *RunBoundLLMLedger
+type ArtifactSink struct {
+	ledger   *durable.RunLedger
 	blobs    *blob.Store
 	clock    clock.Clock
 	identity port.SandboxAuthorizationIdentity
 }
 
-func (s *SandboxArtifactSink) RunID() domain.RunID { return s.identity.RunID }
+func (s *ArtifactSink) RunID() domain.RunID { return s.identity.RunID }
 
-func NewSandboxArtifactSink(store RunLLMStore, blobs *blob.Store, source clock.Clock, identity port.SandboxAuthorizationIdentity) (*SandboxArtifactSink, error) {
+func NewArtifactSink(store durable.Store, blobs *blob.Store, source clock.Clock, identity port.SandboxAuthorizationIdentity) (*ArtifactSink, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
 	if blobs == nil || source == nil {
 		return nil, errors.New("sandbox artifact storage and clock are required")
 	}
-	ledger, err := NewRunBoundLLMLedger(store, identity.RunID, identity.StageName, identity.AttemptID)
+	ledger, err := durable.NewRunLedger(store, identity.RunID, identity.StageName, identity.AttemptID)
 	if err != nil {
 		return nil, err
 	}
-	return &SandboxArtifactSink{ledger: ledger, blobs: blobs, clock: source, identity: identity}, nil
+	return &ArtifactSink{ledger: ledger, blobs: blobs, clock: source, identity: identity}, nil
 }
 
-func (s *SandboxArtifactSink) binding(decl port.ArtifactDeclaration) (domain.OpenCallRequest, domain.ArtifactDeclarationRecord, error) {
+func (s *ArtifactSink) binding(decl port.ArtifactDeclaration) (domain.OpenCallRequest, domain.ArtifactDeclarationRecord, error) {
 	if err := decl.Validate(); err != nil {
 		return domain.OpenCallRequest{}, domain.ArtifactDeclarationRecord{}, err
 	}
@@ -58,15 +60,15 @@ func (s *SandboxArtifactSink) binding(decl port.ArtifactDeclaration) (domain.Ope
 		return domain.OpenCallRequest{}, domain.ArtifactDeclarationRecord{}, err
 	}
 	digest := domain.SumBytes(raw)
-	id := domain.CallRecordID(coordinatorMutationID("callrec", "sandbox-artifact", i.RunID, i.AttemptID, i.LogicalOperationID, decl.LogicalPath))
-	physical := domain.AttemptCallID(coordinatorMutationID("call", id))
-	reservation := domain.ReservationID(coordinatorMutationID("res", physical))
-	open := domain.OpenCallRequest{ID: id, RunID: i.RunID, ExpectedRunVersion: i.ExpectedRunVersion, StageName: i.StageName, AttemptID: i.AttemptID, LogicalOperationID: "sandbox-artifact:" + string(id), Kind: i.Kind, Provider: "blob", RequestDigest: digest, PolicyDigest: i.ScopeDigest, RetryPolicy: domain.RetryPolicy{MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond, JitterSeedDigest: i.ScopeDigest}, IdempotencyKey: coordinatorMutationID("open", id), At: s.clock.Now().UTC()}
-	declaration := domain.ArtifactDeclarationRecord{ID: domain.ArtifactDeclarationID(coordinatorMutationID("decl", id)), RunID: i.RunID, StageName: i.StageName, AttemptID: i.AttemptID, CallRecordID: id, AttemptCallID: physical, ReservationID: reservation, ReservationSubkey: "artifact", MediaType: decl.MediaType, Role: decl.Role, LogicalPath: decl.LogicalPath, MaxBytes: decl.MaxBytes, Provenance: decl.Provenance, CreatedAt: open.At}
+	id := domain.CallRecordID(durable.MutationID("callrec", "sandbox-artifact", i.RunID, i.AttemptID, i.LogicalOperationID, decl.LogicalPath))
+	physical := domain.AttemptCallID(durable.MutationID("call", id))
+	reservation := domain.ReservationID(durable.MutationID("res", physical))
+	open := domain.OpenCallRequest{ID: id, RunID: i.RunID, ExpectedRunVersion: i.ExpectedRunVersion, StageName: i.StageName, AttemptID: i.AttemptID, LogicalOperationID: "sandbox-artifact:" + string(id), Kind: i.Kind, Provider: "blob", RequestDigest: digest, PolicyDigest: i.ScopeDigest, RetryPolicy: domain.RetryPolicy{MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond, JitterSeedDigest: i.ScopeDigest}, IdempotencyKey: durable.MutationID("open", id), At: s.clock.Now().UTC()}
+	declaration := domain.ArtifactDeclarationRecord{ID: domain.ArtifactDeclarationID(durable.MutationID("decl", id)), RunID: i.RunID, StageName: i.StageName, AttemptID: i.AttemptID, CallRecordID: id, AttemptCallID: physical, ReservationID: reservation, ReservationSubkey: "artifact", MediaType: decl.MediaType, Role: decl.Role, LogicalPath: decl.LogicalPath, MaxBytes: decl.MaxBytes, Provenance: decl.Provenance, CreatedAt: open.At}
 	return open, declaration, nil
 }
 
-func (s *SandboxArtifactSink) load(ctx context.Context, decl port.ArtifactDeclaration, create bool) (domain.PreparedCalls, domain.ArtifactDeclarationRecord, bool, error) {
+func (s *ArtifactSink) load(ctx context.Context, decl port.ArtifactDeclaration, create bool) (domain.PreparedCalls, domain.ArtifactDeclarationRecord, bool, error) {
 	open, d, err := s.binding(decl)
 	if err != nil {
 		return domain.PreparedCalls{}, d, false, err
@@ -88,7 +90,7 @@ func (s *SandboxArtifactSink) load(ctx context.Context, decl port.ArtifactDeclar
 	d.CreatedAt = record.OpenedAt
 	var prepared domain.PreparedCalls
 	if record.State == domain.CallRecordOpen && create {
-		prepared, err = s.ledger.PrepareCalls(ctx, domain.PrepareCallsRequest{RunID: open.RunID, ExpectedRunVersion: open.ExpectedRunVersion, StageName: open.StageName, AttemptID: open.AttemptID, CallRecordID: open.ID, PlanDigest: open.RequestDigest, Calls: []domain.PhysicalCallPlan{{ID: d.AttemptCallID, Ordinal: 1, RetryGroup: "artifact", RetryOrdinal: 1, Kind: domain.PhysicalLocalArtifactWrite, Provider: "blob", RequestDigest: open.RequestDigest, IdempotencyKey: coordinatorMutationID("physical", d.AttemptCallID), Reservations: []domain.ReservationPlan{{ID: d.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: d.ReservationSubkey, UpperBound: d.MaxBytes}}}}, IdempotencyKey: coordinatorMutationID("prepare", open.ID), At: s.clock.Now().UTC()})
+		prepared, err = s.ledger.PrepareCalls(ctx, domain.PrepareCallsRequest{RunID: open.RunID, ExpectedRunVersion: open.ExpectedRunVersion, StageName: open.StageName, AttemptID: open.AttemptID, CallRecordID: open.ID, PlanDigest: open.RequestDigest, Calls: []domain.PhysicalCallPlan{{ID: d.AttemptCallID, Ordinal: 1, RetryGroup: "artifact", RetryOrdinal: 1, Kind: domain.PhysicalLocalArtifactWrite, Provider: "blob", RequestDigest: open.RequestDigest, IdempotencyKey: durable.MutationID("physical", d.AttemptCallID), Reservations: []domain.ReservationPlan{{ID: d.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: d.ReservationSubkey, UpperBound: d.MaxBytes}}}}, IdempotencyKey: durable.MutationID("prepare", open.ID), At: s.clock.Now().UTC()})
 	} else if record.State == domain.CallRecordOpen {
 		return domain.PreparedCalls{}, d, false, nil
 	} else {
@@ -108,11 +110,11 @@ func (s *SandboxArtifactSink) load(ctx context.Context, decl port.ArtifactDeclar
 	return prepared, d, true, nil
 }
 
-func (s *SandboxArtifactSink) Prepare(ctx context.Context, decl port.ArtifactDeclaration) (port.ArtifactWriter, error) {
+func (s *ArtifactSink) Prepare(ctx context.Context, decl port.ArtifactDeclaration) (port.ArtifactWriter, error) {
 	return s.prepare(ctx, decl, false)
 }
 
-func (s *SandboxArtifactSink) prepare(ctx context.Context, decl port.ArtifactDeclaration, restart bool) (port.ArtifactWriter, error) {
+func (s *ArtifactSink) prepare(ctx context.Context, decl port.ArtifactDeclaration, restart bool) (port.ArtifactWriter, error) {
 	p, d, _, err := s.load(ctx, decl, true)
 	if err != nil {
 		return nil, err
@@ -124,7 +126,7 @@ func (s *SandboxArtifactSink) prepare(ctx context.Context, decl port.ArtifactDec
 	if p.PhysicalCalls[0].State != domain.PhysicalPrepared && !(restart && resumed) {
 		return nil, errors.New("sandbox artifact boundary cannot be rewritten")
 	}
-	session, err := NewPreparedArtifactSession(s.ledger, s.blobs, p)
+	session, err := artifact.NewPreparedArtifactSession(s.ledger, s.blobs, p)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +143,7 @@ func (s *SandboxArtifactSink) prepare(ctx context.Context, decl port.ArtifactDec
 	if resumed {
 		grant, err = s.ledger.ResumeDispatch(ctx, s.identity.ExpectedRunVersion, d.AttemptCallID)
 	} else {
-		grant, err = s.ledger.BeginDispatch(ctx, domain.BeginDispatchRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, IdempotencyKey: coordinatorMutationID("begin", d.AttemptCallID), At: s.clock.Now().UTC()})
+		grant, err = s.ledger.BeginDispatch(ctx, domain.BeginDispatchRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, IdempotencyKey: durable.MutationID("begin", d.AttemptCallID), At: s.clock.Now().UTC()})
 	}
 	if err != nil {
 		return nil, errors.Join(err, writer.Abort(context.WithoutCancel(ctx)))
@@ -149,11 +151,11 @@ func (s *SandboxArtifactSink) prepare(ctx context.Context, decl port.ArtifactDec
 	return &sandboxArtifactWriter{ArtifactWriter: writer, sink: s, declaration: d, grant: grant}, nil
 }
 
-func (*SandboxArtifactSink) PinExisting(context.Context, domain.BlobRef, port.ArtifactDeclaration) (domain.PendingArtifact, error) {
+func (*ArtifactSink) PinExisting(context.Context, domain.BlobRef, port.ArtifactDeclaration) (domain.PendingArtifact, error) {
 	return domain.PendingArtifact{}, errors.New("sandbox artifact reuse requires its exact publication receipt")
 }
 
-func (s *SandboxArtifactSink) Publish(ctx context.Context, decl port.ArtifactDeclaration, data []byte) (domain.PendingArtifact, error) {
+func (s *ArtifactSink) Publish(ctx context.Context, decl port.ArtifactDeclaration, data []byte) (domain.PendingArtifact, error) {
 	if int64(len(data)) > decl.MaxBytes {
 		return domain.PendingArtifact{}, errors.New("sandbox artifact payload exceeds declaration")
 	}
@@ -175,7 +177,7 @@ func (s *SandboxArtifactSink) Publish(ctx context.Context, decl port.ArtifactDec
 	return writer.Finalize(ctx)
 }
 
-func (s *SandboxArtifactSink) Read(ctx context.Context, decl port.ArtifactDeclaration) (domain.PendingArtifact, bool, error) {
+func (s *ArtifactSink) Read(ctx context.Context, decl port.ArtifactDeclaration) (domain.PendingArtifact, bool, error) {
 	p, d, found, err := s.load(ctx, decl, false)
 	if err != nil || !found {
 		return domain.PendingArtifact{}, false, err
@@ -194,7 +196,7 @@ func (s *SandboxArtifactSink) Read(ctx context.Context, decl port.ArtifactDeclar
 		return domain.PendingArtifact{}, false, errors.New("sandbox artifact declaration differs from receipt")
 	}
 	if token.State == domain.ArtifactWriterSealed {
-		session, err := NewPreparedArtifactSession(s.ledger, s.blobs, p)
+		session, err := artifact.NewPreparedArtifactSession(s.ledger, s.blobs, p)
 		if err != nil {
 			return domain.PendingArtifact{}, false, err
 		}
@@ -229,12 +231,12 @@ func (s *SandboxArtifactSink) Read(ctx context.Context, decl port.ArtifactDeclar
 // ReadDeclared recovers a publication by its exact operation-owned path. The
 // persisted declaration is still checked against the original call binding by
 // Read; this does not authorize a new writer or an unrelated blob lookup.
-func (s *SandboxArtifactSink) ReadDeclared(ctx context.Context, path domain.SafeRelPath) (domain.PendingArtifact, bool, error) {
+func (s *ArtifactSink) ReadDeclared(ctx context.Context, path domain.SafeRelPath) (domain.PendingArtifact, bool, error) {
 	if err := path.Validate(); err != nil {
 		return domain.PendingArtifact{}, false, err
 	}
-	id := domain.CallRecordID(coordinatorMutationID("callrec", "sandbox-artifact", s.identity.RunID, s.identity.AttemptID, s.identity.LogicalOperationID, path))
-	declID := domain.ArtifactDeclarationID(coordinatorMutationID("decl", id))
+	id := domain.CallRecordID(durable.MutationID("callrec", "sandbox-artifact", s.identity.RunID, s.identity.AttemptID, s.identity.LogicalOperationID, path))
+	declID := domain.ArtifactDeclarationID(durable.MutationID("decl", id))
 	decl, _, err := s.ledger.ReadArtifactWriter(ctx, declID)
 	if errors.Is(err, sqlite.ErrNotFound) {
 		return domain.PendingArtifact{}, false, nil
@@ -248,7 +250,7 @@ func (s *SandboxArtifactSink) ReadDeclared(ctx context.Context, path domain.Safe
 	return s.Read(ctx, port.ArtifactDeclaration{MediaType: decl.MediaType, Role: decl.Role, LogicalPath: decl.LogicalPath, MaxBytes: decl.MaxBytes, Provenance: decl.Provenance})
 }
 
-func (s *SandboxArtifactSink) complete(ctx context.Context, d domain.ArtifactDeclarationRecord, pending domain.PendingArtifact) error {
+func (s *ArtifactSink) complete(ctx context.Context, d domain.ArtifactDeclarationRecord, pending domain.PendingArtifact) error {
 	p, err := s.ledger.LoadCall(ctx, d.CallRecordID)
 	if err != nil {
 		return err
@@ -268,7 +270,7 @@ func (s *SandboxArtifactSink) complete(ctx context.Context, d domain.ArtifactDec
 		physical.State = domain.PhysicalSent
 	}
 	if physical.State == domain.PhysicalSent {
-		err := s.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, State: domain.PhysicalCompleted, Outcome: domain.PhysicalOutcomeSuccess, ProviderRequestID: "local-artifact:" + string(pending.WriterTokenID), ResponseDigest: &pending.Blob.Digest, Usage: []domain.ReservationUsage{{ReservationID: d.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: d.ReservationSubkey, Value: pending.PhysicalNewBytes, Verified: true}}, IdempotencyKey: coordinatorMutationID("complete", d.AttemptCallID), At: s.clock.Now().UTC()})
+		err := s.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, State: domain.PhysicalCompleted, Outcome: domain.PhysicalOutcomeSuccess, ProviderRequestID: "local-artifact:" + string(pending.WriterTokenID), ResponseDigest: &pending.Blob.Digest, Usage: []domain.ReservationUsage{{ReservationID: d.ReservationID, Dimension: domain.BudgetArtifactPhysicalNewBytes, Subkey: d.ReservationSubkey, Value: pending.PhysicalNewBytes, Verified: true}}, IdempotencyKey: durable.MutationID("complete", d.AttemptCallID), At: s.clock.Now().UTC()})
 		if err != nil {
 			return err
 		}
@@ -276,14 +278,14 @@ func (s *SandboxArtifactSink) complete(ctx context.Context, d domain.ArtifactDec
 		return errors.New("sandbox artifact lacks a successful publication receipt")
 	}
 	if p.Call.State != domain.CallRecordTerminal {
-		_, err = s.ledger.FinishCall(ctx, domain.FinishCallRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, DispatchKind: domain.DispatchDispatched, ResultAttemptCallID: &d.AttemptCallID, IdempotencyKey: coordinatorMutationID("finish", d.CallRecordID), At: s.clock.Now().UTC()})
+		_, err = s.ledger.FinishCall(ctx, domain.FinishCallRequest{RunID: d.RunID, ExpectedRunVersion: s.identity.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, DispatchKind: domain.DispatchDispatched, ResultAttemptCallID: &d.AttemptCallID, IdempotencyKey: durable.MutationID("finish", d.CallRecordID), At: s.clock.Now().UTC()})
 	}
 	return err
 }
 
 type sandboxArtifactWriter struct {
 	port.ArtifactWriter
-	sink        *SandboxArtifactSink
+	sink        *ArtifactSink
 	declaration domain.ArtifactDeclarationRecord
 	grant       domain.DispatchGrant
 	pending     *domain.PendingArtifact
@@ -316,10 +318,10 @@ func (w *sandboxArtifactWriter) Abort(ctx context.Context) error {
 	}
 	d := w.declaration
 	failure := &domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}
-	if err := w.sink.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: d.RunID, ExpectedRunVersion: w.grant.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, State: domain.PhysicalAbortedNoDispatch, Outcome: domain.PhysicalOutcomeNoSend, Failure: failure, IdempotencyKey: coordinatorMutationID("abort", d.AttemptCallID), At: w.sink.clock.Now().UTC()}); err != nil {
+	if err := w.sink.ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: d.RunID, ExpectedRunVersion: w.grant.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, AttemptCallID: d.AttemptCallID, State: domain.PhysicalAbortedNoDispatch, Outcome: domain.PhysicalOutcomeNoSend, Failure: failure, IdempotencyKey: durable.MutationID("abort", d.AttemptCallID), At: w.sink.clock.Now().UTC()}); err != nil {
 		return err
 	}
-	_, err := w.sink.ledger.FinishCall(ctx, domain.FinishCallRequest{RunID: d.RunID, ExpectedRunVersion: w.grant.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, DispatchKind: domain.DispatchNone, Failure: failure, IdempotencyKey: coordinatorMutationID("finish", d.CallRecordID), At: w.sink.clock.Now().UTC()})
+	_, err := w.sink.ledger.FinishCall(ctx, domain.FinishCallRequest{RunID: d.RunID, ExpectedRunVersion: w.grant.ExpectedRunVersion, StageName: d.StageName, AttemptID: d.AttemptID, CallRecordID: d.CallRecordID, DispatchKind: domain.DispatchNone, Failure: failure, IdempotencyKey: durable.MutationID("finish", d.CallRecordID), At: w.sink.clock.Now().UTC()})
 	if err == nil {
 		w.aborted = true
 	}

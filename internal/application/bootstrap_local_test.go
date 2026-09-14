@@ -2,11 +2,12 @@ package application_test
 
 import (
 	"context"
+	"path/filepath"
+	"testing"
+
 	"cpgen/internal/application"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
-	"path/filepath"
-	"testing"
 )
 
 func TestBootstrapLocalClosesPersistenceWithoutExecutors(t *testing.T) {

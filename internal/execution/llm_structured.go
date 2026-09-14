@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
+
+const FormatRepairInputSchema domain.SchemaVersion = "cpgen.format-repair-input/v1"
 
 // FormatRepairPolicy is part of the immutable provider policy binding. JSON
 // format repair has one optional allowance, independent of transport retries
@@ -70,7 +72,7 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	open, request, err := s.bind(open, request)
+	open, request, err := s.Bind(open, request)
 	if err != nil {
 		return result, err
 	}
@@ -124,7 +126,7 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 	return result, callErr
 }
 
-func (s *StructuredLLMCalls) bind(open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, error) {
+func (s *StructuredLLMCalls) Bind(open domain.OpenCallRequest, request port.GenerateRequest) (domain.OpenCallRequest, port.GenerateRequest, error) {
 	return bindStructuredRequest(s.calls.provider, s.policy, open, request)
 }
 
@@ -167,17 +169,17 @@ func buildRepairRequest(provider LLMReadPolicy, policy FormatRepairPolicy, open 
 		SchemaVersion domain.SchemaVersion `json:"schema_version"`
 		OriginalInput json.RawMessage      `json:"original_input"`
 		FormatRepair  port.RepairInput     `json:"format_repair"`
-	}{formatRepairInputSchema, original.Variables, repair})
+	}{FormatRepairInputSchema, original.Variables, repair})
 	if err != nil {
 		return open, original, err
 	}
 	request := original
 	request.Prompt = policy.Prompt
 	request.Variables = variables
-	request.LogicalIdempotencyKey = coordinatorMutationID("format-repair", open.ID, open.PolicyDigest, 1)
-	open.ID = domain.CallRecordID(coordinatorMutationID("callrec", open.ID, "format-repair", open.PolicyDigest, 1))
+	request.LogicalIdempotencyKey = MutationID("format-repair", open.ID, open.PolicyDigest, 1)
+	open.ID = domain.CallRecordID(MutationID("callrec", open.ID, "format-repair", open.PolicyDigest, 1))
 	open.LogicalOperationID = request.LogicalIdempotencyKey
-	open.IdempotencyKey = coordinatorMutationID("open", "format-repair", open.ID)
+	open.IdempotencyKey = MutationID("open", "format-repair", open.ID)
 	// Preserve At: the ledger's idempotency binding includes the original
 	// timestamp, so a restart must not supply a new wall-clock value.
 	plan, err := provider.PlanGenerate(request)

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/agent"
@@ -61,7 +62,7 @@ func bootstrapGenerationRunService(ctx context.Context, cfg config.Config, store
 	if err != nil {
 		return nil, nil, err
 	}
-	var sandboxConfig *DockerSandboxConfig
+	var sandboxConfig *sandboxexec.Config
 	var closeSandbox func() error
 	if workflow.HasSolutionStages(cfg.Workflow.Revision) {
 		base, closer, err := bootstrapSolutionSandbox(ctx, cfg)

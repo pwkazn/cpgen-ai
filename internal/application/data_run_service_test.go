@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/application"
 	"cpgen/internal/clock"
@@ -285,7 +286,7 @@ func (s *dataReportGapStore) CreateArtifactDeclaration(ctx context.Context, decl
 	return s.Store.CreateArtifactDeclaration(ctx, declaration)
 }
 
-func assertDataCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base application.DockerSandboxConfig, runID domain.RunID) {
+func assertDataCommittedReadsRejectSubstitution(t *testing.T, ctx context.Context, f *similarityExecutorFixture, generationConfig application.GenerationExecutorConfig, similarityConfig application.SimilarityExecutorConfig, base sandboxexec.Config, runID domain.RunID) {
 	t.Helper()
 	for _, path := range []domain.SafeRelPath{"data/plan.json", "data/dataset.json", "data/generated/001.in", "data/generator/main.cpp"} {
 		changed := generationConfig

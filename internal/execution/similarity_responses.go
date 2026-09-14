@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -18,7 +18,7 @@ const similarityResponseMediaType = "application/vnd.cpgen.similarity-response+j
 
 // NewReplayableSimilarityCalls retains successful evidence on the private
 // artifact protocol. Its caller holds the run and artifact-maintenance locks.
-func NewReplayableSimilarityCalls(ledger LLMArtifactLedger, provider similarity.PhysicalProvider, blobs *blob.Store, source clock.Clock, costUpperBoundMicroUSD int64) (*SimilarityCalls, error) {
+func NewReplayableSimilarityCalls(ledger ArtifactCallLedger, provider similarity.PhysicalProvider, blobs *blob.Store, source clock.Clock, costUpperBoundMicroUSD int64) (*SimilarityCalls, error) {
 	if blobs == nil {
 		return nil, errors.New("replayable similarity calls require private blob storage")
 	}
@@ -31,7 +31,7 @@ func NewReplayableSimilarityCalls(ledger LLMArtifactLedger, provider similarity.
 }
 
 type similarityResponseArtifacts struct {
-	ledger LLMArtifactLedger
+	ledger ArtifactCallLedger
 	blobs  *blob.Store
 	clock  clock.Clock
 }
@@ -47,7 +47,7 @@ func (s *similarityResponseArtifacts) session(open domain.OpenCallRequest, reque
 		return nil, err
 	}
 	core := &privateResponseSession{ledger: s.ledger, blobs: s.blobs, clock: s.clock, privateResponseBinding: privateResponseBinding{open: open, binding: binding, maxBytes: plan.MaxResponseBytes*6 + 16384,
-		callID: domain.CallRecordID(coordinatorMutationID("callrec", "similarity-response", open.ID)), prefix: "similarity-response", mediaType: similarityResponseMediaType, pathPrefix: "private/similarity/", schema: similarityResponseSchema}}
+		callID: domain.CallRecordID(MutationID("callrec", "similarity-response", open.ID)), prefix: "similarity-response", mediaType: similarityResponseMediaType, pathPrefix: "private/similarity/", schema: similarityResponseSchema}}
 	return &similarityResponseSession{core, request}, nil
 }
 

@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -41,10 +41,6 @@ func NewCacheService(locks *runlock.Manager, cache port.CacheStore, calls port.C
 		return nil, errors.New("cache service dependencies are required")
 	}
 	return &CacheService{locks: locks, cache: cache, calls: calls, blobs: blobs}, nil
-}
-
-func NewCacheReuseService(locks *runlock.Manager, cache port.CacheStore, calls port.CallLedger, blobs port.VerifiedBlobReader) (*CacheService, error) {
-	return NewCacheService(locks, cache, calls, blobs)
 }
 
 func (s *CacheService) Reuse(ctx context.Context, request domain.CacheReuseRequest) (CacheReuseResult, error) {

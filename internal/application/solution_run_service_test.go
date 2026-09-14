@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/application"
 	"cpgen/internal/clock"
@@ -126,7 +127,7 @@ func TestSolutionRunServiceCancelsInterruptedVerificationWithoutRedispatch(t *te
 				_, err := executor.VerifyDraft(ctx, view, func(_ context.Context, identity port.SandboxAuthorizationIdentity) (application.SolutionSandbox, toolchain.Lock, error) {
 					config := base
 					config.Store, config.Blobs, config.Clock, config.Identity = gap, f.executorConfig.Blobs, clock.Real{}, identity
-					sandbox, err := application.NewDockerSandboxSession(config)
+					sandbox, err := sandboxexec.NewSession(config)
 					return sandbox, base.Lock, err
 				})
 				if !errors.Is(err, errInjectedSandboxReceiptGap) {

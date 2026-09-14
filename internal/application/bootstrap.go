@@ -10,6 +10,7 @@ import (
 	"cpgen/internal/adapter/fake"
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/clock"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
@@ -25,7 +26,7 @@ type Application struct {
 	Packages    PackageArchiveReader
 	Runtime     port.RuntimeStore
 	Reviews     port.ReviewStore
-	Maintenance *ArtifactMaintenance
+	Maintenance *artifact.Maintenance
 	Locks       *runlock.Manager
 
 	closeOnce      sync.Once
@@ -103,7 +104,7 @@ func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Applica
 			_ = locks.Close()
 		}
 	}()
-	maintenance, err := NewArtifactMaintenance(locks, store, blobs)
+	maintenance, err := artifact.NewMaintenance(locks, store, blobs)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap artifact maintenance: %w", err)
 	}

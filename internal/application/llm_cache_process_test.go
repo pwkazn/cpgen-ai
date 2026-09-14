@@ -11,8 +11,8 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
 )
@@ -21,7 +21,7 @@ type llmCacheProcessConfig struct {
 	Endpoint, Database, BlobRoot, LockRoot, Boundary string
 	Open                                             domain.OpenCallRequest
 	Request                                          port.GenerateRequest
-	Policy                                           application.FormatRepairPolicy
+	Policy                                           durable.FormatRepairPolicy
 	Now                                              time.Time
 }
 
@@ -89,11 +89,11 @@ func TestLLMCacheProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, _ := durableTestProvider(t, configuration.Endpoint, structuredLLMRepairPrompt(configuration.Request.Schema))
-	calls, err := application.NewReplayableLLMCalls(store, provider, blobs, clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(store, provider, blobs, clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	structured, err := application.NewStructuredLLMCalls(calls, configuration.Policy)
+	structured, err := durable.NewStructuredLLMCalls(calls, configuration.Policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestLLMCacheProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer locks.Close()
-	cache, err := application.NewStructuredLLMCache(structured, &crashingLLMCacheLedger{Store: store, boundary: configuration.Boundary}, locks)
+	cache, err := durable.NewStructuredLLMCache(structured, &crashingLLMCacheLedger{Store: store, boundary: configuration.Boundary}, locks)
 	if err != nil {
 		t.Fatal(err)
 	}

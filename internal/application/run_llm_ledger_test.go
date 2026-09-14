@@ -14,8 +14,8 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
 )
@@ -47,11 +47,11 @@ func TestRunLLMLedgerSettlesAcrossActiveTimeHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &heartbeatPhysicalLLM{PhysicalLLM: model, fixture: f}
-	ledger, err := application.NewRunBoundLLMLedger(f.store, f.runID, "prepare", f.attemptID)
+	ledger, err := durable.NewRunLedger(f.store, f.runID, "prepare", f.attemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := application.NewReplayableLLMCalls(ledger, provider, blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, provider, blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestRunLLMLedgerSettlesAfterHeartbeatAndPersistedCancellation(t *testing.T)
 	if err != nil || replay.Outcome.Value == nil || !reflect.DeepEqual(result.CallTraces, replay.CallTraces) || f.httpCalls.Load() != 1 {
 		t.Fatalf("cancel replay=%+v err=%v", replay, err)
 	}
-	ledger, err := application.NewRunBoundLLMLedger(f.store, f.runID, "prepare", f.attemptID)
+	ledger, err := durable.NewRunLedger(f.store, f.runID, "prepare", f.attemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,15 +213,15 @@ func TestRunLLMLedgerCacheCompletionReplaysAcrossHeartbeats(t *testing.T) {
 	if _, err := f.store.AccountActiveTime(context.Background(), domain.ActiveTimeCommand{RunID: f.runID, ExpectedRunVersion: open.ExpectedRunVersion, Action: domain.ActiveTimeStart, IdempotencyKey: coordinatorID("active", "cache-llm"), At: f.clock.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	ledger, err := application.NewRunBoundLLMLedger(f.store, f.runID, open.StageName, open.AttemptID)
+	ledger, err := durable.NewRunLedger(f.store, f.runID, open.StageName, open.AttemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	structured, err := application.NewStructuredLLMCalls(calls, f.policy)
+	structured, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestRunLLMLedgerCacheCompletionReplaysAcrossHeartbeats(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = locks.Close() })
-	cache, err := application.NewStructuredLLMCache(structured, ledger, locks)
+	cache, err := durable.NewStructuredLLMCache(structured, f.store, locks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,17 +257,17 @@ func runLLMHeartbeat(t *testing.T, f coordinatorFixture, key string) {
 	}
 }
 
-func boundStructuredLLM(t *testing.T, f structuredLLMFixture, store application.RunLLMStore, provider port.PhysicalLLM) *application.StructuredLLMCalls {
+func boundStructuredLLM(t *testing.T, f structuredLLMFixture, store durable.Store, provider port.PhysicalLLM) *durable.StructuredLLMCalls {
 	t.Helper()
-	ledger, err := application.NewRunBoundLLMLedger(store, f.runID, "prepare", f.attemptID)
+	ledger, err := durable.NewRunLedger(store, f.runID, "prepare", f.attemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls, err := application.NewReplayableLLMCalls(ledger, provider, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, provider, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, f.policy)
+	service, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func boundStructuredLLM(t *testing.T, f structuredLLMFixture, store application.
 func TestRunLLMLedgerRetriesOnlyConflictingDatabaseTransitions(t *testing.T) {
 	f := newStructuredLLMOptionsFixture(t, structuredLLMOptions{activeTimeMS: 60000, firstContent: `{"schema_version":"cpgen.idea/v1","title":"racing"}`})
 	startRunLLMActiveTime(t, f.coordinatorFixture)
-	store := &racingRunLLMStore{RunLLMStore: f.store, fixture: f.coordinatorFixture, test: t, counts: map[string]int{}}
+	store := &racingRunLLMStore{Store: f.store, fixture: f.coordinatorFixture, test: t, counts: map[string]int{}}
 	service := boundStructuredLLM(t, f, store, f.model)
 	result, err := service.Generate(context.Background(), f.open, f.request)
 	if err != nil || result.Outcome.Value == nil || f.httpCalls.Load() != 1 {
@@ -296,7 +296,7 @@ func TestRunLLMLedgerRetriesOnlyConflictingDatabaseTransitions(t *testing.T) {
 
 func TestRunLLMLedgerRejectsChangedBindingsAndObsoleteAttempts(t *testing.T) {
 	f := newCoordinatorFixture(t, "a4", domain.BudgetLimits{})
-	ledger, err := application.NewRunBoundLLMLedger(f.store, f.runID, "prepare", f.attemptID)
+	ledger, err := durable.NewRunLedger(f.store, f.runID, "prepare", f.attemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestRunLLMLedgerRejectsChangedBindingsAndObsoleteAttempts(t *testing.T) {
 }
 
 type racingRunLLMStore struct {
-	application.RunLLMStore
+	durable.Store
 	fixture coordinatorFixture
 	test    *testing.T
 	counts  map[string]int
@@ -355,8 +355,8 @@ func TestRunLLMLedgerBoundsConflictRetriesAndHonorsCancellation(t *testing.T) {
 				failure, want = context.Canceled, 0
 				cancel()
 			}
-			store := &failingRunLLMStore{RunLLMStore: f.store, failure: failure}
-			ledger, err := application.NewRunBoundLLMLedger(store, f.runID, "prepare", f.attemptID)
+			store := &failingRunLLMStore{Store: f.store, failure: failure}
+			ledger, err := durable.NewRunLedger(store, f.runID, "prepare", f.attemptID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -372,7 +372,7 @@ func TestRunLLMLedgerBoundsConflictRetriesAndHonorsCancellation(t *testing.T) {
 }
 
 type failingRunLLMStore struct {
-	application.RunLLMStore
+	durable.Store
 	failure error
 	calls   int
 }
@@ -391,29 +391,29 @@ func (s *racingRunLLMStore) race(transition string) {
 
 func (s *racingRunLLMStore) OpenReplayableCall(ctx context.Context, request domain.OpenCallRequest) (domain.CallRecord, error) {
 	s.race("open")
-	return s.RunLLMStore.OpenReplayableCall(ctx, request)
+	return s.Store.OpenReplayableCall(ctx, request)
 }
 func (s *racingRunLLMStore) PrepareCalls(ctx context.Context, request domain.PrepareCallsRequest) (domain.PreparedCalls, error) {
 	s.race("prepare")
-	return s.RunLLMStore.PrepareCalls(ctx, request)
+	return s.Store.PrepareCalls(ctx, request)
 }
 func (s *racingRunLLMStore) BeginDispatch(ctx context.Context, request domain.BeginDispatchRequest) (domain.DispatchGrant, error) {
 	s.race("begin")
-	return s.RunLLMStore.BeginDispatch(ctx, request)
+	return s.Store.BeginDispatch(ctx, request)
 }
 func (s *racingRunLLMStore) MarkSent(ctx context.Context, grant domain.DispatchGrant, at time.Time) error {
 	s.race("sent")
-	return s.RunLLMStore.MarkSent(ctx, grant, at)
+	return s.Store.MarkSent(ctx, grant, at)
 }
 func (s *racingRunLLMStore) CompletePhysical(ctx context.Context, request domain.CompletePhysicalRequest) error {
 	s.race("complete")
-	return s.RunLLMStore.CompletePhysical(ctx, request)
+	return s.Store.CompletePhysical(ctx, request)
 }
 func (s *racingRunLLMStore) FinishReplayableCall(ctx context.Context, request domain.FinishCallRequest) (domain.CallTrace, error) {
 	s.race("finish")
-	return s.RunLLMStore.FinishReplayableCall(ctx, request)
+	return s.Store.FinishReplayableCall(ctx, request)
 }
 func (s *racingRunLLMStore) ReleaseUnwrittenArtifactReservations(ctx context.Context, request domain.OpenCallRequest) error {
 	s.race("release")
-	return s.RunLLMStore.ReleaseUnwrittenArtifactReservations(ctx, request)
+	return s.Store.ReleaseUnwrittenArtifactReservations(ctx, request)
 }

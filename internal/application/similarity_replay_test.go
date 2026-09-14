@@ -16,8 +16,8 @@ import (
 
 	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/similarity"
 )
 
@@ -48,7 +48,7 @@ func TestSimilarityReplaySurvivesRestartAndAtomicAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	service, err := application.NewReplayableSimilarityCalls(reopened, f.provider, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableSimilarityCalls(reopened, f.provider, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,11 @@ func TestSimilarityReplayRecoversPublishedAndSealedReceipts(t *testing.T) {
 	for _, boundary := range []string{"sent", "complete", "finish", "sealed"} {
 		t.Run(boundary, func(t *testing.T) {
 			f := newSimilarityReplayFixture(t)
-			var ledger application.LLMArtifactLedger = &interruptedLLMReplayLedger{Store: f.store, boundary: boundary}
+			var ledger durable.ArtifactCallLedger = &interruptedLLMReplayLedger{Store: f.store, boundary: boundary}
 			if boundary == "sealed" {
 				ledger = &llmPublicationFailureLedger{Store: f.store}
 			}
-			service, err := application.NewReplayableSimilarityCalls(ledger, f.provider, f.blobs, f.clock, 100)
+			service, err := durable.NewReplayableSimilarityCalls(ledger, f.provider, f.blobs, f.clock, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,7 +192,7 @@ func TestSimilarityReplayBudgetFailureReleasesUnusedSlots(t *testing.T) {
 			} else {
 				open.RetryPolicy.MaxAttempts = 8
 			}
-			service, err := application.NewReplayableSimilarityCalls(f.store, f.provider, f.blobs, f.clock, cost)
+			service, err := durable.NewReplayableSimilarityCalls(f.store, f.provider, f.blobs, f.clock, cost)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -230,7 +230,7 @@ func TestSimilarityReplayPersistsResponseAfterCancellation(t *testing.T) {
 		}
 		cancel()
 	}}
-	service, err := application.NewReplayableSimilarityCalls(f.store, provider, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableSimilarityCalls(f.store, provider, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestSimilarityReplayPersistsResponseAfterCancellation(t *testing.T) {
 func TestSimilarityReplayUnknownBoundaryReleasesOnlyUnwrittenBytes(t *testing.T) {
 	f := newSimilarityReplayFixture(t)
 	provider := similarityAcceptanceHook{PhysicalProvider: f.provider, unknown: true}
-	service, err := application.NewReplayableSimilarityCalls(f.store, provider, f.blobs, f.clock, 100)
+	service, err := durable.NewReplayableSimilarityCalls(f.store, provider, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ type similarityReplayFixture struct {
 	open      domain.OpenCallRequest
 	blobs     *blob.Store
 	blobRoot  string
-	service   *application.SimilarityCalls
+	service   *durable.SimilarityCalls
 	httpCalls *atomic.Int32
 }
 
@@ -366,14 +366,14 @@ func newSimilarityReplayFixture(t *testing.T, statuses ...int) similarityReplayF
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewReplayableSimilarityCalls(f.store, provider, blobs, f.clock, 100)
+	service, err := durable.NewReplayableSimilarityCalls(f.store, provider, blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return similarityReplayFixture{f, provider, request, open, blobs, root, service, sends}
 }
 
-func (f similarityReplayFixture) search(t *testing.T, service *application.SimilarityCalls) application.SimilarityCallResult {
+func (f similarityReplayFixture) search(t *testing.T, service *durable.SimilarityCalls) durable.SimilarityCallResult {
 	t.Helper()
 	result, err := service.SearchWithArtifacts(context.Background(), f.open, f.request)
 	if err != nil || result.Outcome.Value == nil || result.Artifact == nil || result.Outcome.Value.Validate() != nil {
@@ -382,7 +382,7 @@ func (f similarityReplayFixture) search(t *testing.T, service *application.Simil
 	return result
 }
 
-func (f similarityReplayFixture) finish(result application.SimilarityCallResult) domain.FinishStageCommand {
+func (f similarityReplayFixture) finish(result durable.SimilarityCallResult) domain.FinishStageCommand {
 	output := result.Outcome.Value.EvidenceDigest
 	return domain.FinishStageCommand{RunID: f.runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: f.attemptID,
 		AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output,

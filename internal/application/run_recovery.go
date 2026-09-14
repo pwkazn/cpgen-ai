@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
 )
@@ -19,12 +20,12 @@ func (s *LocalRunService) recover(ctx context.Context, snapshot domain.RunSnapsh
 		report, err := s.reconciler.ReconcileRun(ctx, snapshot.RunID)
 		if err != nil {
 			if cleanupEvidenceMatchesRun(snapshot.RunID, report) {
-				return snapshot, fmt.Errorf("%w: %v", ErrCleanupPending, err)
+				return snapshot, fmt.Errorf("%w: %v", sandboxexec.ErrCleanupPending, err)
 			}
 			return snapshot, err
 		}
 		if cleanupEvidenceMatchesRun(snapshot.RunID, report) {
-			return snapshot, fmt.Errorf("%w: sandbox recovery cleanup is not settled", ErrCleanupPending)
+			return snapshot, fmt.Errorf("%w: sandbox recovery cleanup is not settled", sandboxexec.ErrCleanupPending)
 		}
 		if !report.Completed {
 			return snapshot, errors.New("sandbox recovery reconciliation incomplete without cleanup evidence")
@@ -139,12 +140,12 @@ func (s *LocalRunService) reconcileForTerminal(ctx context.Context, runID domain
 	report, err := s.reconciler.ReconcileRun(ctx, runID)
 	if err != nil {
 		if cleanupEvidenceMatchesRun(runID, report) {
-			return fmt.Errorf("%w: %v", ErrCleanupPending, err)
+			return fmt.Errorf("%w: %v", sandboxexec.ErrCleanupPending, err)
 		}
 		return fmt.Errorf("reconcile sandbox resources: %w", err)
 	}
 	if cleanupEvidenceMatchesRun(runID, report) {
-		return fmt.Errorf("%w: sandbox cleanup is not settled", ErrCleanupPending)
+		return fmt.Errorf("%w: sandbox cleanup is not settled", sandboxexec.ErrCleanupPending)
 	}
 	if !report.Completed {
 		return errors.New("reconcile sandbox resources: incomplete report without cleanup evidence")

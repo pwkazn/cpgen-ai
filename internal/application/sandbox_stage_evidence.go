@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"reflect"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
+	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 )
@@ -44,7 +46,7 @@ func (r *sandboxStageEvidence) read(path domain.SafeRelPath, ref domain.BlobRef,
 	if !found || item.Blob.Blob != ref || item.Blob.Role != role {
 		return nil, fmt.Errorf("sandbox stage artifact is absent or differs: %s", path)
 	}
-	raw, err := readSolutionVerificationBlob(r.ctx, r.blobs, ref, limit)
+	raw, err := artifact.ReadVerified(r.ctx, r.blobs, ref, limit)
 	if err == nil {
 		r.used[path] = true
 	}
@@ -70,7 +72,7 @@ func (r *sandboxStageEvidence) pending(p *domain.PendingArtifact) error {
 	return err
 }
 
-func (r *sandboxStageEvidence) result(config SandboxReadPolicy, request, result any) error {
+func (r *sandboxStageEvidence) result(config sandboxexec.ReadPolicy, request, result any) error {
 	var kind domain.CallKind
 	var pending []*domain.PendingArtifact
 	switch request.(type) {
@@ -95,7 +97,7 @@ func (r *sandboxStageEvidence) result(config SandboxReadPolicy, request, result 
 	default:
 		return errors.New("unsupported sandbox evidence request")
 	}
-	identity, planIdentity, err := sandboxReadOperationIdentity(config, kind, request)
+	identity, planIdentity, err := sandboxexec.ReadOperationIdentity(config, kind, request)
 	if err != nil {
 		return err
 	}
@@ -118,7 +120,7 @@ func (r *sandboxStageEvidence) result(config SandboxReadPolicy, request, result 
 	if err != nil {
 		return err
 	}
-	var receipt sandboxResultReceipt[json.RawMessage]
+	var receipt sandboxexec.ResultReceipt[json.RawMessage]
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		return err
 	}
@@ -129,7 +131,7 @@ func (r *sandboxStageEvidence) result(config SandboxReadPolicy, request, result 
 	if receipt.Schema != "cpgen.sandbox-result/v1" || receipt.Scope != identity.ScopeDigest || receipt.Plan != plan.PlanDigest || !bytes.Equal(receipt.Result, expected) {
 		return errors.New("sandbox result differs from its exact request receipt")
 	}
-	if err := verifySandboxCleaned(r.ctx, r.store, identity, plan); err != nil {
+	if err := sandboxexec.VerifyCleaned(r.ctx, r.store, identity, plan); err != nil {
 		return err
 	}
 	for _, item := range pending {

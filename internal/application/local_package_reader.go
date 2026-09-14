@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+
 	"cpgen/internal/domain"
 	"cpgen/internal/runlock"
 )

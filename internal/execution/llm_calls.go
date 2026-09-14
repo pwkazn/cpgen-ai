@@ -1,4 +1,4 @@
-package application
+package execution
 
 import (
 	"context"
@@ -165,10 +165,10 @@ func (a *llmCallAdapter) Plan(ctx context.Context, record domain.CallRecord) (do
 	dimensions := []domain.BudgetDimension{domain.BudgetLLMCalls, domain.BudgetLLMInputTokens, domain.BudgetLLMOutputTokens, domain.BudgetExternalCostMicroUSD}
 	bounds := []int64{1, a.plan.InputTokenUpperBound, a.plan.OutputTokenUpperBound, a.costUpperBound}
 	for i := range calls {
-		id := domain.AttemptCallID(coordinatorMutationID("call", record.ID, i+1))
-		call := domain.PhysicalCallPlan{ID: id, Ordinal: int64(i + 1), RetryGroup: "llm-transport", RetryOrdinal: int64(i + 1), Kind: domain.PhysicalLLMRequest, Provider: a.plan.Provider, RequestDigest: a.plan.RequestDigest, IdempotencyKey: coordinatorMutationID("physical", record.ID, i+1)}
+		id := domain.AttemptCallID(MutationID("call", record.ID, i+1))
+		call := domain.PhysicalCallPlan{ID: id, Ordinal: int64(i + 1), RetryGroup: "llm-transport", RetryOrdinal: int64(i + 1), Kind: domain.PhysicalLLMRequest, Provider: a.plan.Provider, RequestDigest: a.plan.RequestDigest, IdempotencyKey: MutationID("physical", record.ID, i+1)}
 		for j, dimension := range dimensions {
-			call.Reservations = append(call.Reservations, domain.ReservationPlan{ID: domain.ReservationID(coordinatorMutationID("res", id, dimension)), Dimension: dimension, Subkey: "request", UpperBound: bounds[j]})
+			call.Reservations = append(call.Reservations, domain.ReservationPlan{ID: domain.ReservationID(MutationID("res", id, dimension)), Dimension: dimension, Subkey: "request", UpperBound: bounds[j]})
 		}
 		calls[i] = call
 	}

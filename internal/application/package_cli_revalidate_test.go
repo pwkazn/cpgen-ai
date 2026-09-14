@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/application"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/judge"
@@ -18,7 +18,7 @@ import (
 
 // Fresh compilation/execution consumes only the exported archive. No original
 // run, compiled program, expected-output provider or source blob is reused.
-func revalidateExportedPackageInDocker(t *testing.T, ctx context.Context, base application.DockerSandboxConfig, raw []byte) {
+func revalidateExportedPackageInDocker(t *testing.T, ctx context.Context, base sandboxexec.Config, raw []byte) {
 	t.Helper()
 	p, err := packageprobe.ReadArchive(ctx, raw)
 	if err != nil {
@@ -44,7 +44,7 @@ func revalidateExportedPackageInDocker(t *testing.T, ctx context.Context, base a
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000de", LogicalOperationID: "export-revalidation", Kind: domain.CallSandboxCompile, ScopeDigest: p.Manifest.PackageID, ExpectedRunVersion: 2}
-	publisher, err := application.NewSandboxArtifactSink(f.store, blobs, clock.Real{}, identity)
+	publisher, err := sandboxexec.NewArtifactSink(f.store, blobs, clock.Real{}, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func revalidateExportedPackageInDocker(t *testing.T, ctx context.Context, base a
 		return artifact.Blob
 	}
 	base.Store, base.Blobs, base.Clock, base.Identity = f.store, blobs, clock.Real{}, identity
-	worker, err := application.NewDockerSandboxSession(base)
+	worker, err := sandboxexec.NewSession(base)
 	if err != nil {
 		t.Fatal(err)
 	}

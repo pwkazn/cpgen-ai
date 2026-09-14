@@ -2,7 +2,9 @@ package application
 
 import (
 	"context"
+
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -35,7 +37,7 @@ type SimilarityContentReadStore interface {
 // Composed once for the executing Similarity stage; readers retain only the
 // smaller evidence interfaces declared above.
 type SimilarityStageStore interface {
-	RunLLMStore
-	SimilarityReadStore
+	durable.Store
+	durable.SimilarityReadStore
 	SimilarityContentReadStore
 }

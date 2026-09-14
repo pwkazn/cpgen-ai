@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	docker "cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
@@ -24,9 +25,9 @@ type FrozenReadPolicyStore interface {
 // is verification policy, not an executable session: no Engine or Watchdog is
 // constructed. New runs retain a validated lock snapshot; old runs retain only
 // a toolchain path/digest and therefore fail closed when that lock is missing.
-func NewFrozenReadPolicy(ctx context.Context, store FrozenReadPolicyStore, runID domain.RunID) (config.Config, SandboxReadPolicy, error) {
+func NewFrozenReadPolicy(ctx context.Context, store FrozenReadPolicyStore, runID domain.RunID) (config.Config, sandboxexec.ReadPolicy, error) {
 	var empty config.Config
-	var sandbox SandboxReadPolicy
+	var sandbox sandboxexec.ReadPolicy
 	if ctx == nil || store == nil {
 		return empty, sandbox, errors.New("frozen policy requires context and committed store")
 	}

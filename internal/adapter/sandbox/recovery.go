@@ -1,4 +1,4 @@
-package application
+package sandbox
 
 import (
 	"context"
@@ -7,10 +7,19 @@ import (
 	"fmt"
 
 	docker "cpgen/internal/adapter/sandbox/docker"
+	"cpgen/internal/adapter/storage/blob"
 	"cpgen/internal/adapter/storage/sqlite"
+	artifact "cpgen/internal/artifact"
+	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
+
+// ErrCleanupPending means the exact external sandbox resources are still
+// unresolved. It is deliberately separate from a generic host failure so the
+// CLI can report exit code 10 while preserving the RUNNING projection.
+var ErrCleanupPending = errors.New("sandbox cleanup is pending")
 
 var ErrSandboxEvidenceIncomplete = errors.New("interrupted sandbox has no complete execution result")
 
@@ -18,7 +27,7 @@ var ErrSandboxEvidenceIncomplete = errors.New("interrupted sandbox has no comple
 // has durable CLEANED proof. It never grants creation or repeats a process.
 // Missing final receipt bytes do not invalidate already retained process and
 // program artifacts; missing execution evidence cannot be guessed from cleanup.
-func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, identity port.SandboxAuthorizationIdentity, plan port.ContainerPlan, sink *SandboxArtifactSink, request any) (any, bool, error) {
+func recoverSandboxResult(ctx context.Context, session *Session, identity port.SandboxAuthorizationIdentity, plan port.ContainerPlan, sink *ArtifactSink, request any) (any, bool, error) {
 	c := session.config
 	_, err := c.Store.GetSandboxExecution(ctx, identity.SandboxExecutionID)
 	if errors.Is(err, sqlite.ErrNotFound) {
@@ -27,7 +36,7 @@ func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, id
 	if err != nil {
 		return nil, false, err
 	}
-	if err := verifySandboxCleaned(ctx, c.Store, identity, plan); err != nil {
+	if err := VerifyCleaned(ctx, c.Store, identity, plan); err != nil {
 		return nil, false, fmt.Errorf("%w: %v", ErrCleanupPending, err)
 	}
 	prefix := "sandbox/" + string(identity.SandboxExecutionID) + "/"
@@ -66,7 +75,7 @@ func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, id
 	if err != nil {
 		return nil, false, err
 	}
-	raw, err := readSolutionVerificationBlob(ctx, c.Blobs, execution.Blob, 64<<10)
+	raw, err := artifact.ReadVerified(ctx, c.Blobs, execution.Blob, 64<<10)
 	if err != nil {
 		return nil, false, err
 	}
@@ -78,7 +87,7 @@ func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, id
 		return nil, false, ErrSandboxEvidenceIncomplete
 	}
 	succeeded := record.Outcome == domain.ProcessExited && record.ExitCode != nil && *record.ExitCode == 0
-	ledger, err := NewRunBoundLLMLedger(c.Store, identity.RunID, identity.StageName, identity.AttemptID)
+	ledger, err := durable.NewRunLedger(c.Store, identity.RunID, identity.StageName, identity.AttemptID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -89,8 +98,8 @@ func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, id
 		if resource.Kind == port.ResourceCgroup {
 			continue
 		}
-		id := domain.CallRecordID(coordinatorMutationID("callrec", identity.SandboxExecutionID, resource.Ordinal))
-		physicalID := domain.AttemptCallID(coordinatorMutationID("call", id))
+		id := domain.CallRecordID(durable.MutationID("callrec", identity.SandboxExecutionID, resource.Ordinal))
+		physicalID := domain.AttemptCallID(durable.MutationID("call", id))
 		p, err := ledger.LoadCall(ctx, id)
 		if err != nil {
 			return nil, false, err
@@ -162,4 +171,103 @@ func recoverSandboxResult(ctx context.Context, session *DockerSandboxSession, id
 		return nil, false, err
 	}
 	return result, true, nil
+}
+
+// ReconcileStageCalls settles retained calls only after the caller has verified
+// run admission and exact Docker cleanup. It never dispatches new work.
+func ReconcileStageCalls(ctx context.Context, callStore durable.Store, blobs *blob.Store, source clock.Clock, identity port.SandboxAuthorizationIdentity) error {
+	runID := identity.RunID
+	store, ok := callStore.(interface {
+		ReadAttemptSandboxCalls(context.Context, domain.RunID, domain.StageName, domain.AttemptID) ([]domain.CallRecord, error)
+	})
+	if !ok {
+		return errors.New("solution cleanup requires scoped call history")
+	}
+	calls, err := store.ReadAttemptSandboxCalls(ctx, runID, identity.StageName, identity.AttemptID)
+	if err != nil {
+		return err
+	}
+	ledger, err := durable.NewRunLedger(callStore, runID, identity.StageName, identity.AttemptID)
+	if err != nil {
+		return err
+	}
+	for _, call := range calls {
+		if call.State == domain.CallRecordTerminal {
+			continue
+		}
+		if call.Provider != "blob" && call.Provider != "docker" {
+			return errors.New("sandbox cleanup found an unsupported provider")
+		}
+		failure := &domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}
+		if call.State == domain.CallRecordOpen {
+			_, err := ledger.FinishCall(ctx, domain.FinishCallRequest{RunID: runID, ExpectedRunVersion: identity.ExpectedRunVersion, StageName: identity.StageName, AttemptID: identity.AttemptID, CallRecordID: call.ID, DispatchKind: domain.DispatchNone, Failure: failure, IdempotencyKey: durable.MutationID("finish", call.ID), At: source.Now().UTC()})
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		p, err := ledger.LoadCall(ctx, call.ID)
+		if err != nil {
+			return err
+		}
+		if len(p.PhysicalCalls) != 1 {
+			return errors.New("sandbox cleanup call has multiple physical identities")
+		}
+		physical := p.PhysicalCalls[0]
+		if call.Provider == "blob" && physical.State != domain.PhysicalCompleted && physical.State != domain.PhysicalAbortedNoDispatch {
+			declID := domain.ArtifactDeclarationID(durable.MutationID("decl", call.ID))
+			decl, token, err := ledger.ReadArtifactWriter(ctx, declID)
+			if err != nil && !errors.Is(err, sqlite.ErrNotFound) {
+				return err
+			}
+			if err == nil {
+				if token.State == domain.ArtifactWriterSealed {
+					session, err := artifact.NewPreparedArtifactSession(ledger, blobs, p)
+					if err != nil {
+						return err
+					}
+					writer, err := session.Prepare(ctx, decl.ID)
+					if err != nil {
+						return err
+					}
+					if _, err := writer.Finalize(ctx); err != nil {
+						return err
+					}
+					token.State = domain.ArtifactWriterFinalized
+				}
+				if token.State == domain.ArtifactWriterFinalized {
+					pending, err := ledger.ReadPendingArtifact(ctx, decl.ID)
+					if err != nil {
+						return err
+					}
+					sink := &ArtifactSink{ledger: ledger, blobs: blobs, clock: source, identity: identity}
+					if err := sink.complete(ctx, decl, pending); err != nil {
+						return err
+					}
+					continue
+				}
+				if token.State != domain.ArtifactWriterReleased {
+					if err := ledger.ReleaseArtifact(ctx, token.ID); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if physical.State == domain.PhysicalDispatching || physical.State == domain.PhysicalSent {
+			state, outcome := domain.PhysicalUnknown, domain.PhysicalOutcomeUnknown
+			failure = &domain.PortFailure{Code: domain.FailureBoundaryUnknown, Class: domain.FailureUnknown}
+			if call.Provider == "blob" {
+				state, outcome = domain.PhysicalAbortedNoDispatch, domain.PhysicalOutcomeNoSend
+				failure = &domain.PortFailure{Code: domain.FailurePolicyRejected, Class: domain.FailureRejected}
+			}
+			if err := ledger.CompletePhysical(ctx, domain.CompletePhysicalRequest{RunID: runID, ExpectedRunVersion: identity.ExpectedRunVersion, StageName: identity.StageName, AttemptID: identity.AttemptID, CallRecordID: call.ID, AttemptCallID: physical.ID, State: state, Outcome: outcome, Failure: failure, IdempotencyKey: durable.MutationID("terminal_cleanup", physical.ID), At: source.Now().UTC()}); err != nil {
+				return err
+			}
+		}
+		binding := port.SandboxResourceCall{CallRecordID: call.ID, AttemptCallID: physical.ID}
+		if err := finishSandboxResourceCalls(ctx, ledger, source, identity, []port.SandboxResourceCall{binding}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

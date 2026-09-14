@@ -10,14 +10,14 @@ import (
 	"testing"
 
 	"cpgen/internal/adapter/storage/sqlite"
-	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 )
 
 type providerReconcileFixture struct {
 	coordinatorFixture
 	open   domain.OpenCallRequest
-	invoke func(application.LLMArtifactLedger, bool) (domain.CallTrace, error)
+	invoke func(durable.ArtifactCallLedger, bool) (domain.CallTrace, error)
 	sends  *atomic.Int32
 }
 
@@ -25,8 +25,8 @@ func newProviderReconcileFixture(t *testing.T, kind string) providerReconcileFix
 	t.Helper()
 	if kind == "similarity" {
 		f := newSimilarityReplayFixture(t)
-		invoke := func(ledger application.LLMArtifactLedger, reconcile bool) (domain.CallTrace, error) {
-			service, err := application.NewReplayableSimilarityCalls(ledger, f.provider, f.blobs, f.clock, 100)
+		invoke := func(ledger durable.ArtifactCallLedger, reconcile bool) (domain.CallTrace, error) {
+			service, err := durable.NewReplayableSimilarityCalls(ledger, f.provider, f.blobs, f.clock, 100)
 			if err != nil {
 				return domain.CallTrace{}, err
 			}
@@ -40,8 +40,8 @@ func newProviderReconcileFixture(t *testing.T, kind string) providerReconcileFix
 		return providerReconcileFixture{f.coordinatorFixture, f.open, invoke, f.httpCalls}
 	}
 	f := newLLMReplayFixture(t)
-	invoke := func(ledger application.LLMArtifactLedger, reconcile bool) (domain.CallTrace, error) {
-		service, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	invoke := func(ledger durable.ArtifactCallLedger, reconcile bool) (domain.CallTrace, error) {
+		service, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 		if err != nil {
 			return domain.CallTrace{}, err
 		}
@@ -130,7 +130,7 @@ func TestProviderReconcileRestoresSealedAndCompletedReceiptsAfterCancel(t *testi
 		for _, boundary := range []string{"sealed", "complete", "finish"} {
 			t.Run(kind+"/"+boundary, func(t *testing.T) {
 				f := newProviderReconcileFixture(t, kind)
-				var ledger application.LLMArtifactLedger = &interruptedLLMReplayLedger{Store: f.store, boundary: boundary}
+				var ledger durable.ArtifactCallLedger = &interruptedLLMReplayLedger{Store: f.store, boundary: boundary}
 				if boundary == "sealed" {
 					ledger = &llmPublicationFailureLedger{Store: f.store}
 				}
@@ -211,11 +211,11 @@ func TestStructuredReconcileDoesNotStartAnUnopenedFormatRepair(t *testing.T) {
 	f := newStructuredLLMFixture(t, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	calls, err := application.NewReplayableLLMCalls(&cancelStructuredLLMLedger{Store: f.store, cancel: cancel}, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(&cancelStructuredLLMLedger{Store: f.store, cancel: cancel}, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, f.policy)
+	service, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,11 +241,11 @@ func TestStructuredReconcileRestoresExistingRepairAndPreservesMissingReceiptErro
 	}
 	requestProviderCleanupCancel(t, providerReconcileFixture{coordinatorFixture: f.coordinatorFixture})
 	ledger := &missingRepairPendingArtifact{Store: f.store, token: first.Artifacts[1].WriterTokenID}
-	calls, err := application.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
+	calls, err := durable.NewReplayableLLMCalls(ledger, f.model, f.blobs, f.clock, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewStructuredLLMCalls(calls, f.policy)
+	service, err := durable.NewStructuredLLMCalls(calls, f.policy)
 	if err != nil {
 		t.Fatal(err)
 	}

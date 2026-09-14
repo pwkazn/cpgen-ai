@@ -12,6 +12,7 @@ import (
 
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/similarity"
 	"cpgen/internal/workflow"
 )
@@ -47,7 +48,7 @@ func TestSimilarityExecutorCommitsTypedEvidenceAndReconstructsWithoutHTTP(t *tes
 	}
 	// The legacy reader still requires the wire request as the stage input;
 	// callers must deliberately choose the typed semantic-input API.
-	reader, err := application.NewSimilarityReader(f.store, f.executorConfig.Blobs, f.config.Provider)
+	reader, err := durable.NewSimilarityReader(f.store, f.executorConfig.Blobs, f.config.Provider)
 	if err != nil {
 		t.Fatal(err)
 	}

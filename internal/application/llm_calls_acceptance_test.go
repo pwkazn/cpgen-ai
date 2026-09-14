@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"cpgen/internal/application"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 )
 
@@ -41,9 +41,9 @@ func llmAcceptanceBind(t *testing.T, fixture coordinatorFixture, provider port.P
 	return open, request, plan
 }
 
-func llmAcceptanceService(t *testing.T, ledger port.CallLedger, provider port.PhysicalLLM, source clock.Clock) *application.LLMCalls {
+func llmAcceptanceService(t *testing.T, ledger port.CallLedger, provider port.PhysicalLLM, source clock.Clock) *durable.LLMCalls {
 	t.Helper()
-	service, err := application.NewLLMCalls(ledger, provider, source, 100)
+	service, err := durable.NewLLMCalls(ledger, provider, source, 100)
 	if err != nil {
 		t.Fatalf("construct LLM ledger bridge: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestLLMCallsAcceptanceRetryUsageMatchesDatabase(t *testing.T) {
 				if exhausted && replayErr != nil {
 					t.Errorf("terminal failure replay: %v", replayErr)
 				}
-				if !exhausted && !errors.Is(replayErr, application.ErrLLMReplayUnavailable) {
+				if !exhausted && !errors.Is(replayErr, durable.ErrLLMReplayUnavailable) {
 					t.Error("success replay must explicitly return ErrLLMReplayUnavailable at this checkpoint")
 				}
 				if after := llmAcceptanceLoad(t, fixture, open.ID); !reflect.DeepEqual(before, after) {

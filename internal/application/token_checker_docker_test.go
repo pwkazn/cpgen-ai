@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/application"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/judge"
@@ -27,7 +27,7 @@ func TestExportedTokenCheckerMatchesHostThroughDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := port.SandboxAuthorizationIdentity{RunID: f.runID, StageName: "prepare", AttemptID: f.attemptID, SandboxExecutionID: "sandbox_000000000000000000000000000000dd", LogicalOperationID: "token-checker", Kind: domain.CallSandboxCompile, ScopeDigest: domain.SumBytes(judge.ExactTokenCheckerSource()), ExpectedRunVersion: 2}
-	publisher, err := application.NewSandboxArtifactSink(f.store, blobs, clock.Real{}, identity)
+	publisher, err := sandboxexec.NewArtifactSink(f.store, blobs, clock.Real{}, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestExportedTokenCheckerMatchesHostThroughDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	base.Store, base.Blobs, base.Clock, base.Identity = f.store, blobs, clock.Real{}, identity
-	worker, err := application.NewDockerSandboxSession(base)
+	worker, err := sandboxexec.NewSession(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestExportedTokenCheckerMatchesHostThroughDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := application.NewDockerSandboxSession(base)
+	restarted, err := sandboxexec.NewSession(base)
 	if err != nil {
 		t.Fatal(err)
 	}

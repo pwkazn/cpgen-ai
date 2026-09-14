@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/application"
 	"cpgen/internal/clock"
@@ -42,7 +43,7 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 				if strings.HasSuffix(mode, "receipt_gap") {
 					config.Store = gap
 				}
-				worker, err := application.NewDockerSandboxSession(config)
+				worker, err := sandboxexec.NewSession(config)
 				return worker, config.Lock, err
 			}
 			result, err := service.VerifyDraft(ctx, view, factory)
@@ -149,7 +150,7 @@ func (s alteredSolutionStageStore) ReadCommittedSandboxStage(ctx context.Context
 	return result, err
 }
 
-func assertCommittedSolutionRejectsAlteredStage(t *testing.T, ctx context.Context, f *similarityExecutorFixture, config application.DockerSandboxConfig) {
+func assertCommittedSolutionRejectsAlteredStage(t *testing.T, ctx context.Context, f *similarityExecutorFixture, config sandboxexec.Config) {
 	t.Helper()
 	for name, alter := range map[string]func(*port.CommittedPrivateStage){
 		"changed input": func(s *port.CommittedPrivateStage) { s.Attempt.InputDigest = domain.SumBytes([]byte("other draft")) },
