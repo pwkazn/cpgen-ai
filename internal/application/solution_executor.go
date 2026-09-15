@@ -102,7 +102,7 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 		return result, err
 	}
 	if generated.outcome.Failure != nil {
-		result.Outcome = generationFailure[domain.SolutionContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated.outcome, s.drafts.config.Clock.Now())
+		result.Outcome = draftFailure[domain.SolutionContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated, s.drafts.config.Clock.Now())
 		return result, nil
 	}
 	var draft domain.SolutionDraftV1

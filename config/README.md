@@ -172,8 +172,23 @@ refuses to reuse a started root. It builds its CLI before model dispatch,
 records stage progress and budgets, and requires READY plus independent ZIP
 compilation/execution to pass. Default test runs skip all live requests.
 
+Optionally set `CPGEN_LIVE_REQUEST` to an absolute path containing a complete
+`cpgen.request/v1` JSON document. The acceptance test strictly decodes it without
+merging default fields and retains the selected request as `request.json` in
+the fresh private root. Its explicit budget limits apply to that run.
+
 Configure the actual API prefix: for the tested APINode service use
 `https://apinode.ltd/v1`; its root `/chat/completions` returned HTML.
 Credentials belong only in the process environment, not in YAML or logs.
 Provider fixture tests and successful authentication do not establish a
 successful live generation run; consult the retained acceptance result.
+
+The MVP example now selects workflow `mvp.idea.statement.similarity.solution.data.judge.package.v2`.
+V2 allows at most two automatic content regenerations per run, using the existing
+call/token/cost/time budgets. It regenerates drafts after binding/JSON-format
+failures, Solution after compile/Judge failures, Statement and its downstream
+stages after sample failures, and Data after generator/validator failures.
+Every verification runs again; failed attempts remain auditable in SQLite's
+`content_retries` and ordinary call/stage records. Exhaustion returns NEEDS_REVIEW.
+This is fresh generation from the original input, not diagnostic-guided repair.
+Frozen V1 runs keep their original behavior; select V2 when creating a new run.

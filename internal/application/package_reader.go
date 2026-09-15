@@ -26,7 +26,7 @@ type PackageReader struct {
 // Assemble reconstructs every committed upstream proof before granting publication authority.
 func (s *PackageReader) Assemble(ctx context.Context, view domain.RunView) (packageprobe.Problem, QualityReport, error) {
 	var empty packageprobe.Problem
-	if view.WorkflowRevision() != workflow.GenerationRevision {
+	if !workflow.ProducesPackage(view.WorkflowRevision()) {
 		return empty, QualityReport{}, errors.New("package requires the MVP workflow")
 	}
 	input, err := s.quality.ReadInput(ctx, view.RunID())

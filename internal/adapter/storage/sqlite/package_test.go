@@ -16,12 +16,15 @@ import (
 // This fixture proves transaction and ownership invariants only. Its payload
 // is not a semantically verified package; the Docker application test supplies
 // the actual Quality-to-archive proof that must precede this storage command.
-func packageCommitFixture(t *testing.T) (*Store, domain.FinalizeVerifiedPackageCommand) {
+func packageCommitFixture(t *testing.T, revisions ...string) (*Store, domain.FinalizeVerifiedPackageCommand) {
 	t.Helper()
 	ctx := context.Background()
 	s := openRuntimeStore(t, filepath.Join(t.TempDir(), "package.db"), clock.NewFake(testNow))
 	r := testCreateRunRequest(testRunID, testNow, time.Minute)
 	r.WorkflowRevision = "mvp.idea.statement.similarity.solution.data.judge.package.v1"
+	if len(revisions) != 0 {
+		r.WorkflowRevision = revisions[0]
+	}
 	r.WorkflowDigest = domain.SumBytes([]byte(r.WorkflowRevision))
 	r.StageSequence = []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}
 	mustCreateRun(t, s, r)

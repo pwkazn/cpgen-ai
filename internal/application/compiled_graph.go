@@ -122,6 +122,9 @@ func (g *compiledRunGraph) validateTransition(before, after domain.RunSnapshot) 
 			return errors.New("READY did not finish its verified package stage")
 		}
 	case domain.RunRunning:
+		if workflow.AllowsContentRetryTransition(g.revision, before.CurrentStage, after.CurrentStage) {
+			return nil
+		}
 		if before.CurrentStageOrdinal >= len(g.stages) {
 			return errors.New("compiled slice boundary requires an explicit pause")
 		}

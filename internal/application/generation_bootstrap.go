@@ -78,7 +78,7 @@ func bootstrapGenerationRunService(ctx context.Context, cfg config.Config, store
 		Reconciler: reconciler, EffectiveConfigJSON: effectiveJSON, SolutionSandbox: sandboxConfig,
 	}
 	var service *LocalRunService
-	if cfg.Workflow.Revision == workflow.GenerationRevision {
+	if workflow.ProducesPackage(cfg.Workflow.Revision) {
 		service, err = NewGenerationRunService(runConfig)
 	} else {
 		service, err = newGenerationRunService(runConfig)

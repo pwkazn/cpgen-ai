@@ -7,6 +7,8 @@ import (
 
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
+	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunSnapshot, input any) (domain.RunSnapshot, error) {
@@ -246,7 +248,17 @@ func (s *LocalRunService) finishExecution(ctx context.Context, snapshot domain.R
 	if result.Value != nil {
 		command.Occurrences = execution.occurrences
 	}
-	finished, err := s.runtime.FinishStage(ctx, command)
+	var finished domain.RunSnapshot
+	var err error
+	if result.Review != nil && workflow.ContentRetryTarget(snapshot.WorkflowRevision, snapshot.CurrentStage, result.Review.Reason) != "" {
+		store, ok := s.runtime.(port.ContentRetryStore)
+		if !ok {
+			return snapshot, errors.New("content retry workflow requires atomic retry storage")
+		}
+		finished, err = store.FinishContentRetry(ctx, domain.FinishContentRetryCommand{Finish: command, Reason: result.Review.Reason})
+	} else {
+		finished, err = s.runtime.FinishStage(ctx, command)
+	}
 	if err != nil {
 		return snapshot, err
 	}

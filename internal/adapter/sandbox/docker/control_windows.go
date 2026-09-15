@@ -222,6 +222,14 @@ func applyOwnerOnlyACL(path string) error {
 	if err != nil {
 		return err
 	}
+	current, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := current.Owner()
+	if err != nil {
+		return err
+	}
 	sddl := "D:P(A;;GA;;;SY)(A;;GA;;;" + user.String() + ")"
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
@@ -231,9 +239,16 @@ func applyOwnerOnlyACL(path string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		user, nil, dacl, nil)
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	var newOwner *windows.SID
+	if !owner.Equals(user) {
+		information |= windows.OWNER_SECURITY_INFORMATION
+		newOwner = user
+	}
+	// Owners can replace the DACL without WRITE_OWNER. Requesting an owner
+	// write even when the owner is unchanged fails on directories inherited
+	// from a drive root that grants this user Modify rather than FullControl.
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information, newOwner, nil, dacl, nil)
 }
 
 func validateOwnerOnlyACL(path string) error {

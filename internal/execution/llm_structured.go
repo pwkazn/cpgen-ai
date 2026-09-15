@@ -31,6 +31,9 @@ type StructuredLLMResult struct {
 	CallTraces []domain.CallTrace
 	Artifacts  []domain.PendingArtifact
 	Usage      port.Usage
+	// FormatRejected comes only from a verified response diagnostic, never
+	// from an HTTP rejection or a guessed failure class.
+	FormatRejected bool
 }
 
 type StructuredLLMCalls struct {
@@ -92,7 +95,7 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 	if err := s.appendResult(ctx, &result, open.ID, outcome); err != nil {
 		return result, errors.Join(callErr, err)
 	}
-	if callErr != nil || outcome.Value != nil || s.policy.MaxRepairs == 0 {
+	if callErr != nil || outcome.Value != nil {
 		return result, callErr
 	}
 	if err := ctx.Err(); err != nil {
@@ -101,6 +104,10 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 	diagnostic, err := s.calls.ReadFormatRepair(ctx, open, request)
 	if err != nil || diagnostic == nil {
 		return result, err
+	}
+	result.FormatRejected = true
+	if s.policy.MaxRepairs == 0 {
+		return result, nil
 	}
 	repairOpen, repairRequest, err := s.repairRequest(open, request, *diagnostic)
 	if err != nil {
@@ -120,8 +127,16 @@ func (s *StructuredLLMCalls) generate(ctx context.Context, open domain.OpenCallR
 		}
 	}
 	outcome, callErr = call(ctx, repairOpen, repairRequest)
+	result.FormatRejected = false
 	if err := s.appendResult(ctx, &result, repairOpen.ID, outcome); err != nil {
 		return result, errors.Join(callErr, err)
+	}
+	if callErr == nil && outcome.Failure != nil {
+		diagnostic, err := s.calls.ReadFormatRepair(ctx, repairOpen, repairRequest)
+		if err != nil {
+			return result, err
+		}
+		result.FormatRejected = diagnostic != nil
 	}
 	return result, callErr
 }

@@ -53,7 +53,7 @@ func (s *DataExecutor) CollectDraft(ctx context.Context, view domain.RunView, in
 		return result, err
 	}
 	if generated.outcome.Failure != nil {
-		result.Outcome = generationFailure[domain.DataContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated.outcome, s.drafts.config.Clock.Now())
+		result.Outcome = draftFailure[domain.DataContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated, s.drafts.config.Clock.Now())
 		return result, nil
 	}
 	var draft domain.DataDraftV1
