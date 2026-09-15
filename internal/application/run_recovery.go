@@ -8,6 +8,7 @@ import (
 	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/domain"
+	"cpgen/internal/port"
 )
 
 func (s *LocalRunService) recover(ctx context.Context, snapshot domain.RunSnapshot, attempt domain.AttemptID, preserveAttempt bool) (domain.RunSnapshot, error) {
@@ -61,7 +62,16 @@ func (s *LocalRunService) recover(ctx context.Context, snapshot domain.RunSnapsh
 			attempt = persisted.AttemptID
 		}
 	}
-	if attempt == "" || preserveAttempt {
+	if attempt == "" {
+		return snapshot, nil
+	}
+	if preserveAttempt {
+		// Keep the original attempt for all dispatched/uncertain work. Only the
+		// known pre-execution failure may retire its fully settled no-send calls
+		// and begin an ordinary, budgeted verification attempt on manual resume.
+		if store, ok := s.runtime.(port.UnsentSandboxRecoveryStore); ok && snapshot.CurrentStage == "solution_verify" {
+			return store.InterruptUnsentSandboxStage(ctx, domain.InterruptStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attempt, Cause: domain.CauseRevisionInvalidated, IdempotencyKey: stableServiceID("interrupt-unsent-sandbox", snapshot.RunID, snapshot.Version), At: s.clock.Now().UTC()})
+		}
 		return snapshot, nil
 	}
 	return s.runtime.InterruptStage(ctx, domain.InterruptStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attempt, Cause: domain.CauseRevisionInvalidated, IdempotencyKey: stableServiceID("interrupt", snapshot.RunID, snapshot.Version), At: s.clock.Now().UTC()})
