@@ -6,7 +6,7 @@ Status: Current under ADR-0006
 
 This design defines the concrete typed CPGen pipeline, durable stage boundaries, stage-local retry, manual resume, review, cancellation, and downstream invalidation. The coordinator is a foreground CLI component for one host.
 
-The 2026-09-09 user scope revision prioritizes the forward MVP: committed valid Similarity ACCEPT continues to Solution/Data/Docker/Judge/Quality/Package; non-accepted business results stop for human review. Automatic mutation and solution-content repair loops are deferred. Existing transport retry, JSON-format repair, dependency recovery and explicit human review remain separate. Follow the [current delivery plan](../superpowers/plans/2026-09-09-mvp-generation-loop.md); older mutation sequencing below is not an MVP prerequisite.
+The forward MVP continues from committed Similarity ACCEPT through Solution/Data/Docker/Judge/Quality/Package. The 2026-09-15 scope adds bounded content regeneration in `mvp.idea.statement.similarity.solution.data.judge.package.v2`; V1 and historical checkpoints retain their existing stopping behavior. Transport retry, JSON-format repair, dependency recovery and explicit human review remain separate. General idea mutation remains deferred.
 
 ## 2. Identities and revisions
 
@@ -38,7 +38,7 @@ The generation constructor assembles these business stages:
 
 The current `GenerationRevision` assembles the complete ordinary-problem pipeline, including separate verification and decision boundaries. `revisions.go` isolates the unchanged persisted revision strings and historical stopping points. All revisions use the application scheduler; there is no separate historical pipeline executor. The default deterministic Fake pipeline and its capability configuration live in `internal/adapter/fake`.
 
-The 2026-09-13 ADR-0006 amendment uses a local fixed loop in `internal/application`, replacing the LangGraphGo wrapper. One stage boundary runs at a time. The loop validates identity, stage order and committed version before selecting the next stage, checks cancellation before invocation and returns immediately on a pause or terminal result. It performs no retries or independent checkpoint writes. A failed boundary may return an updated same-stage projection when BeginStage or accounting already committed; foreign or regressed projections are rejected.
+The local fixed loop in `internal/application` runs one stage boundary at a time. It validates identity, stage order and committed version before selecting the next stage, checks cancellation before invocation and returns on a pause or terminal result. For V2 it also accepts the explicit compiled content-retry routes; the durable boundary owns eligibility and the persisted retry limit. The scheduler performs no independent checkpoint writes. A failed boundary may return an updated same-stage projection when BeginStage or accounting already committed; foreign or regressed projections are rejected.
 
 Progress is reconstructed from the compatible compiled workflow revision, stage/input/config/schema bindings and verified stored outputs. SQLite remains authoritative; no graph.json store or unchecked automatic checkpoint callback is used. The scheduler shares no invocation state between runs. `LocalRunService` directly manages attempts, result commits, review and recovery under the run lock; its stageControl helper joins pollers. `fixedStages` adapts typed business inputs/results and selects recovery through an explicit switch. Its recovery switch performs stage admission and verifies cleanup proof, then delegates retained physical-call settlement to `internal/adapter/sandbox`. Model and Similarity retry/receipt/cache protocols live in `internal/execution`; they do not import application or advance workflow stages. There is no recovery registration table or separate lifecycle/termination object. Bootstrap/Application owns and closes execution resources before storage. The existing stage-sequence, error, cancellation, concurrent-run and subprocess recovery tests remain the behavioral contract after removing the graph library.
 
@@ -72,6 +72,21 @@ A stateful execution command:
 Expected run version is checked on every transition. Replaying a committed transition returns its stored result and never duplicates events or accounting.
 
 ## 6. Retry
+
+V2 automatically regenerates content at most **twice per run**, shared across stages and process restarts. The example configuration selects V2; existing frozen V1 runs remain V1. This initial policy regenerates from the original typed input; it does not yet feed compiler diagnostics or prior drafts back into the prompt.
+
+| Failure | Regenerate from |
+| --- | --- |
+| No feasible ideas; draft/input binding rejected | Current draft stage |
+| Verified JSON-format rejection after the configured format allowance | Current draft stage |
+| Solution or brute compile failure | Solution |
+| Solution sample failure (the sample itself may be wrong) | Statement, then Similarity and all later stages |
+| Generator/validator compile, execution, validation or reproducibility failure | Data |
+| Judge reference/brute failure or differential mismatch | Solution, then Data and all later stages |
+
+Similarity decisions, fixed-checker Quality failures, provider HTTP rejection, unknown send boundaries, unsupported diagnostics and exhausted budgets do not authorize content regeneration. They retain the existing review/block/error behavior.
+
+`FinishContentRetry` completes the failed attempt, inserts immutable `content_retries` evidence and invalidates the target's entire downstream suffix in the same SQLite transaction. It preserves attempt ordinals, earlier artifacts, request/configuration bindings and all budget accounts. A replay cannot spend another allowance. Regenerated draft attempts bypass cache lookup; already dispatched calls retain normal durable replay. Every downstream verification must pass again before READY. When the two allowances are spent, the same transaction finishes at the ordinary non-waivable NEEDS_REVIEW gate. Pending cancellation prevents regeneration.
 
 Retry is a bounded loop within the current stage and its versioned policy. Each physical attempt has a new ordinal and persisted call record. The logical operation identity and idempotency key remain stable across attempts.
 

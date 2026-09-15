@@ -17,7 +17,7 @@ func (s *Store) FinishMutationStage(ctx context.Context, command domain.FinishMu
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
-	return s.finishStage(ctx, command.Finish, digest, &command.Mutation, nil)
+	return s.finishStage(ctx, command.Finish, digest, &command.Mutation, nil, nil)
 }
 
 func finishMutationRecordTx(ctx context.Context, tx *immediateTx, finish domain.FinishStageCommand, mutation domain.MutationStageRecord) error {

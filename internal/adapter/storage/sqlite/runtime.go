@@ -318,10 +318,10 @@ func (s *Store) FinishStage(ctx context.Context, command domain.FinishStageComma
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
-	return s.finishStage(ctx, command, commandDigest, nil, nil)
+	return s.finishStage(ctx, command, commandDigest, nil, nil, nil)
 }
 
-func (s *Store) finishStage(ctx context.Context, command domain.FinishStageCommand, commandDigest domain.Digest, mutation *domain.MutationStageRecord, verifiedPackage *domain.VerifiedPackageBinding) (domain.RunSnapshot, error) {
+func (s *Store) finishStage(ctx context.Context, command domain.FinishStageCommand, commandDigest domain.Digest, mutation *domain.MutationStageRecord, verifiedPackage *domain.VerifiedPackageBinding, retry *domain.FinishContentRetryCommand) (domain.RunSnapshot, error) {
 	var result domain.RunSnapshot
 	err := s.immediate(ctx, func(tx *immediateTx) error {
 		if replayed, err := replayEvent(ctx, tx, command.RunID, command.IdempotencyKey, commandDigest, &result); err != nil || replayed {
@@ -497,6 +497,15 @@ func (s *Store) finishStage(ctx context.Context, command domain.FinishStageComma
 		}
 		newVersion := run.Version + 1
 		finalState := command.RunState
+		if retry != nil {
+			target, ordinal, err := scheduleContentRetryTx(ctx, tx, run, *retry)
+			if err != nil {
+				return err
+			}
+			if target != "" {
+				currentStage, currentOrdinal, finalState = target, ordinal, domain.RunRunning
+			}
+		}
 		var finalPackage any
 		if verifiedPackage != nil {
 			occurrence, err := insertVerifiedPackageTx(ctx, tx, command, *verifiedPackage)

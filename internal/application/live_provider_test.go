@@ -146,6 +146,15 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	must(err)
 	seed := int64(202609101831)
 	request := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: domain.RequestModeManual, Brief: "Create a small ordinary programming contest problem about an undirected unweighted graph. Prefer a clear tractable specification and an independent brute-force oracle. Keep generated formal cases modest for this integration test; do not require special judging.", Language: "en", Difficulty: "medium", SolutionLanguage: "cpp", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512, Seed: &seed, VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: domain.BudgetLimits{MaxLLMCalls: 8, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000000, MaxLLMOutputTokens: 262144, MaxLLMCostMicroUSD: 800000, MaxSimilarityCostMicroUSD: 200000, MaxSandboxCreates: 256, MaxArtifactBytes: 256 << 20, MaxPackageBytes: 64 << 20, MaxActiveTimeMilliseconds: 1200000}}
+	if requestPath := os.Getenv("CPGEN_LIVE_REQUEST"); requestPath != "" {
+		if !filepath.IsAbs(requestPath) {
+			t.Fatal("CPGEN_LIVE_REQUEST must be an absolute private path")
+		}
+		requestBytes, err := os.ReadFile(requestPath)
+		must(err)
+		request = domain.RunRequest{}
+		must(domain.DecodeStrictJSON(requestBytes, &request))
+	}
 	must(request.Validate())
 	writeJSON := func(name string, v any) {
 		t.Helper()

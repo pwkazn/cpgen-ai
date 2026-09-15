@@ -49,7 +49,7 @@ func NewFrozenReadPolicy(ctx context.Context, store FrozenReadPolicyStore, runID
 	if err != nil {
 		return empty, sandbox, err
 	}
-	if cfg.Workflow == nil || cfg.Workflow.Revision != run.WorkflowRevision || run.WorkflowRevision != workflow.GenerationRevision || run.WorkflowDigest != domain.SumBytes([]byte(run.WorkflowRevision)) || cfg.Sandbox == nil {
+	if cfg.Workflow == nil || cfg.Workflow.Revision != run.WorkflowRevision || !workflow.ProducesPackage(run.WorkflowRevision) || run.WorkflowDigest != domain.SumBytes([]byte(run.WorkflowRevision)) || cfg.Sandbox == nil {
 		return empty, sandbox, errors.New("package read policy requires the original MVP configuration")
 	}
 	lock, err := LoadConfiguredToolchainLock(cfg)

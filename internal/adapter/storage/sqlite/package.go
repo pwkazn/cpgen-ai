@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"cpgen/internal/domain"
+	"cpgen/internal/workflow"
 )
 
 func (s *Store) ReadVerifiedPackage(ctx context.Context, runID domain.RunID) (domain.VerifiedPackageRecord, error) {
@@ -35,11 +36,11 @@ func (s *Store) FinalizeVerifiedPackage(ctx context.Context, command domain.Fina
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
-	return s.finishStage(ctx, command.Finish, digest, nil, &command.Package)
+	return s.finishStage(ctx, command.Finish, digest, nil, &command.Package, nil)
 }
 
 func validatePackageCompletionTx(ctx context.Context, tx *immediateTx, run domain.RunSnapshot, command domain.FinishStageCommand, binding domain.VerifiedPackageBinding) error {
-	if run.WorkflowRevision != "mvp.idea.statement.similarity.solution.data.judge.package.v1" || run.CurrentStage != "package" || run.CurrentStageOrdinal != 12 {
+	if !workflow.ProducesPackage(run.WorkflowRevision) || run.CurrentStage != "package" || run.CurrentStageOrdinal != 12 {
 		return wrap(ErrInvalidTransition, "READY requires the fixed MVP package stage", nil)
 	}
 	var valid int

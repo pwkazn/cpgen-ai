@@ -14,6 +14,7 @@ import (
 	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
+	"cpgen/internal/workflow"
 )
 
 type GenerationExecutionStore interface {
@@ -177,7 +178,7 @@ func (s *GenerationExecutor) CollectIdeaCandidates(ctx context.Context, view dom
 		return result, err
 	}
 	if generated.outcome.Failure != nil {
-		result.Outcome = generationFailure[domain.IdeaBatch](view, attempt, s.config.Content.ProviderPolicyDigest, generated.outcome, s.config.Clock.Now())
+		result.Outcome = draftFailure[domain.IdeaBatch](view, attempt, s.config.Content.ProviderPolicyDigest, generated, s.config.Clock.Now())
 		return result, nil
 	}
 	var draft domain.IdeaDraftV1
@@ -225,7 +226,7 @@ func (s *GenerationExecutor) RunStatement(ctx context.Context, view domain.RunVi
 		return result, err
 	}
 	if generated.outcome.Failure != nil {
-		result.Outcome = generationFailure[domain.ProblemSpec](view, attempt, s.config.Content.ProviderPolicyDigest, generated.outcome, s.config.Clock.Now())
+		result.Outcome = draftFailure[domain.ProblemSpec](view, attempt, s.config.Content.ProviderPolicyDigest, generated, s.config.Clock.Now())
 		return result, nil
 	}
 	var draft domain.StatementDraftV1
@@ -243,11 +244,12 @@ func (s *GenerationExecutor) RunStatement(ctx context.Context, view domain.RunVi
 }
 
 type generatedDraft struct {
-	outcome     domain.MeteredOutcome[port.GenerateResponse]
-	occurrences []domain.PendingOccurrence
-	traces      []domain.CallTrace
-	usage       port.Usage
-	publication *generationCachePublication
+	formatRejected bool
+	outcome        domain.MeteredOutcome[port.GenerateResponse]
+	occurrences    []domain.PendingOccurrence
+	traces         []domain.CallTrace
+	usage          port.Usage
+	publication    *generationCachePublication
 }
 
 func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
@@ -286,7 +288,11 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	if checkpoint != nil && existing.Kind == domain.CallCacheReuse {
 		return result, errors.New("blocked dependency recheck cannot be satisfied by a cached result")
 	}
-	if checkpoint == nil && (errors.Is(readErr, sqlite.ErrNotFound) || existing.Kind == domain.CallCacheReuse) {
+	// A regenerated producer must make a fresh proposal instead of reusing the
+	// committed draft whose downstream verification just failed. Retain replay
+	// of an existing cache call if the process stopped during its first attempt.
+	bypassCache := view.WorkflowRevision() == workflow.RetryingGenerationRevision && attempt.Ordinal > 1
+	if checkpoint == nil && (!bypassCache || existing.Kind == domain.CallCacheReuse) && (errors.Is(readErr, sqlite.ErrNotFound) || existing.Kind == domain.CallCacheReuse) {
 		hit, err := cache.Reuse(ctx, open, request)
 		if err != nil {
 			return result, err
@@ -305,6 +311,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	}
 	generated, err := service.Generate(ctx, open, request)
 	result.outcome, result.traces, result.usage = generated.Outcome, generated.CallTraces, generated.Usage
+	result.formatRejected = generated.FormatRejected
 	if err != nil {
 		return result, err
 	}
@@ -319,6 +326,13 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 		result.publication = &generationCachePublication{cache: cache, open: open, request: request}
 	}
 	return result, nil
+}
+
+func draftFailure[T any](view domain.RunView, attempt domain.StageAttempt, policy domain.Digest, draft generatedDraft, now time.Time) domain.AgentResult[T] {
+	if view.WorkflowRevision() == workflow.RetryingGenerationRevision && draft.formatRejected {
+		return generationContentReview[T](policy, draft.outcome.CallTrace, "llm_format_rejected")
+	}
+	return generationFailure[T](view, attempt, policy, draft.outcome, now)
 }
 
 func generationContentReview[T any](policy domain.Digest, trace domain.CallTrace, reason string) domain.AgentResult[T] {

@@ -13,7 +13,6 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
-	"cpgen/internal/workflow"
 )
 
 type frozenPolicyFixture struct {
@@ -73,7 +72,7 @@ func TestFrozenReadPolicyRestoresOfflinePolicyAndRejectsBrokenBindings(t *testin
 	attemptID := domain.AttemptID("attempt_00000000000000000000000000000001")
 	executionID := domain.SandboxExecutionID("sandbox_00000000000000000000000000000001")
 	base := frozenPolicyFixture{
-		run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw), WorkflowRevision: workflow.GenerationRevision, WorkflowDigest: domain.SumBytes([]byte(workflow.GenerationRevision))}, raw: raw,
+		run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw), WorkflowRevision: cfg.Workflow.Revision, WorkflowDigest: domain.SumBytes([]byte(cfg.Workflow.Revision))}, raw: raw,
 		stage:     port.CommittedPrivateStage{Attempt: domain.StageAttempt{RunID: runID, AttemptID: attemptID, StageName: "solution_verify", Ordinal: 1, State: domain.StageAttemptSucceeded, InputDigest: domain.SumBytes([]byte("draft")), OutputDigest: &output, StartedAt: now, FinishedAt: &now}, Artifacts: []port.CommittedPrivateStageArtifact{{Blob: domain.CacheBlob{LogicalPath: domain.SafeRelPath("sandbox/" + string(executionID) + "/result.json")}}}},
 		execution: domain.SandboxExecution{ID: executionID, RunID: runID, AttemptID: attemptID, StageName: "solution_verify", State: domain.SandboxExecutionCleaned, EngineIdentityDigest: domain.SumBytes([]byte("offline-engine"))},
 	}
@@ -156,7 +155,7 @@ func TestFrozenReadPolicyUsesBoundToolchainSnapshotAfterOriginalPathChanges(t *t
 	executionID := domain.SandboxExecutionID("sandbox_00000000000000000000000000000001")
 	output := domain.SumBytes([]byte("report"))
 	fixture := frozenPolicyFixture{
-		run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw), WorkflowRevision: workflow.GenerationRevision, WorkflowDigest: domain.SumBytes([]byte(workflow.GenerationRevision))}, raw: raw,
+		run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw), WorkflowRevision: cfg.Workflow.Revision, WorkflowDigest: domain.SumBytes([]byte(cfg.Workflow.Revision))}, raw: raw,
 		stage:     port.CommittedPrivateStage{Attempt: domain.StageAttempt{RunID: runID, AttemptID: attemptID, StageName: "solution_verify", Ordinal: 1, State: domain.StageAttemptSucceeded, InputDigest: domain.SumBytes([]byte("draft")), OutputDigest: &output, StartedAt: now, FinishedAt: &now}, Artifacts: []port.CommittedPrivateStageArtifact{{Blob: domain.CacheBlob{LogicalPath: domain.SafeRelPath("sandbox/" + string(executionID) + "/result.json")}}}},
 		execution: domain.SandboxExecution{ID: executionID, RunID: runID, AttemptID: attemptID, StageName: "solution_verify", State: domain.SandboxExecutionCleaned, EngineIdentityDigest: domain.SumBytes([]byte("offline-engine"))},
 	}

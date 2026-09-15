@@ -1,10 +1,11 @@
 # Ordinary problem workflow: accepted Similarity -> Solution -> Data -> Judge
-# -> Quality -> verified Package/READY. Other business decisions require review.
+# -> Quality -> verified Package/READY. V2 permits two content regenerations
+# per run within the original budgets; unresolved failures require review.
 # Replace paths, endpoints, identities and the all-zero toolchain lock digest.
 storage:
   state_root: D:/cpgen-private/mvp
 workflow:
-  revision: mvp.idea.statement.similarity.solution.data.judge.package.v1
+  revision: mvp.idea.statement.similarity.solution.data.judge.package.v2
   idea_count: 2
   llm_cost_upper_bound_micro_usd: 100000
   similarity_cost_upper_bound_micro_usd: 100000

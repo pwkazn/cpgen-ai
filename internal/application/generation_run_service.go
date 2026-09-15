@@ -37,7 +37,7 @@ type GenerationRunConfig struct {
 }
 
 func NewGenerationRunService(config GenerationRunConfig) (*LocalRunService, error) {
-	if config.Similarity == nil || config.Similarity.Revision() != workflow.GenerationRevision {
+	if config.Similarity == nil || !workflow.ProducesPackage(config.Similarity.Revision()) {
 		return nil, errors.New("generation run service requires the package-producing revision")
 	}
 	return newGenerationRunService(config)
@@ -75,6 +75,11 @@ func newGenerationRunService(config GenerationRunConfig) (*LocalRunService, erro
 	}
 	if err := config.validateResources(); err != nil {
 		return nil, err
+	}
+	if config.Similarity.Revision() == workflow.RetryingGenerationRevision {
+		if _, ok := config.Store.(port.ContentRetryStore); !ok {
+			return nil, errors.New("content retry workflow requires atomic retry storage")
+		}
 	}
 	service, err := newRunService(RunServiceConfig{
 		Runtime: config.Store, Reviews: config.Reviews, Locks: config.Locks, Clock: config.Clock,

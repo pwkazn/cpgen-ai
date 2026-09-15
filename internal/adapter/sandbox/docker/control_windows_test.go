@@ -12,6 +12,35 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestOwnerOnlyACLDoesNotRequireChangingExistingOwner(t *testing.T) {
+	path := t.TempDir()
+	user, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce a data-drive directory: current user owns it, but its DACL
+	// grants Modify (no WRITE_OWNER). Ownership still permits WRITE_DAC.
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;0x1301bf;;;" + user.String() + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		user, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyOwnerOnlyACL(path); err != nil {
+		t.Fatalf("secure existing owner directory without WRITE_OWNER: %v", err)
+	}
+	if err := validateOwnerOnlyACL(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrepareWatchdogControlRefusesActiveSameNoncePipe(t *testing.T) {
 	base := t.TempDir()
 	// Named pipes are machine-wide, even when the control directory is private

@@ -163,13 +163,22 @@ func TestGenerationExecutorBlockedPredecessorRequiresFreshDependencyEvenWithCach
 	testGenerationExecutorPriorAttemptCache(t, true)
 }
 
-func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool) {
+func TestContentRetryBypassesPreviouslyCommittedDraftCache(t *testing.T) {
+	testGenerationExecutorPriorAttemptCache(t, false, true)
+}
+
+func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool, retryWorkflow ...bool) {
+	fresh := len(retryWorkflow) != 0 && retryWorkflow[0]
+	revision := workflow.LegacySimilarityRevision
+	if fresh {
+		revision = workflow.RetryingGenerationRevision
+	}
 	maxCalls := int64(1)
-	if recheck {
+	if recheck || fresh {
 		maxCalls = 2
 	}
 	content := string(llmBuiltinOutputs(t)["idea.draft"])
-	f := newGenerationExecutorFixture(t, maxCalls, false, func(w http.ResponseWriter, _ *http.Request) {
+	f := newGenerationExecutorFixtureWithWorkflow(t, maxCalls, false, revision, 0, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "cached-dependency-fixture", "choices": []any{map[string]any{"message": map[string]string{"content": content}}}, "usage": map[string]int{"prompt_tokens": 3, "completion_tokens": 4}})
 	})
 	ctx := context.Background()
@@ -214,7 +223,7 @@ func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool) {
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("recheck the same frozen input"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.LegacySimilarityRevision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: revision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,13 +231,20 @@ func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.store.ApplyReview(ctx, domain.ApplyReviewCommand{RunID: f.runID, ExpectedRunVersion: decision.RunVersion, ReviewDecisionID: decision.ID, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, NewInputDigest: &f.snapshot.SnapshotDigest, NewConfigJSON: configJSON, NewConfigDigest: &policy, InvalidatedStages: []domain.StageName{"idea", "statement", "similarity"}, IdempotencyKey: coordinatorID("apply", "executor-review"), At: f.clock.Now()})
+	definition, err := workflow.DefinitionFor(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.store.ApplyReview(ctx, domain.ApplyReviewCommand{RunID: f.runID, ExpectedRunVersion: decision.RunVersion, ReviewDecisionID: decision.ID, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, NewInputDigest: &f.snapshot.SnapshotDigest, NewConfigJSON: configJSON, NewConfigDigest: &policy, InvalidatedStages: definition.Stages(), IdempotencyKey: coordinatorID("apply", "executor-review"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	view = f.begin(t, "idea", f.snapshot.SnapshotDigest, 3)
 	wantHTTP := int32(1)
 	wantOccurrence := domain.PendingOccurrenceCacheReuse
+	if fresh {
+		wantHTTP, wantOccurrence = 2, domain.PendingOccurrenceNewWrite
+	}
 	if recheck {
 		// The cache source survives review invalidation. A subsequent BLOCKED
 		// predecessor must nevertheless authorize fresh dependency work, even
@@ -266,7 +282,7 @@ func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool) {
 	}
 	for replay := 0; replay < 2; replay++ {
 		hit, err := f.executor.RunIdea(ctx, view, f.snapshot)
-		if err != nil || hit.Outcome.Value == nil || hit.Outcome.Value.BatchDigest != batch.BatchDigest || len(hit.Occurrences) != 1 || hit.Occurrences[0].Kind != wantOccurrence || (!recheck && hit.Usage != (port.Usage{})) || f.httpCalls.Load() != wantHTTP {
+		if err != nil || hit.Outcome.Value == nil || hit.Outcome.Value.BatchDigest != batch.BatchDigest || len(hit.Occurrences) != 1 || hit.Occurrences[0].Kind != wantOccurrence || (!recheck && !fresh && hit.Usage != (port.Usage{})) || f.httpCalls.Load() != wantHTTP {
 			t.Fatalf("hit=%+v err=%v HTTP=%d", hit, err, f.httpCalls.Load())
 		}
 		if replay == 1 {
@@ -340,7 +356,7 @@ func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repa
 	if workflow.HasSolutionStages(revision) {
 		limits.MaxArtifactBytes, limits.MaxSandboxCreates, limits.MaxActiveTimeMilliseconds = 64<<20, 100, 180000
 	}
-	if revision == workflow.GenerationRevision {
+	if workflow.ProducesPackage(revision) {
 		limits.MaxActiveTimeMilliseconds = 600000
 		limits.MaxPackageBytes = 16 << 20
 	}
@@ -395,7 +411,7 @@ func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repa
 	if revision == workflow.LegacySolutionCheckpointRevision {
 		stages = append(stages, "similarity_decision", "solution", "solution_verify", "solution_checkpoint")
 	}
-	if revision == workflow.GenerationRevision {
+	if workflow.ProducesPackage(revision) {
 		stages = append(stages, "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package")
 	}
 	_, err = store.CreateRun(context.Background(), domain.CreateRunRequest{RunID: f.runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: snapshot.RequestDigest, EffectiveSeed: snapshot.EffectiveSeed, RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: cfg.EffectiveDigest(), WorkflowRevision: revision, SchemaVersion: domain.RequestSchemaV1, WorkflowDigest: domain.SumBytes([]byte(revision)), BudgetLimits: limits, StageSequence: stages, CreatedAt: clock.Now(), IdempotencyKey: coordinatorID("create", "generation-executor")})

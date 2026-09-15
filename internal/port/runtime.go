@@ -6,6 +6,12 @@ import (
 	"cpgen/internal/domain"
 )
 
+// ContentRetryStore closes a failed attempt and schedules its bounded source
+// regeneration atomically. It is required only by the V2 generation workflow.
+type ContentRetryStore interface {
+	FinishContentRetry(context.Context, domain.FinishContentRetryCommand) (domain.RunSnapshot, error)
+}
+
 type RuntimeStore interface {
 	CreateRun(context.Context, domain.CreateRunRequest) (domain.RunSnapshot, error)
 	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)
