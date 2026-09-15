@@ -1432,7 +1432,7 @@ func (op *operation) finish() error {
 	if cleanupErr != nil {
 		failures = append(failures, cleanupErr)
 	}
-	if op.runner.lifecycle != nil && op.identity.SandboxExecutionID != "" && cleanupErr == nil {
+	if op.runner.lifecycle != nil && op.identity.SandboxExecutionID != "" && op.lifecycleVersion > 0 && cleanupErr == nil {
 		proofs, proofRecorder := op.runner.lifecycle.(port.SandboxCleanupRecorder)
 		if !proofRecorder {
 			failures = append(failures, fmt.Errorf("sandbox cleanup proof recorder is required"))

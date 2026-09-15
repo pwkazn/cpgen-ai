@@ -183,6 +183,8 @@ A process may exit while the run projection and current attempt still say RUNNIN
 
 Recovery consists of idempotent named operations over domain ledgers. It never scans unrelated runs or invents a generic workflow action.
 
+For the first `solution_verify` create failing before any SandboxExecution exists, manual resume may interrupt the old attempt and begin an ordinary new verification attempt. SQLite checks this in the interruption transaction: all calls are terminal sandbox/local-publication calls, every Docker physical call is `ABORTED_NO_DISPATCH` without a dispatch-start timestamp, and reservations are settled. Existing execution records (including CLEANED), sent or unknown calls, and unsettled evidence retain the original recovery path. Original call identities, evidence and consumed budgets remain intact; the new attempt uses the unchanged committed solution input and normal admission, resource authorization and READY gates. See the [recovery evidence](docs/evidence/sandbox-unsent-recovery-2026-09-15.md).
+
 ## 11. Budget and provenance
 
 Budget dimensions include model calls, tokens and cost, similarity calls, sandbox runs, artifact bytes, stage attempts, and optional active wall time. Reservation precedes irreversible work; final settlement is monotone and auditable.

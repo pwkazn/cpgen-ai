@@ -128,3 +128,7 @@ Final checkpoint checks also passed for all 388 Go files' formatting, 123 local 
 ### 完整普通题闭环通过
 
 后续内部真实 Docker 正向及 Data/Judge/Quality/package 中断恢复通过（226.146s）。完整 MVP selector 已开放；独立 CLI 包事务内真实进程退出、回滚后恢复 READY、ZIP 导出和全新存储下仅从包重编译/执行通过（208.994s）。生成流程保持 4 次本地模型请求、1 次本地查重请求、96 次容器创建。真实 Docker 的错答、非法生成输入、不可复现、差分错答、Reference TLE 五类失败回归通过（327.428s）。完整常规测试、vet、Linux 构建和 26 项架构检查通过，最终全量 race 已通过（SQLite 706.875s）。普通 C++ 题已通过实际闭环；外部供应商、SPJ、通用导入执行和 Go 实际闭环仍为后续范围，变异保持延期。上述结果更新本节较早的未完成状态，详见 [包提交验收](evidence/mvp-package-commit-foundation.md)。
+
+## 2026-09-15：首次沙箱调用未发送后的 resume
+
+补齐 V2 CLI 验收中发现的 `solution_verify` 执行记录建立前失败路径。恢复以原子 SQLite 检查确认无执行记录、全部调用已终止且 Docker 从未开始 dispatch，才中断旧尝试并按原提交输入开始新验证尝试。保留旧调用身份、证据和预算；已发送、未知状态及已有执行记录仍使用原恢复机制。普通失败回归及真实 Docker 故障解除后到 READY、重复 resume 验收通过，详细门禁与环境说明见 [恢复证据](evidence/sandbox-unsent-recovery-2026-09-15.md)。没有再次修改 Windows ACL，也没有调用付费模型或真实 Similarity 服务。

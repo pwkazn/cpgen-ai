@@ -12,6 +12,13 @@ type ContentRetryStore interface {
 	FinishContentRetry(context.Context, domain.FinishContentRetryCommand) (domain.RunSnapshot, error)
 }
 
+// UnsentSandboxRecoveryStore interrupts only a verification attempt whose
+// retained ledger proves no Docker dispatch and no execution record. Otherwise
+// it returns the unchanged run. The proof and interruption must be atomic.
+type UnsentSandboxRecoveryStore interface {
+	InterruptUnsentSandboxStage(context.Context, domain.InterruptStageCommand) (domain.RunSnapshot, error)
+}
+
 type RuntimeStore interface {
 	CreateRun(context.Context, domain.CreateRunRequest) (domain.RunSnapshot, error)
 	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)

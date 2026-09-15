@@ -23,6 +23,8 @@ The [Solution slice](evidence/mvp-solution-foundation.md), [Data execution](evid
 
 New Solution/MVP runs persist the validated canonical toolchain lock with their effective configuration, so CLI resume and offline export can use that bound snapshot after the configured lock path is removed. Historical runs without a snapshot continue to validate and read the original lock path; a missing legacy lock remains a closed failure.
 
+The [pre-execution sandbox recovery fix](evidence/sandbox-unsent-recovery-2026-09-15.md) permits manual resume after the first `solution_verify` create fails before an execution record exists, using an atomic no-send check and a new verification attempt. Original calls and accounting remain intact; sent/unknown work and existing execution records retain receipt recovery.
+
 The historical 2026-09-08 [library integration checkpoint](evidence/slice2-library-integration.md) records the former in-process library amendment and provider boundary tests. Later checkpoints below record preview CLI and durable graph integration; the 2026-09-13 ADR-0006 amendment supersedes the graph-library implementation choice.
 
 The subsequent [provider configuration and durable dispatch checkpoint](evidence/slice2-durable-llm-dispatch.md) records LLM-02 and LLM-03a with independent subagent acceptance. The [private result replay checkpoint](evidence/slice2-private-llm-replay.md), [bounded JSON repair checkpoint](evidence/slice2-bounded-json-repair.md) and [private cache checkpoint](evidence/slice2-private-llm-cache.md) complete LLM-03b through LLM-05 with full gates. The [compiled application graph](evidence/slice2-compiled-graph.md) completes WF-01 with full gates. The [development log](development-log.md) records the active work order.

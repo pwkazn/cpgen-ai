@@ -537,6 +537,14 @@ func (s *Store) finishStage(ctx context.Context, command domain.FinishStageComma
 }
 
 func (s *Store) InterruptStage(ctx context.Context, command domain.InterruptStageCommand) (domain.RunSnapshot, error) {
+	return s.interruptStage(ctx, command, false)
+}
+
+func (s *Store) InterruptUnsentSandboxStage(ctx context.Context, command domain.InterruptStageCommand) (domain.RunSnapshot, error) {
+	return s.interruptStage(ctx, command, true)
+}
+
+func (s *Store) interruptStage(ctx context.Context, command domain.InterruptStageCommand, requireUnsentSandbox bool) (domain.RunSnapshot, error) {
 	if err := command.Validate(); err != nil {
 		return domain.RunSnapshot{}, err
 	}
@@ -558,6 +566,16 @@ func (s *Store) InterruptStage(ctx context.Context, command domain.InterruptStag
 		}
 		if run.State != domain.RunRunning || run.CurrentStage != command.StageName || run.ActiveStartedAt != nil {
 			return wrap(ErrInvalidTransition, "interrupt requires a RUNNING stage with closed accounting", nil)
+		}
+		if requireUnsentSandbox {
+			eligible, err := unsentSandboxAttempt(ctx, tx, command)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				result = run
+				return nil
+			}
 		}
 		if err := domain.ValidateRunTransition(run.State, domain.RunCreated); err != nil {
 			return wrap(ErrInvalidTransition, err.Error(), err)

@@ -48,6 +48,8 @@ prepared sandbox call differs from exact resource scope
 
 已知限制：这种在沙箱执行记录建立之前失败、相关调用已结算为未发送终止的运行，现有 `resume` 不能直接恢复。本次修复目录权限原因，没有扩展其恢复语义；第一轮证据保留。
 
+后续修复：[沙箱未发送恢复验收](sandbox-unsent-recovery-2026-09-15.md) 补充了这条 `solution_verify` 路径的恢复语义。上述限制描述的是本次原始验收时的行为；原第一轮已取消的运行仍保持 CANCELLED，未改写其调用或预算记录。
+
 ## 第二轮 CLI 结果
 
 运行 ID：`run_1b8cbb63b4a8782abce969ff61cd8e55`。
