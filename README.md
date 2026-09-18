@@ -80,6 +80,42 @@ go build ./cmd/...
 Copy an `*.example.yaml` from `config/` and replace the paths, endpoints, and the
 all-zero toolchain lock digest. See [config/README.md](config/README.md).
 
+Errors are typed and machine-readable, and configuration problems are caught before
+any network or Docker work begins:
+
+~~~console
+$ cpgen --config config/mvp.example.yaml config validate --redact
+{"schema_version":"cpgen.cli/v1","status":"ERROR","error":{"code":"config_invalid",
+ "message":"sandbox.toolchain_lock_path: must be absolute",
+ "field":"sandbox.toolchain_lock_path"}}
+~~~
+
+Every command maps failures to **stable exit codes** and stable error `code` values,
+so the CLI can be driven from scripts without parsing prose.
+
+Business outcomes come from the run's state, which lets a script distinguish "this
+problem needs a human" from "the tool broke":
+
+| Exit | Run state |
+|---:|---|
+| 0 | `READY` (or another success path) |
+| 5 | `BLOCKED` |
+| 6 | `NEEDS_REVIEW` — waiting on a human decision |
+| 7 | `FAILED` |
+| 8 | `CANCELLED` |
+
+Operational failures carry a distinct code and a stable `error.code`:
+
+| Exit | Meaning | `error.code` |
+|---:|---|---|
+| 2 | Malformed input or invalid configuration | `config_invalid` |
+| 3 | Run or object not found | `not_found` |
+| 4 | Another process holds the run lock | `lock_busy` |
+| 5 | Invalid state transition | `invalid_state` |
+| 7 | Concurrent version conflict | `version_conflict` |
+| 9 | Unclassified operation failure | `operation_failed` |
+| 10 | Sandbox cleanup still pending | `cleanup_pending` |
+
 ### What you get back
 
 `run export` produces a `cpgen.package/v2` archive that a judge system can consume
