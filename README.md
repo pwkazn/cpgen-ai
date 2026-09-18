@@ -153,6 +153,7 @@ single run never has two mutating executors.
 Full system contract: [ARCHITECTURE.md](ARCHITECTURE.md).
 Decisions and their tradeoffs: [docs/adr](docs/adr).
 Per-component detail: [docs/design](docs/design).
+The two problems that shaped the design: [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md).
 
 ## Design decisions worth reading
 
