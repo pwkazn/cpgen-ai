@@ -29,14 +29,14 @@ $contractPaths = @(
     'docs/implementation-plan.md',
     'docs/superpowers/specs/2026-08-31-phase1-mvp-design.md'
 ) + $decisionPaths
-$summaryPaths = @('README.md', 'docs/README.md', 'TODO.md')
+$summaryPaths = @('README.md', 'docs/README.md', 'docs/internal/TODO.md')
 $fixedPaths = @(
     'ARCHITECTURE.md',
     'README.md',
     'docs/README.md',
     'docs/implementation-plan.md',
     'docs/traceability.md',
-    'TODO.md'
+    'docs/internal/TODO.md'
 )
 
 $discoveredPaths = @(
