@@ -72,135 +72,73 @@ type envelope struct {
 }
 
 func Run(args []string, stdout, stderr io.Writer) int {
-	return RunWithDependencies(args, stdout, stderr, Dependencies{GOOS: runtime.GOOS, CheckDocker: dockersandbox.CheckStatic, RunWatchdog: dockersandbox.RunWatchdogService, Bootstrap: application.Bootstrap})
+	return RunWithDependencies(args, stdout, stderr, Dependencies{})
 }
 
+// RunWithDependencies parses before touching configuration or application resources.
 func RunWithDependencies(args []string, stdout, stderr io.Writer, dependencies Dependencies) int {
-	if len(args) == 0 {
-		writeHelp(stdout)
-		return 0
+	invocation, err := parseInvocation(args)
+	if err != nil {
+		return err.write(stdout, stderr)
 	}
-	switch args[0] {
-	case "help", "-h", "--help":
-		writeHelp(stdout)
-		return 0
-	case "version":
-		if len(args) == 2 && args[1] == "--json" {
-			return encodeJSON(stdout, stderr, versionOutput{SchemaVersion: "cpgen.cli-version/v1", Version: Version, GoVersion: runtime.Version()}, 0)
-		}
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: cpgen version [--json]")
-			return 2
-		}
-		fmt.Fprintln(stdout, Version)
-		return 0
-	case "doctor":
-		return runDoctor(args[1:], stdout, stderr, dependencies)
-	case "sandbox-watchdog":
-		return runSandboxWatchdog(args[1:], stderr, dependencies)
+	return invocation.run(stdout, stderr, dependencies.withDefaults())
+}
+
+func (d Dependencies) withDefaults() Dependencies {
+	if d.GOOS == "" {
+		d.GOOS = runtime.GOOS
 	}
-	if args[0] != "--config" {
-		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
-		fmt.Fprintln(stderr, "run 'cpgen help' for usage")
-		return 2
+	if d.CheckDocker == nil {
+		d.CheckDocker = dockersandbox.CheckStatic
 	}
-	if len(args) < 3 || args[1] == "" || strings.HasPrefix(args[1], "-") {
-		fmt.Fprintln(stderr, "usage: cpgen --config PATH <command> ...")
-		return 2
+	if d.RunWatchdog == nil {
+		d.RunWatchdog = dockersandbox.RunWatchdogService
 	}
-	if args[2] == "--config" {
-		fmt.Fprintln(stderr, "duplicate --config")
-		return 2
+	if d.Bootstrap == nil {
+		d.Bootstrap = application.Bootstrap
 	}
-	if args[2] == "doctor" || args[2] == "version" || args[2] == "help" || args[2] == "sandbox-watchdog" {
-		fmt.Fprintln(stderr, "this command is config-independent and cannot use --config")
-		return 2
+	if d.BootstrapLocal == nil {
+		d.BootstrapLocal = application.BootstrapLocal
 	}
-	configPath, err := canonicalPath(args[1])
+	return d
+}
+
+func runStateful(command *preparedCommand, configPath string, stdout, stderr io.Writer, dependencies Dependencies) int {
+	configPath, err := canonicalPath(configPath)
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "config_path", err)
 	}
-	return runStateful(args[2:], configPath, stdout, stderr, dependencies)
-}
-
-func runStateful(args []string, configPath string, stdout, stderr io.Writer, dependencies Dependencies) int {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "config_invalid", err)
 	}
-	if len(args) == 0 {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("stateful command is required"))
+	if command.configOnly {
+		return runConfigCommand(command.effective, cfg, stdout, stderr)
 	}
-	if args[0] == "config" {
-		return runConfigCommand(args[1:], cfg, stdout, stderr)
-	}
-	if args[0] != "run" && args[0] != "review" && args[0] != "generate" {
-		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown command %q", args[0]))
-	}
-	if code := validateCommandShape(args, stdout, stderr); code != 0 {
-		return code
-	}
-	if cfg.Sandbox != nil && cfg.Workflow != nil && workflow.HasSolutionStages(cfg.Workflow.Revision) && shouldRestoreToolchainSnapshot(args) {
-		cfg, err = restoreToolchainSnapshot(context.Background(), cfg, args, dependencies)
+	if command.restore && cfg.Sandbox != nil && cfg.Workflow != nil && workflow.HasSolutionStages(cfg.Workflow.Revision) {
+		cfg, err = restoreToolchainSnapshot(context.Background(), cfg, command.runID, dependencies)
 		if err != nil {
 			return writeStateError(stdout, stderr, 9, "bootstrap_failed", err)
 		}
 	}
 	bootstrap := dependencies.Bootstrap
-	if bootstrap == nil {
-		bootstrap = application.Bootstrap
-	}
-	if localReadCommand(args) {
+	if command.local {
 		bootstrap = dependencies.BootstrapLocal
-		if bootstrap == nil {
-			bootstrap = application.BootstrapLocal
-		}
 	}
 	app, err := bootstrap(context.Background(), cfg)
 	if err != nil {
 		return writeStateError(stdout, stderr, 9, "bootstrap_failed", err)
 	}
 	defer app.Close()
-	switch args[0] {
-	case "generate":
-		return runGenerate(args[1:], app, stdout, stderr)
-	case "run":
-		return runRunCommand(args[1:], app, stdout, stderr)
-	case "review":
-		return runReviewCommand(args[1:], app, stdout, stderr)
-	default:
-		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown command %q", args[0]))
-	}
-}
-
-func shouldRestoreToolchainSnapshot(args []string) bool {
-	if len(args) >= 2 && args[0] == "run" && (args[1] == "resume" || args[1] == "cancel") {
-		return true
-	}
-	return len(args) >= 2 && args[0] == "review" && args[1] != "show" && args[1] != ""
+	return command.execute(app, stdout, stderr)
 }
 
 type runDocumentsReader interface {
 	RunViewDocuments(context.Context, domain.RunID) ([]byte, []byte, error)
 }
 
-func restoreToolchainSnapshot(ctx context.Context, cfg config.Config, args []string, dependencies Dependencies) (config.Config, error) {
-	var runID domain.RunID
-	var err error
-	normalized := movePositionalToEnd(args[2:])
-	for index := len(normalized) - 1; index >= 0; index-- {
-		runID, err = parseRunID(normalized[index])
-		if err == nil {
-			break
-		}
-	}
-	if runID == "" {
-		return cfg, errors.New("run ID is required")
-	}
-	bootstrap := dependencies.BootstrapLocal
-	if bootstrap == nil {
-		bootstrap = application.BootstrapLocal
-	}
+func restoreToolchainSnapshot(ctx context.Context, cfg config.Config, runID domain.RunID, dependencies Dependencies) (config.Config, error) {
+	bootstrap := dependencies.withDefaults().BootstrapLocal
 	local, err := bootstrap(ctx, cfg)
 	if err != nil {
 		return cfg, err
@@ -250,22 +188,31 @@ func restoreToolchainSnapshot(ctx context.Context, cfg config.Config, args []str
 	return cfg, nil
 }
 
-func runConfigCommand(args []string, cfg config.Config, stdout, stderr io.Writer) int {
-	if len(args) == 0 || (args[0] != "validate" && args[0] != "effective") {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: config validate|effective --redact"))
+func prepareConfig(args []string, effective bool) (*preparedCommand, *commandError) {
+	flags := commandFlags("config validate")
+	if effective {
+		flags = commandFlags("config effective")
 	}
-	if args[0] == "validate" {
-		if len(args) != 1 {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("config validate takes no flags"))
-		}
+	var redact bool
+	if effective {
+		flags.BoolVar(&redact, "redact", false, "redact configuration")
+	}
+	if err := parseFlags(flags, args); err != nil {
+		return nil, err
+	}
+	if effective && !redact {
+		return nil, usageError("config effective requires --redact")
+	}
+	return &preparedCommand{configOnly: true, effective: effective}, nil
+}
+
+func runConfigCommand(effectiveOutput bool, cfg config.Config, stdout, stderr io.Writer) int {
+	if !effectiveOutput {
 		effective, err := cfg.EffectiveConfig()
 		if err != nil {
 			return writeStateError(stdout, stderr, 2, "config_invalid", err)
 		}
 		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: map[string]any{"digest": cfg.EffectiveDigest(), "schema_version": effective.SchemaVersion}}, 0)
-	}
-	if len(args) != 2 || args[1] != "--redact" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: config effective --redact"))
 	}
 	effective, err := cfg.EffectiveConfig()
 	if err != nil {
@@ -274,14 +221,22 @@ func runConfigCommand(args []string, cfg config.Config, stdout, stderr io.Writer
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: effective}, 0)
 }
 
-func runGenerate(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("generate", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	requestPath := flags.String("request", "", "request YAML/JSON path")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *requestPath == "" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: generate --request PATH"))
+func prepareGenerate(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("generate")
+	request := flags.String("request", "", "request YAML/JSON path")
+	if err := parseFlags(flags, args); err != nil {
+		return nil, err
 	}
-	request, err := loadRequest(*requestPath)
+	if *request == "" {
+		return nil, usageError("generate requires --request PATH")
+	}
+	return &preparedCommand{execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runGenerate(*request, app, out, diagnostic)
+	}}, nil
+}
+
+func runGenerate(requestPath string, app *application.Application, stdout, stderr io.Writer) int {
+	request, err := loadRequest(requestPath)
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "request_invalid", err)
 	}
@@ -297,92 +252,101 @@ func runGenerate(args []string, app *application.Application, stdout, stderr io.
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: status, Data: snapshot, RunVersion: snapshot.Version}, code)
 }
 
-func runRunCommand(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("run list|show|events|resume|cancel"))
+func prepareRunList(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("run list")
+	state := flags.String("state", "", "run state")
+	limit := flags.Int("limit", 0, "maximum rows")
+	if err := parseFlags(flags, args); err != nil {
+		return nil, err
 	}
-	switch args[0] {
-	case "list":
-		flags := flag.NewFlagSet("run list", flag.ContinueOnError)
-		flags.SetOutput(stderr)
-		state := flags.String("state", "", "run state")
-		limit := flags.Int("limit", 0, "maximum rows")
-		if err := flags.Parse(movePositionalToEnd(args[1:])); err != nil || flags.NArg() != 0 {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run list [--state STATE]"))
-		}
-		filter := domain.RunFilter{Limit: *limit}
-		if *limit < 0 || *limit > 1000 {
-			return writeStateError(stdout, stderr, 2, "invalid_argument", errors.New("run list limit must be between zero and 1000"))
-		}
-		if *state != "" {
-			parsed := domain.RunState(*state)
-			if !parsed.Valid() {
-				return writeStateError(stdout, stderr, 5, "invalid_state", fmt.Errorf("invalid run state %q", *state))
-			}
-			filter.State = &parsed
-		}
-		rows, err := app.Runtime.ListRuns(context.Background(), filter)
-		if err != nil {
-			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
-		}
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].RunID < rows[j].RunID })
-		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: rows}, 0)
-	case "show":
-		if len(args) != 2 {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run show RUN_ID"))
-		}
-		id, err := parseRunID(args[1])
-		if err != nil {
-			return writeStateError(stdout, stderr, 3, "invalid_id", err)
-		}
-		snapshot, err := app.Runtime.GetRun(context.Background(), id)
-		if err != nil {
-			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
-		}
-		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, 0)
-	case "events":
-		return runEvents(args[1:], app, stdout, stderr)
-	case "export":
-		return runPackageExport(args[1:], app, stdout, stderr)
-	case "resume":
-		if len(args) != 2 {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run resume RUN_ID"))
-		}
-		id, err := parseRunID(args[1])
-		if err != nil {
-			return writeStateError(stdout, stderr, 3, "invalid_id", err)
-		}
-		snapshot, err := app.Runs.Resume(context.Background(), id)
-		if err != nil {
-			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
-		}
-		code := exitForSnapshot(snapshot.State)
-		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, code)
-	case "cancel":
-		return runCancel(args[1:], app, stdout, stderr)
-	default:
-		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown run command %q", args[0]))
+	if *limit < 0 || *limit > 1000 {
+		return nil, argumentError("invalid_argument", 2, errors.New("run list limit must be between zero and 1000"))
 	}
+	filter := domain.RunFilter{Limit: *limit}
+	if *state != "" {
+		value := domain.RunState(*state)
+		if !value.Valid() {
+			return nil, argumentError("invalid_state", 5, fmt.Errorf("invalid run state %q", *state))
+		}
+		filter.State = &value
+	}
+	return &preparedCommand{local: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runList(filter, app, out, diagnostic)
+	}}, nil
 }
 
-func runEvents(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("run events", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	after := flags.Int64("after-version", 0, "event version")
-	if err := flags.Parse(movePositionalToEnd(args)); err != nil || flags.NArg() != 1 || *after < 0 {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run events RUN_ID [--after-version N]"))
-	}
-	id, err := parseRunID(flags.Arg(0))
+func runList(filter domain.RunFilter, app *application.Application, stdout, stderr io.Writer) int {
+	rows, err := app.Runtime.ListRuns(context.Background(), filter)
 	if err != nil {
-		return writeStateError(stdout, stderr, 3, "invalid_id", err)
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].RunID < rows[j].RunID })
+	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: rows}, 0)
+
+}
+
+func prepareRunShow(args []string) (*preparedCommand, *commandError) {
+	id, err := parseRunFlags(commandFlags("run show"), args)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedCommand{runID: id, local: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runShow(id, app, out, diagnostic)
+	}}, nil
+}
+
+func runShow(id domain.RunID, app *application.Application, stdout, stderr io.Writer) int {
+	snapshot, err := app.Runtime.GetRun(context.Background(), id)
+	if err != nil {
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
+	}
+	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, 0)
+
+}
+
+func prepareRunResume(args []string) (*preparedCommand, *commandError) {
+	id, err := parseRunFlags(commandFlags("run resume"), args)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedCommand{runID: id, restore: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runResume(id, app, out, diagnostic)
+	}}, nil
+}
+
+func runResume(id domain.RunID, app *application.Application, stdout, stderr io.Writer) int {
+	snapshot, err := app.Runs.Resume(context.Background(), id)
+	if err != nil {
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
+	}
+	code := exitForSnapshot(snapshot.State)
+	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, code)
+
+}
+
+func prepareRunEvents(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("run events")
+	after := flags.Int64("after-version", 0, "event version")
+	id, err := parseRunFlags(flags, args)
+	if err != nil {
+		return nil, err
+	}
+	if *after < 0 {
+		return nil, usageError("--after-version must be nonnegative")
+	}
+	return &preparedCommand{runID: id, local: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runEvents(id, *after, app, out, diagnostic)
+	}}, nil
+}
+
+func runEvents(id domain.RunID, after int64, app *application.Application, stdout, stderr io.Writer) int {
 	// Events intentionally returns an empty slice for an existing run when no
 	// event is newer than after-version. Verify the run first so a well-formed
 	// but nonexistent RUN_ID remains distinguishable from that empty result.
 	if _, err := app.Runtime.GetRun(context.Background(), id); err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	events, err := app.Runtime.Events(context.Background(), id, *after)
+	events, err := app.Runtime.Events(context.Background(), id, after)
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
@@ -390,17 +354,23 @@ func runEvents(args []string, app *application.Application, stdout, stderr io.Wr
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: events}, 0)
 }
 
-func runCancel(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("run cancel", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+func prepareRunCancel(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("run cancel")
 	reason := flags.String("reason", "", "cancellation reason")
-	if err := flags.Parse(movePositionalToEnd(args)); err != nil || flags.NArg() != 1 || strings.TrimSpace(*reason) == "" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run cancel RUN_ID --reason REASON"))
-	}
-	id, err := parseRunID(flags.Arg(0))
+	id, err := parseRunFlags(flags, args)
 	if err != nil {
-		return writeStateError(stdout, stderr, 3, "invalid_id", err)
+		return nil, err
 	}
+	*reason = strings.TrimSpace(*reason)
+	if *reason == "" {
+		return nil, usageError("run cancel requires --reason REASON")
+	}
+	return &preparedCommand{runID: id, restore: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runCancel(id, *reason, app, out, diagnostic)
+	}}, nil
+}
+
+func runCancel(id domain.RunID, reason string, app *application.Application, stdout, stderr io.Writer) int {
 	snapshot, err := app.Runtime.GetRun(context.Background(), id)
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
@@ -409,7 +379,7 @@ func runCancel(args []string, app *application.Application, stdout, stderr io.Wr
 	if err != nil {
 		return writeStateError(stdout, stderr, 9, "id_generation", err)
 	}
-	request := domain.CancelRequest{ID: domain.ControlRequestID(controlID), RunID: id, ExpectedRunVersion: snapshot.Version, Reason: strings.TrimSpace(*reason), IdempotencyKey: controlID, At: time.Now().UTC()}
+	request := domain.CancelRequest{ID: domain.ControlRequestID(controlID), RunID: id, ExpectedRunVersion: snapshot.Version, Reason: reason, IdempotencyKey: controlID, At: time.Now().UTC()}
 	result, err := app.Runs.Cancel(context.Background(), request)
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
@@ -417,63 +387,87 @@ func runCancel(args []string, app *application.Application, stdout, stderr io.Wr
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(result.State), Data: result, RunVersion: result.Version}, 0)
 }
 
-func runReviewCommand(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("review show|revise|retry|waive|reject"))
+func prepareReviewShow(args []string) (*preparedCommand, *commandError) {
+	id, err := parseRunFlags(commandFlags("review show"), args)
+	if err != nil {
+		return nil, err
 	}
-	if args[0] == "show" {
-		if len(args) != 2 {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: review show RUN_ID"))
-		}
-		id, err := parseRunID(args[1])
-		if err != nil {
-			return writeStateError(stdout, stderr, 3, "invalid_id", err)
-		}
-		// PendingReview intentionally returns a nil decision when an existing
-		// run has no pending review. Verify the run first so a well-formed but
-		// nonexistent RUN_ID remains distinguishable from that empty result.
-		if _, err := app.Runtime.GetRun(context.Background(), id); err != nil {
-			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
-		}
-		review, err := app.Reviews.PendingReview(context.Background(), id)
-		if err != nil {
-			return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
-		}
-		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: review}, 0)
-	}
-	return runReviewMutation(args, app, stdout, stderr)
+	return &preparedCommand{runID: id, local: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runReviewShow(id, app, out, diagnostic)
+	}}, nil
 }
 
-func runReviewMutation(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	kind := args[0]
-	if kind != "revise" && kind != "retry" && kind != "waive" && kind != "reject" {
-		return writeStateError(stdout, stderr, 2, "unknown_command", fmt.Errorf("unknown review command %q", kind))
+func runReviewShow(id domain.RunID, app *application.Application, stdout, stderr io.Writer) int {
+	// PendingReview intentionally returns a nil decision when an existing
+	// run has no pending review. Verify the run first so a well-formed but
+	// nonexistent RUN_ID remains distinguishable from that empty result.
+	if _, err := app.Runtime.GetRun(context.Background(), id); err != nil {
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	flags := flag.NewFlagSet("review "+kind, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	reviewer := flags.String("reviewer", "", "reviewer")
-	reason := flags.String("reason", "", "reason")
-	step := flags.String("step", "", "step")
-	patchPath := flags.String("patch", "", "revision patch")
-	budgetPath := flags.String("budget-patch", "", "budget patch")
-	gate := flags.String("gate", "", "waivable gate digest")
-	evidence := flags.String("evidence", "", "evidence digest")
-	if err := flags.Parse(movePositionalToEnd(args[1:])); err != nil || flags.NArg() != 1 || strings.TrimSpace(*reviewer) == "" || strings.TrimSpace(*reason) == "" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("review mutation requires RUN_ID --reviewer NAME --reason REASON"))
-	}
-	if kind == "revise" && (*step == "" || *patchPath == "") {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("revise requires --step and --patch"))
-	}
-	if kind == "retry" && *budgetPath == "" && *evidence == "" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("retry requires --budget-patch or --evidence"))
-	}
-	if kind == "waive" && (*gate == "" || *evidence == "") {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("waive requires --gate and --evidence"))
-	}
-	id, err := parseRunID(flags.Arg(0))
+	review, err := app.Reviews.PendingReview(context.Background(), id)
 	if err != nil {
-		return writeStateError(stdout, stderr, 3, "invalid_id", err)
+		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
+	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: review}, 0)
+}
+
+type reviewOptions struct {
+	reviewer, reason, step, patchPath, budgetPath string
+	gate, evidence                                string
+}
+
+func prepareReviewMutation(kind string, args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("review " + kind)
+	var options reviewOptions
+	flags.StringVar(&options.reviewer, "reviewer", "", "reviewer")
+	flags.StringVar(&options.reason, "reason", "", "reason")
+	switch kind {
+	case "revise":
+		flags.StringVar(&options.step, "step", "", "step")
+		flags.StringVar(&options.patchPath, "patch", "", "revision patch")
+	case "retry":
+		flags.StringVar(&options.budgetPath, "budget-patch", "", "budget patch")
+		flags.StringVar(&options.evidence, "evidence", "", "evidence digest")
+	case "waive":
+		flags.StringVar(&options.gate, "gate", "", "waivable gate digest")
+		flags.StringVar(&options.evidence, "evidence", "", "evidence digest")
+	}
+	id, err := parseRunFlags(flags, args)
+	if err != nil {
+		return nil, err
+	}
+	options.reason = strings.TrimSpace(options.reason)
+	options.reviewer = strings.TrimSpace(options.reviewer)
+	if options.reason == "" || options.reviewer == "" {
+		return nil, usageError("review mutation requires --reviewer NAME --reason REASON")
+	}
+	switch kind {
+	case "revise":
+		if options.step == "" || options.patchPath == "" {
+			return nil, usageError("revise requires --step and --patch")
+		}
+	case "retry":
+		if options.budgetPath == "" && options.evidence == "" {
+			return nil, usageError("retry requires --budget-patch or --evidence")
+		}
+	case "waive":
+		if options.gate == "" || options.evidence == "" {
+			return nil, usageError("waive requires --gate and --evidence")
+		}
+	}
+	for _, raw := range []string{options.gate, options.evidence} {
+		if raw != "" {
+			if _, err := domain.ParseDigest(raw); err != nil {
+				return nil, argumentError("digest_invalid", 2, err)
+			}
+		}
+	}
+	return &preparedCommand{runID: id, restore: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runReviewMutation(id, kind, options, app, out, diagnostic)
+	}}, nil
+}
+
+func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app *application.Application, stdout, stderr io.Writer) int {
 	guard, err := app.Locks.TryAcquireRun(id, runlock.Exclusive)
 	if errors.Is(err, runlock.ErrBusy) {
 		return writeStateError(stdout, stderr, 4, "lock_busy", err)
@@ -498,29 +492,20 @@ func runReviewMutation(args []string, app *application.Application, stdout, stde
 	if err != nil {
 		return writeStateError(stdout, stderr, 9, "id_generation", err)
 	}
-	request := domain.CreateReviewRequest{ID: domain.ReviewDecisionID(decisionID), RunID: id, ExpectedRunVersion: snapshot.Version, Kind: kindValue, WorkflowRevision: snapshot.WorkflowRevision, StageName: snapshot.CurrentStage, StageInputDigest: stageInput, EvidenceDigest: stageInput, PolicyDigest: snapshot.ConfigDigest, Reviewer: strings.TrimSpace(*reviewer), Reason: strings.TrimSpace(*reason), IdempotencyKey: decisionID, At: time.Now().UTC()}
-	if *step != "" {
-		if kind != "revise" {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("--step is valid only for revise"))
-		}
-		request.StageName = domain.StageName(*step)
+	request := domain.CreateReviewRequest{ID: domain.ReviewDecisionID(decisionID), RunID: id, ExpectedRunVersion: snapshot.Version, Kind: kindValue, WorkflowRevision: snapshot.WorkflowRevision, StageName: snapshot.CurrentStage, StageInputDigest: stageInput, EvidenceDigest: stageInput, PolicyDigest: snapshot.ConfigDigest, Reviewer: strings.TrimSpace(options.reviewer), Reason: strings.TrimSpace(options.reason), IdempotencyKey: decisionID, At: time.Now().UTC()}
+	if options.step != "" {
+		request.StageName = domain.StageName(options.step)
 	}
-	if *patchPath != "" {
-		if kind != "revise" {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("--patch is valid only for revise"))
-		}
-		data, readErr := os.ReadFile(*patchPath)
+	if options.patchPath != "" {
+		data, readErr := os.ReadFile(options.patchPath)
 		if readErr != nil {
 			return writeStateError(stdout, stderr, 2, "patch_invalid", readErr)
 		}
 		digest := domain.SumBytes(data)
 		request.RequestedEditsDigest = &digest
 	}
-	if *budgetPath != "" {
-		if kind != "retry" {
-			return writeStateError(stdout, stderr, 2, "usage", errors.New("--budget-patch is valid only for retry"))
-		}
-		data, readErr := os.ReadFile(*budgetPath)
+	if options.budgetPath != "" {
+		data, readErr := os.ReadFile(options.budgetPath)
 		if readErr != nil {
 			return writeStateError(stdout, stderr, 2, "budget_invalid", readErr)
 		}
@@ -528,15 +513,15 @@ func runReviewMutation(args []string, app *application.Application, stdout, stde
 			return writeStateError(stdout, stderr, 2, "budget_invalid", err)
 		}
 	}
-	if *gate != "" {
-		digest, parseErr := domain.ParseDigest(*gate)
+	if options.gate != "" {
+		digest, parseErr := domain.ParseDigest(options.gate)
 		if parseErr != nil {
 			return writeStateError(stdout, stderr, 2, "digest_invalid", parseErr)
 		}
 		request.WaiverScopeDigest = &digest
 	}
-	if *evidence != "" {
-		digest, parseErr := domain.ParseDigest(*evidence)
+	if options.evidence != "" {
+		digest, parseErr := domain.ParseDigest(options.evidence)
 		if parseErr != nil {
 			return writeStateError(stdout, stderr, 2, "digest_invalid", parseErr)
 		}
@@ -573,27 +558,6 @@ func parseRunID(raw string) (domain.RunID, error) {
 		return "", err
 	}
 	return id, nil
-}
-
-// movePositionalToEnd accepts the documented ergonomic form (`run cancel
-// RUN_ID --reason ...`) while still using Go's strict FlagSet parser. Unknown
-// flags are not swallowed: FlagSet reports them after this mechanical reorder.
-func movePositionalToEnd(args []string) []string {
-	flags := make([]string, 0, len(args))
-	positional := make([]string, 0, 1)
-	for index := 0; index < len(args); index++ {
-		value := args[index]
-		if strings.HasPrefix(value, "-") {
-			flags = append(flags, value)
-			if index+1 < len(args) && !strings.HasPrefix(args[index+1], "-") {
-				flags = append(flags, args[index+1])
-				index++
-			}
-			continue
-		}
-		positional = append(positional, value)
-	}
-	return append(flags, positional...)
 }
 
 func loadRequest(path string) (domain.RunRequest, error) {

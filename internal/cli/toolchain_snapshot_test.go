@@ -88,7 +88,7 @@ func TestRestoreToolchainSnapshotPreservesNewAndLegacyBindings(t *testing.T) {
 			}
 			app := &application.Application{Runtime: &snapshotRuntime{run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(raw)}, raw: raw}}
 			deps := Dependencies{BootstrapLocal: func(context.Context, config.Config) (*application.Application, error) { return app, nil }}
-			restored, err := restoreToolchainSnapshot(context.Background(), cfg, []string{"run", "resume", string(runID)}, deps)
+			restored, err := restoreToolchainSnapshot(context.Background(), cfg, runID, deps)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,9 +113,13 @@ func TestRestoreToolchainSnapshotPreservesNewAndLegacyBindings(t *testing.T) {
 	deps := Dependencies{BootstrapLocal: func(context.Context, config.Config) (*application.Application, error) { return app, nil }}
 	for _, args := range [][]string{
 		{"run", "cancel", string(runID), "--reason", "run_00000000000000000000000000000002"},
-		{"review", "retry", string(runID), "--reason", "run_00000000000000000000000000000002", "--evidence", string(domain.SumBytes([]byte("evidence")))},
+		{"review", "retry", string(runID), "--reviewer", "test", "--reason", "run_00000000000000000000000000000002", "--evidence", string(domain.SumBytes([]byte("evidence")))},
 	} {
-		if _, err := restoreToolchainSnapshot(context.Background(), cfg, args, deps); err != nil {
+		command, parseErr := parseStatefulCommand(args)
+		if parseErr != nil {
+			t.Fatal(parseErr.err)
+		}
+		if _, err := restoreToolchainSnapshot(context.Background(), cfg, command.runID, deps); err != nil {
 			t.Fatalf("restore args %v: %v", args, err)
 		}
 	}
@@ -129,14 +133,14 @@ func TestRestoreToolchainSnapshotPreservesNewAndLegacyBindings(t *testing.T) {
 	}
 	corruptApp := &application.Application{Runtime: &snapshotRuntime{run: domain.RunSnapshot{RunID: runID, ConfigDigest: domain.SumBytes(corruptRaw)}, raw: corruptRaw}}
 	corruptDeps := Dependencies{BootstrapLocal: func(context.Context, config.Config) (*application.Application, error) { return corruptApp, nil }}
-	if _, err := restoreToolchainSnapshot(context.Background(), cfg, []string{"run", "resume", string(runID)}, corruptDeps); err == nil {
+	if _, err := restoreToolchainSnapshot(context.Background(), cfg, runID, corruptDeps); err == nil {
 		t.Fatal("accepted corrupt snapshot before execution bootstrap")
 	}
 	drift := cfg
 	driftSandbox := *drift.Sandbox
 	driftSandbox.EngineEndpoint = "unix:///different/docker.sock"
 	drift.Sandbox = &driftSandbox
-	if _, err := restoreToolchainSnapshot(context.Background(), drift, []string{"run", "resume", string(runID)}, deps); err == nil {
+	if _, err := restoreToolchainSnapshot(context.Background(), drift, runID, deps); err == nil {
 		t.Fatal("accepted current configuration drift")
 	}
 }

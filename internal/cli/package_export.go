@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,21 +12,23 @@ import (
 	"cpgen/internal/packageprobe"
 )
 
-func runPackageExport(args []string, app *application.Application, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run export RUN_ID --output PATH"))
-	}
-	id, err := parseRunID(args[0])
+func preparePackageExport(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("run export")
+	output := flags.String("output", "", "destination ZIP")
+	id, err := parseRunFlags(flags, args)
 	if err != nil {
-		return writeStateError(stdout, stderr, 3, "invalid_id", err)
+		return nil, err
 	}
-	flags := flag.NewFlagSet("run export", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	output := flags.String("output", "", "destination ZIP (must not exist)")
-	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *output == "" {
-		return writeStateError(stdout, stderr, 2, "usage", errors.New("usage: run export RUN_ID --output PATH"))
+	if *output == "" {
+		return nil, usageError("run export requires --output PATH")
 	}
-	destination, err := filepath.Abs(*output)
+	return &preparedCommand{runID: id, local: true, execute: func(app *application.Application, out, diagnostic io.Writer) int {
+		return runPackageExport(id, *output, app, out, diagnostic)
+	}}, nil
+}
+
+func runPackageExport(id domain.RunID, output string, app *application.Application, stdout, stderr io.Writer) int {
+	destination, err := filepath.Abs(output)
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "output_path", err)
 	}
