@@ -260,10 +260,9 @@ Known limitations, stated plainly:
 - Acceptance evidence for the full loop is for ordinary C++ problems; Go end-to-end
   acceptance and external service availability remain follow-up work.
 
-[docs/development-log.md](docs/development-log.md) and
-[docs/internal/TODO.md](docs/internal/TODO.md) track the detailed state;
-[docs/traceability.md](docs/traceability.md) maps requirements to design and
-evidence.
+[docs/development-log.md](docs/development-log.md) records the development
+sequence, and [docs/traceability.md](docs/traceability.md) maps every requirement
+to its design and supporting evidence.
 
 ## Repository layout
 
