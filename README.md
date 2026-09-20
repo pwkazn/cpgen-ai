@@ -59,9 +59,12 @@ go build ./cmd/...
 ./cpgen --config config/mvp.example.yaml config effective --redact
 
 # 2. Confirm the host, Docker engine and toolchain are usable.
+#    The API version is pinned; image IDs come from config/toolchains/docker-v1.lock.json.
 ./cpgen doctor --json --engine-endpoint unix:///var/run/docker.sock \
-  --api-version 1.43 --builder-image sha256:... \
-  --runtime-image sha256:... --transfer-image sha256:... \
+  --api-version 1.55 \
+  --builder-image  sha256:fe432330efb137a6d713a05de0c5310a6736a23f1882612456cb40283ca1f107 \
+  --runtime-image  sha256:d4cbcfb1c9cf9de450b2f5296a9fce8631992608c878ccae0e69edffaa17f2b5 \
+  --transfer-image sha256:875576235bfbfa8ecd995175ee078beca2afae16ab99cd8dca9bfce726904b6a \
   --execution-protocol docker-direct-v2
 
 # 3. Start a run (foreground; one process per run).
@@ -69,7 +72,7 @@ go build ./cmd/...
 
 # 4. Inspect, cancel, or resume it.
 ./cpgen --config config/mvp.example.yaml run list
-./cpgen --config config/mvp.example.yaml run show   RUN_ID --json
+./cpgen --config config/mvp.example.yaml run show   RUN_ID
 ./cpgen --config config/mvp.example.yaml run events RUN_ID
 ./cpgen --config config/mvp.example.yaml run resume RUN_ID
 ./cpgen --config config/mvp.example.yaml run cancel RUN_ID
@@ -143,8 +146,9 @@ revalidated by an independent CLI invocation.
 
 ### Inspecting a run in progress
 
-`run show --json` emits a stable, versioned projection that any frontend or
-dashboard can consume — the CLI is not the only possible client:
+Every read command emits a stable, versioned JSON envelope by default, so a
+frontend or dashboard can consume it directly — the CLI is not the only possible
+client. `run show RUN_ID` prints the current projection:
 
 ~~~json
 {"schema_version":"cpgen.cli/v1","status":"RUNNING","data":{
@@ -156,6 +160,9 @@ dashboard can consume — the CLI is not the only possible client:
   "config_digest":"sha256:38f0cc4eca50edf3472bb9593401d550f479576b186003d368e1360f0b9576cd",
   "active_elapsed":68156221200}, "run_version":86}
 ~~~
+
+`run events RUN_ID` streams the append-only audit trail, and
+`review show RUN_ID` reports pending human decisions.
 
 ## Architecture
 
