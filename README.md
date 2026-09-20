@@ -54,7 +54,8 @@ Requires Go 1.25.0 or later and a local Docker Engine.
 go build ./cmd/...
 
 # 1. Validate your configuration without touching the network.
-./cpgen --config config/mvp.example.yaml config validate --redact
+#    `validate` takes no flags; `effective` requires --redact.
+./cpgen --config config/mvp.example.yaml config validate
 ./cpgen --config config/mvp.example.yaml config effective --redact
 
 # 2. Confirm the host, Docker engine and toolchain are usable.
@@ -84,7 +85,7 @@ Errors are typed and machine-readable, and configuration problems are caught bef
 any network or Docker work begins:
 
 ~~~console
-$ cpgen --config config/mvp.example.yaml config validate --redact
+$ cpgen --config config/mvp.example.yaml config validate
 {"schema_version":"cpgen.cli/v1","status":"ERROR","error":{"code":"config_invalid",
  "message":"sandbox.toolchain_lock_path: must be absolute",
  "field":"sandbox.toolchain_lock_path"}}
