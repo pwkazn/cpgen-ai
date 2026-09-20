@@ -778,7 +778,8 @@ Usage:
   cpgen help
   cpgen version [--json]
   cpgen doctor --json --engine-endpoint ENDPOINT --api-version VERSION --builder-image SHA256 --runtime-image SHA256 --transfer-image SHA256 --execution-protocol docker-direct-v2
-  cpgen --config PATH config validate|effective --redact
+  cpgen --config PATH config validate
+  cpgen --config PATH config effective --redact
   cpgen --config PATH generate --request PATH
   cpgen --config PATH run list|show|events|resume|cancel
   cpgen --config PATH run export RUN_ID --output PATH
