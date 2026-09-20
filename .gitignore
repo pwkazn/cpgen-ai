@@ -1,3 +1,50 @@
+# Local state and tooling directories.
+# Every dot-prefixed directory is machine-local scratch (agent workspaces, temp
+# dirs, checkouts). CI configuration is the one deliberate exception.
 .*/
 !.github/
 !.github/workflows/
+
+# Compiled binaries.
+# `go build ./cmd/...` discards its output, but building a single command
+# (e.g. `go build ./cmd/cpgen`) writes a ~23 MB binary into the working
+# directory. These must never be committed.
+/cpgen
+/cpgen-image-lock
+/cpgen-transfer
+*.exe
+*.test
+*.dll
+*.so
+*.dylib
+
+# Local run state and exported packages.
+# `run export --output` defaults to the working directory, so a ZIP here is a
+# build product, not a source file.
+/cpgen-state/
+/state/
+*.zip
+
+# Coverage, profiling and fuzzing output.
+*.out
+*.prof
+coverage.*
+*.coverprofile
+
+# Local credentials. Provider keys belong in the environment
+# (`api_key_env` in the configuration), never in the repository.
+.test_api_key.txt
+.env
+.env.*
+*.key
+*.pem
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
