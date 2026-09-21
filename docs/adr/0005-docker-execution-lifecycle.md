@@ -1,41 +1,41 @@
-# ADR-0005: Docker Execution Lifecycle and Cross-stop Artifact Transfer
+# ADR-0005：Docker 执行生命周期与跨停止制品传输
 
-Status: Accepted (amended by ADR-0006)
+Status: Accepted（由 ADR-0006 修订）
 
 Date: 2026-08-30
 
-## Context
+## 背景
 
-The CLI process may die while Docker continues running. Output may need to survive target stop without granting the target access to artifact storage. Cleanup therefore needs a detached safety component and exact persisted resource identities.
+CLI 进程可能在 Docker 继续运行时死亡。输出可能需要在目标停止后仍然留存，同时不授予目标访问制品存储的权限。因此清理需要一个分离式安全组件与精确持久化的资源身份。
 
-## Decision
+## 决策
 
-- The protocol remains docker-direct-v2.
-- One logical Sandbox operation groups physical CallTrace records. Every real Docker create is budget-reserved and authorized before host I/O.
-- Before the first create, the Runner persists SandboxExecution, the complete non-expanding resource plan, engine identity digest, deterministic names and labels, call roles, deadlines, and watchdog control digest.
-- The watchdog receives the sealed plan, subscribes to engine events, performs the resource-kind baseline scan, and acknowledges each planned create before it is issued.
-- After create returns, the Runner persists the engine resource identity before start. Target start is forbidden until the matching resource acknowledgement is durable.
-- The detached watchdog stops or kills planned targets on deadline, owner-channel EOF, or parent death. It remains until all planned calls are terminal, final scans show no running targets, and cleanup evidence is settled.
-- On a later CLI start or resume, a narrow sandbox reconciler inspects and cleans only exact identities recorded for that run. It cannot schedule stages, continue a prior export, publish artifacts, or mutate unrelated runs.
-- The foreground CLI process lock controls authorization of new work. Cleanup uses persisted SandboxExecution and resource lifecycle versions and is safe to repeat.
-- Target output is copied after target stop through a dedicated trusted transfer role, verified, and then promoted through the artifact writer. Watchdog code never creates Judge verdicts or publishes package artifacts.
-- A run waits for proof that every untrusted target has stopped before committing CANCELLED, BLOCKED, READY, or another state that promises no target is active.
+- 协议保持为 docker-direct-v2。
+- 一个逻辑 沙箱 操作对物理 CallTrace 记录进行分组。每次真实的 Docker create 都在宿主 I/O 之前完成预算预留与授权。
+- 在首次 create 之前，Runner 持久化 SandboxExecution、完整的非扩张资源计划、引擎身份摘要、确定性名称与标签、调用角色、截止时间以及看门狗控制摘要。
+- 看门狗接收封存的计划，订阅引擎事件，执行资源种类基线扫描，并在每个计划的 create 发出之前予以确认。
+- create 返回之后，Runner 在 start 之前持久化引擎资源身份。在匹配的资源确认持久化之前，禁止启动目标。
+- 分离式看门狗在截止时间、所有者通道 EOF 或父进程死亡时停止或杀死计划目标。它一直保留到所有计划调用都进入终态、最终扫描显示没有运行中的目标、且清理证据已结算。
+- 在之后的 CLI 启动或 resume 时，窄范围的沙箱对账器只检查并清理为该 run 记录的精确身份。它不能调度阶段、继续先前的导出、发布制品或改动无关的 run。
+- 前台 CLI 进程锁控制新工作的授权。清理使用持久化的 SandboxExecution 与资源生命周期版本，并且可以安全重复。
+- 目标输出在目标停止之后通过专用的可信传输角色复制，经校验后再通过制品写入器提升。看门狗代码从不创建评测判决，也不发布题包制品。
+- run 在提交 CANCELLED、BLOCKED、READY 或其他承诺没有目标处于活动状态的状态之前，会等待每个不受信任目标都已停止的证明。
 
-## Consequences
+## 后果
 
-- CLI death cannot leave an unbounded target.
-- Late-created resources remain discoverable through deterministic identities.
-- Recovery is limited to exact Docker resources and repeatable evidence settlement.
-- Export and artifact publication never continue implicitly after process death.
-- The protocol retains Slice 0 tests for watchdog EOF, deadlines, kill escalation, deterministic labels, and evidence provenance.
+- CLI 死亡不会留下无界的目标。
+- 迟到创建的资源仍可通过确定性身份被发现。
+- 恢复仅限于精确的 Docker 资源与可重复的证据结算。
+- 导出与制品发布在进程死亡之后绝不隐式继续。
+- 协议保留 Slice 0 测试，覆盖看门狗 EOF、截止时间、杀死升级、确定性标签与证据来源。
 
-## Superseded design
+## 被取代的设计
 
 <!-- Superseded design: begin -->
-The previous lifecycle described owner lease epochs, cleanup takeover, RUNNING/QUIESCING, and a startup janitor. ADR-0006 replaces those generic ownership and workflow concepts with the per-run process lock plus a narrow exact-resource reconciler.
+先前的生命周期描述了所有者租约纪元、清理接管、RUNNING/静默中以及启动清理器。ADR-0006 用每 run 进程锁加上窄范围的精确资源对账器取代了那些通用所有权与工作流概念。
 <!-- Superseded design: end -->
 
-## References
+## 参考
 
 - ADR-0004
 - docs/design/sandbox.md

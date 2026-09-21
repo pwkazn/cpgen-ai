@@ -1,16 +1,16 @@
-# Internal Package and Export Design
+# 内部题包与导出设计
 
-Status: Current under ADR-0006
+状态：ADR-0006 下为当前设计
 
-Implementation note (2026-09-09): `cpgen.package/v2` now provides the generation package model below through the existing `packageprobe` builder/reader. Its layout uses `statement/statement.md`, `solution/{reference,brute}.{cpp,go}`, `judge/{generator,validator}.{cpp,go}`, the fixed `judge/checker.cpp`, `data/tests.json`, paired `tests/*.in` / `tests/*.ans`, and package-safe reports. V1 retains its historical probe layout. The dedicated M26 package ledger, current-evidence assembly, canonical ZIP export and atomic READY transaction are implemented and pass real Docker plus independent CLI crash/export/revalidation acceptance. Format validation is supplemented by same-run committed Quality proof. See [package acceptance evidence](../evidence/mvp-package-commit-foundation.md).
+实现说明（2026-09-09）：`cpgen.package/v2` 现通过既有的 `packageprobe` 构建器/读取器提供下述生成题包模型。其布局使用 `statement/statement.md`、`solution/{reference,brute}.{cpp,go}`、`judge/{generator,validator}.{cpp,go}`、固定的 `judge/checker.cpp`、`data/tests.json`、成对的 `tests/*.in` / `tests/*.ans`，以及题包安全报告。V1 保留其历史探测布局。专用 M26 题包账本、当前证据组装、规范 ZIP 导出和原子 READY 事务均已实现，并通过真实 Docker 以及独立 CLI 崩溃/导出/再验证验收。格式校验由同一 run 内已提交的 Quality 证明补充。见 [题包验收证据](../evidence/mvp-package-commit-foundation.md)。
 
-## 1. Principles
+## 1. 原则
 
-A package is a deterministic immutable tree assembled from verified run-scoped artifact occurrences. Stage code cannot copy arbitrary workspace files. All paths, roles, media types, digests, provenance, and gate results are declared and audited.
+题包是由已验证的 run 作用域制品实例确定性组装而成的不可变树。阶段代码不能复制任意工作区文件。所有路径、角色、媒体类型、digest、来源和门禁结果都会被声明和审计。
 
-READY means the same run atomically references a VERIFIED package occurrence and final quality report.
+READY 意味着同一 run 原子地引用一个 VERIFIED 题包实例和最终质量报告。
 
-## 2. Internal directory
+## 2. 内部目录
 
 ~~~text
 problem/
@@ -33,105 +33,105 @@ problem/
     artifacts.json
 ~~~
 
-Optional entries are controlled by the manifest schema. Undeclared files, symlinks, device files, absolute paths, traversal components, duplicate normalized paths, and case-fold collisions are rejected.
+可选条目由 manifest schema 控制。未声明的文件、符号链接、设备文件、绝对路径、遍历分量、重复规范化路径和大小写折叠冲突都会被拒绝。
 
 ## 3. Manifest
 
-The canonical manifest records:
+规范 manifest 记录：
 
-- schema version and package identity;
-- title, limits, checker type, and supported languages;
-- every file path, role, media type, size, and SHA-256 digest;
-- statement, solution, data, checker, report, and provenance references;
-- workflow, request, configuration, and policy digests;
-- toolchain and image identities;
-- required quality gates and their evidence digests.
+- schema 版本与题包身份；
+- 标题、限制、checker 类型和支持的语言；
+- 每个文件路径、角色、媒体类型、大小和 SHA-256 digest；
+- 题面、题解、数据、checker、报告和来源引用；
+- workflow、请求、配置和策略 digest；
+- 工具链和镜像身份；
+- 必需的质量门禁及其证据 digest。
 
-Canonical JSON uses stable field ordering, UTF-8 normalization, exact integers, and no insignificant variation.
+规范 JSON 使用稳定字段顺序、UTF-8 规范化、精确整数，且不含任何无实质意义的差异。
 
 ## 4. MeteredPackageWriter
 
-The package stage receives only a MeteredPackageWriter. It can:
+题包阶段只接收一个 MeteredPackageWriter。它可以：
 
-- declare a package role and normalized relative path;
-- open verified source occurrences authorized for the same run and revision;
-- stream into a private staging tree with byte accounting;
-- finalize the manifest;
-- request structural and semantic verification;
-- publish atomically after all gates pass.
+- 声明题包角色和规范化相对路径；
+- 打开经授权、属于同一 run 和 revision 的已验证源实例；
+- 在字节记账下流式写入私有暂存树；
+- 完成 manifest；
+- 请求结构验证和语义验证；
+- 在所有门禁通过后原子发布。
 
-It cannot read arbitrary filesystem paths or publish directly to the user-selected destination.
+它不能读取任意文件系统路径，也不能直接发布到用户选定的目标位置。
 
-## 5. Build protocol
+## 5. 构建协议
 
-1. The stage loads only verified current occurrences.
-2. A short transaction creates package identity, occurrence in STAGING, declarations, and artifact-byte reservations.
-3. Outside database transactions, the writer builds a private staging tree, copies through verified reads, hashes every output, and fsyncs.
-4. PackageStructuralGate parses the tree independently.
-5. Semantic gates validate statements, solutions, tests, checker, reports, and provenance.
-6. A verification receipt and final quality report are created.
-7. In one short transaction, reservations settle, the package occurrence becomes VERIFIED, and the run points to that occurrence and becomes READY.
-8. Publication atomically renames or copies through a verified destination protocol and records the result.
+1. 阶段只加载已验证的当前实例。
+2. 一个短事务创建题包身份、STAGING 中的实例、声明和制品字节预留。
+3. 在数据库事务之外，写入器构建私有暂存树，通过已验证读取进行复制，对每个输出计算哈希并 fsync。
+4. PackageStructuralGate 独立解析该树。
+5. 语义门禁校验题面、题解、测试、checker、报告和来源。
+6. 创建验证回执和最终质量报告。
+7. 在一个短事务中，预留结算，题包实例变为 VERIFIED，run 指向该实例并变为 READY。
+8. 发布通过已验证的目标协议原子重命名或复制，并记录结果。
 
-A crash at any point is replay-safe. Unverified staging cannot make a run READY.
+任意时刻崩溃都可安全重放。未验证的暂存内容不能使 run 变为 READY。
 
-## 6. Structural gate
+## 6. 结构门禁
 
-PackageStructuralGate verifies:
+PackageStructuralGate 验证：
 
-- normalized paths and exact manifest membership;
-- no links, special files, or unexpected directories;
-- digest and size of every file;
-- manifest schema and cross references;
-- required roles and unique identities;
-- package-safe provenance only;
-- configured total byte and file-count caps.
+- 规范化路径与精确的 manifest 成员关系；
+- 无链接、特殊文件或意外目录；
+- 每个文件的 digest 和大小；
+- manifest schema 与交叉引用；
+- 必需角色和唯一身份；
+- 仅题包安全的来源；
+- 配置的总字节数和文件数上限。
 
-The gate treats both local staging and imported packages as untrusted.
+该门禁将本地暂存和导入的题包都视为不可信。
 
-## 7. Semantic gates
+## 7. 语义门禁
 
-The package gate aggregates:
+题包门禁汇总：
 
-- statement completeness and constraint consistency;
-- reference solution compile and execution evidence;
-- test data validity and expected-output evidence;
-- checker or SPJ contract evidence;
-- Judge and resource-limit evidence;
-- differential and quality reports;
-- similarity decision or bound waiver;
-- toolchain, image, workflow, policy, and revision consistency.
+- 题面完整性和约束一致性；
+- 参考题解的编译与执行证据；
+- 测试数据有效性和期望输出证据；
+- checker 或 SPJ 契约证据；
+- Judge 和资源限制证据；
+- 差分与质量报告；
+- 查重决策或界限豁免；
+- 工具链、镜像、workflow、策略和 revision 一致性。
 
-A gate cannot be skipped by a stage result. A waiver is accepted only for explicitly waivable rules and exact evidence bindings.
+门禁不能因某个阶段结果而被跳过。只有对显式可豁免的规则和精确证据绑定，豁免才会被接受。
 
-## 8. Verification receipt
+## 8. 验证回执
 
-The receipt contains package ID, manifest and tree digests, gate versions, toolchain identity, verification time, all gate result digests, and final quality-report identity. It is immutable and package-safe.
+回执包含题包 ID、manifest 与树 digest、门禁版本、工具链身份、验证时间、所有门禁结果 digest 以及最终质量报告身份。它是不可变的且题包安全。
 
-Imported packages create an IMPORTED occurrence first. They become VERIFIED only after the same complete gate sequence; import never trusts an included receipt without recomputation.
+导入的题包先创建 IMPORTED 实例。只有在经过同一套完整门禁序列后它们才变为 VERIFIED；导入绝不信任随包携带的回执而不重新计算。
 
-## 9. READY transaction
+## 9. READY 事务
 
-The database enforces:
+数据库强制：
 
-- the package occurrence belongs to the run;
-- its state is VERIFIED;
-- receipt and final quality report are non-null and consistent;
-- relation and revision match;
-- run state and package pointers update together.
+- 题包实例属于该 run；
+- 其状态为 VERIFIED；
+- 回执和最终质量报告非空且一致；
+- relation 与 revision 匹配；
+- run 状态与题包指针一起更新。
 
-No process-local check can substitute for these constraints.
+任何进程本地检查都不能替代这些约束。
 
-## 10. Exporters
+## 10. 导出器
 
-Exporters consume only a VERIFIED internal package through verified reads. A Polygon exporter maps the canonical model to platform files, records deterministic mapping and loss reports, validates the exported tree, and publishes atomically.
+导出器只通过已验证读取消费 VERIFIED 的内部题包。Polygon 导出器将规范模型映射为平台文件，记录确定性映射和损失报告，校验导出的树并原子发布。
 
-Exporter retries are bounded inside the Package stage. An unknown remote upload boundary reconciles the original provider identity or pauses conservatively; it never creates a second publication under a new identity.
+导出器重试在 Package 阶段内有界。未知的远程上传边界会核对原始提供方身份，或保守暂停；它绝不会以新身份创建第二次发布。
 
-## 11. Repair and review
+## 11. 修复与复核
 
-Package validation errors route to the earliest owning compiled stage. Mechanical staging errors may retry locally. Content or policy failures enter NEEDS_REVIEW or revise the owning stage according to typed rules and remaining budgets.
+题包校验错误路由到最早的归属已编译阶段。机械性暂存错误可在本地重试。内容或策略失败按类型化规则和剩余预算进入 NEEDS_REVIEW 或修订归属阶段。
 
-## 12. Tests
+## 12. 测试
 
-Tests cover canonical manifest encoding, path attacks, case collisions, undeclared files, symlinks, digest corruption, deterministic builds, crash at every staging and publication boundary, gate completeness, waiver binding, imported package verification, same-run READY constraints, exporter loss reports, and bounded retry.
+测试覆盖规范 manifest 编码、路径攻击、大小写冲突、未声明文件、符号链接、digest 损坏、确定性构建、每个暂存和发布边界的崩溃、门禁完整性、豁免绑定、导入题包验证、同 run READY 约束、导出器损失报告以及有界重试。

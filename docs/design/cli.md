@@ -1,14 +1,14 @@
-# CLI Contract
+# CLI 契约
 
-Status: Current under ADR-0006
+状态：ADR-0006 下的现行设计
 
-## 1. Principles
+## 1. 原则
 
-The CLI is the only Phase 1 interface. Commands open local resources, perform bounded foreground work, print stable output, and exit. There is no background workflow process or remote control endpoint.
+CLI 是 Phase 1 唯一的接口。命令打开本地资源，执行有界的前台工作，打印稳定输出，然后退出。不存在后台工作流进程或远程控制端点。
 
-Human output goes to stderr for progress and stdout for results. JSON mode emits one versioned envelope and no decorative text. Secrets and raw private prompt or source content are never logged.
+人类可读输出中，进度写入 stderr，结果写入 stdout。JSON 模式输出一个带版本的信封，不含任何装饰性文本。密钥以及原始私有 prompt 或源码内容永不记入日志。
 
-## 2. Global options
+## 2. 全局选项
 
 ~~~text
 --config PATH
@@ -18,18 +18,18 @@ Human output goes to stderr for progress and stdout for results. JSON mode emits
 --log-level LEVEL
 ~~~
 
-Paths are normalized before use. The runtime directory, database, locks, artifacts, staging, and watchdog controls must remain private.
+路径在使用前会先规范化。运行时目录、数据库、锁、制品、staging 与看门狗控制必须保持私有。
 
-## 3. Configuration and diagnostics
+## 3. 配置与诊断
 
 ~~~text
 cpgen config check [--request request.yaml]
 cpgen doctor [--docker] [--providers]
 ~~~
 
-config check parses, merges, canonicalizes, redacts, and validates configuration without changing run state. doctor reports typed capability results and does not persist workflow progress.
+config check 解析、合并、规范化、脱敏并校验配置，且不改变 run 状态。doctor 报告类型化的能力结果，不持久化工作流进度。
 
-## 4. Generate and run commands
+## 4. generate 与 run 命令
 
 ~~~text
 cpgen generate --request request.yaml
@@ -40,19 +40,19 @@ cpgen run resume <run-id>
 cpgen run cancel <run-id> --reason "..."
 ~~~
 
-generate creates a run and executes the compiled pipeline until READY, BLOCKED, NEEDS_REVIEW, FAILED, or CANCELLED.
+generate 创建 run 并执行编译后的流水线，直到 READY、BLOCKED、NEEDS_REVIEW、FAILED 或 CANCELLED。
 
-run list, show, and events are read-only and do not acquire the run execution lock. events are ordered by run version and support stable pagination.
+run list、show 与 events 是只读的，不获取 run 执行锁。events 按 run 版本排序，并支持稳定分页。
 
-run resume is the only ordinary restart command. It acquires the deterministic per-run process lock, reconciles exact unfinished sandbox resources, and resumes the current compiled stage. If the prior process exited during an attempt, resume records or replays that attempt from persisted domain evidence before creating new work.
+run resume 是唯一常规的重启命令。它获取确定性的每 run 进程锁，核对精确的未完成沙箱资源，并恢复当前编译后的阶段。如果先前进程在某个尝试期间退出，resume 会先依据已持久化的领域证据记录或重放该尝试，然后才创建新工作。
 
-run cancel inserts one idempotent cancellation request. When an executor is active, it observes the request and stops. When no executor owns the run lock, cancel may acquire it and reconcile exact sandbox resources before committing CANCELLED.
+run cancel 插入一个幂等的取消请求。当执行器活跃时，它会观察到该请求并停止。当没有执行器持有 run 锁时，cancel 可以获取该锁，并在提交 CANCELLED 之前核对精确的沙箱资源。
 
-### Process-lock conflict
+### 进程锁冲突
 
-If generate or resume finds the same run already locked, it returns exit code 4 and a typed StateConflict containing RunID and operation. It does not wait indefinitely, alter state, or start a stage. Different runs remain independent.
+如果 generate 或 resume 发现同一 run 已被锁定，它会返回退出码 4 以及包含 RunID 与 operation 的类型化 StateConflict。它不会无限等待、不会改变状态，也不会启动阶段。不同的 run 相互独立。
 
-## 5. Review commands
+## 5. 复核命令
 
 ~~~text
 cpgen review show <run-id>
@@ -62,11 +62,11 @@ cpgen review waive <run-id> --policy RULE --reason TEXT
 cpgen review reject <run-id> --reason TEXT
 ~~~
 
-A mutating review command is valid only for NEEDS_REVIEW and creates one immutable PENDING ReviewDecision bound to expected run version, workflow revision, current stage input, evidence, and policy. It does not directly continue the run. The user follows with run resume.
+会改变状态的复核命令仅对 NEEDS_REVIEW 有效，它创建一个不可变的 PENDING ReviewDecision，绑定到期望的 run 版本、工作流 revision、当前阶段输入、证据与策略。它不会直接继续 run。用户随后执行 run resume。
 
-show renders the current review checkpoint, pending decision, budgets, and referenced evidence.
+show 呈现当前复核 checkpoint、待决决定、预算与所引用的证据。
 
-## 6. Package commands
+## 6. 题包命令
 
 ~~~text
 cpgen package verify PATH
@@ -74,37 +74,37 @@ cpgen package export <run-id> --format internal|polygon --output PATH
 cpgen gc
 ~~~
 
-verify treats the input as untrusted and performs structural and semantic checks without modifying a run. export requires a verified package occurrence and writes through a private staging directory before atomic publication. gc is explicit maintenance and takes the exclusive artifact lock.
+verify 将输入视为不可信，执行结构与语义检查，且不修改 run。export 要求存在已校验的题包 occurrence，并通过私有 staging 目录写入，最后原子发布。gc 是显式的维护操作，会获取独占的制品锁。
 
-## 7. Restart semantics
+## 7. 重启语义
 
-- CREATED starts the first compiled stage.
-- RUNNING means the prior command may have exited; resume reconciles the current attempt from durable evidence.
-- BLOCKED starts a new attempt of the same stage and revalidates its exact dependency.
-- NEEDS_REVIEW requires one applicable pending decision.
-- READY, FAILED, and CANCELLED reject resume.
-- A retry-after time in the future returns a typed blocked result; no background timer waits for it.
-- An unknown external send boundary is never resent under a new idempotency key.
+- CREATED 启动第一个编译后的阶段。
+- RUNNING 表示先前的命令可能已退出；resume 依据持久化证据核对当前尝试。
+- BLOCKED 启动同一阶段的新尝试，并重新校验其精确依赖。
+- NEEDS_REVIEW 需要一个适用的待决决定。
+- READY、FAILED 与 CANCELLED 拒绝 resume。
+- 未来的 retry-after 时间会返回类型化的阻塞结果；不会有后台计时器等待它。
+- 未知的外部发送边界绝不会以新的幂等键重发。
 
-## 8. Exit codes
+## 8. 退出码
 
-| Code | Meaning |
+| 代码 | 含义 |
 |---:|---|
-| 0 | success, including READY or successful read-only command |
-| 2 | invalid arguments, request, configuration, or input package |
+| 0 | 成功，包括 READY 或成功的只读命令 |
+| 2 | 参数、请求、配置或输入题包非法 |
 | 3 | BLOCKED |
-| 4 | state, version, review, or process-lock conflict |
+| 4 | 状态、版本、复核或进程锁冲突 |
 | 5 | NEEDS_REVIEW |
 | 6 | FAILED |
 | 7 | CANCELLED |
-| 8 | budget exhausted |
-| 9 | sandbox or host capability incompatible |
-| 10 | safe cleanup remains pending; run is not terminal |
-| 70 | unexpected internal error |
+| 8 | 预算耗尽 |
+| 9 | 沙箱或主机能力不兼容 |
+| 10 | 安全清理仍待完成；run 未进入终态 |
+| 70 | 意外的内部错误 |
 
-Exit code 10 means a later resume must repeat exact-resource cleanup. The CLI prints the run ID and current durable state without claiming completion.
+退出码 10 表示后续 resume 必须重复精确资源清理。CLI 会打印 run ID 与当前持久化状态，而不会声称已完成。
 
-## 9. JSON envelope
+## 9. JSON 信封
 
 ~~~json
 {
@@ -123,8 +123,8 @@ Exit code 10 means a later resume must repeat exact-resource cleanup. The CLI pr
 }
 ~~~
 
-The schema is additive within a version. IDs, states, event versions, decision IDs, budget summaries, and package occurrence IDs are stable machine fields.
+在同一版本内，schema 是向后追加的。ID、状态、事件版本、决定 ID、预算摘要与题包 occurrence ID 都是稳定的机器字段。
 
-## 10. Acceptance
+## 10. 验收
 
-Subprocess tests verify lock conflicts, process death and resume, cancel while active, stable JSON, exit-code mapping, no secret leakage, and no progress text on stdout in JSON mode.
+子进程测试验证锁冲突、进程死亡与 resume、活跃期间 cancel、稳定的 JSON、退出码映射、无密钥泄漏，以及 JSON 模式下 stdout 不出现进度文本。

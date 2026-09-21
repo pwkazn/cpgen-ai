@@ -1,144 +1,144 @@
-# Testing and Acceptance Design
+# 测试与验收设计
 
-Status: Current under ADR-0006
+状态：ADR-0006 下的现行设计
 
-## 1. Test layers
+## 1. 测试层次
 
-1. Domain unit tests for strict values, transitions, policy, and digests.
-2. Application tests with real coordinator and store plus deterministic Fake ports.
-3. Adapter contract tests for SQLite, filesystem, HTTP, and Docker boundaries.
-4. Subprocess and crash-injection tests for locks and restart.
-5. Opt-in integration tests for Docker and configured external services.
-6. End-to-end CLI and package verification tests.
+1. 面向严格取值、转移、策略与摘要的领域单元测试。
+2. 使用真实协调器与存储、并配合确定性 Fake 端口的应用层测试。
+3. 面向 SQLite、文件系统、HTTP 与 Docker 边界的适配器契约测试。
+4. 面向锁与重启的子进程及崩溃注入测试。
+5. 针对 Docker 与已配置外部服务的按需集成测试。
+6. 端到端 CLI 与题包校验测试。
 
-Ordinary tests are offline, deterministic, and parallel-safe. Time, randomness, IDs, and provider responses are injected.
+常规测试离线、确定性且可安全并行。时间、随机性、ID 与供应商响应均通过注入提供。
 
-Application business fixtures may copy an empty fully migrated database created once by the real migrator in the current test process. Each copy uses an exclusive new path and still passes through normal OpenWithClock validation. Runs, transactions, connections and mutable rows are never shared. Database reopening, production Bootstrap and SQLite migration/upgrade tests continue to use their original real initialization paths. Verify control-state isolation and refusal to overwrite existing databases when changing this fixture helper.
+应用层业务 fixture 可以复制一份由真实迁移器在当前测试进程中创建一次的空的全新迁移数据库。每个副本使用独占的新路径，并且仍要经过正常的 `OpenWithClock` 校验。run、事务、连接与可变行永不共享。数据库重开、生产 Bootstrap 以及 SQLite 迁移/升级测试继续使用其原有的真实初始化路径。修改此 fixture 辅助函数时，需验证控制状态隔离以及对覆盖已有数据库的拒绝。
 
-## 2. Slice 0 evidence retained
+## 2. 保留的 Slice 0 证据
 
-Completed Slice 0 tests remain release evidence for:
+已完成的 Slice 0 测试仍作为发布证据，覆盖：
 
-- strict domain values and Judge outcome precedence;
-- direct target execution without a shell wrapper;
-- command and mount allowlists;
-- timeout, kill escalation, and target-stop proof;
-- detached watchdog deadline and parent-channel EOF behavior;
-- deterministic Docker names, labels, plan identity, and engine identity;
-- CallTrace, budget, stdout/stderr, and resource evidence;
-- typed incompatible-host behavior when required measurement capability is absent.
+- 严格的领域取值与评测结果优先级；
+- 不借助 shell 包装器的直接目标执行；
+- 命令与挂载允许列表；
+- 超时、升级 kill 与目标停止证明；
+- 分离式看门狗截止时间与父通道 EOF 行为；
+- 确定性的 Docker 名称、标签、计划身份与引擎身份；
+- CallTrace、预算、stdout/stderr 与资源证据；
+- 所需测量能力缺失时的类型化不兼容主机行为。
 
-Task 1 changes no Slice 0 source or evidence.
+Task 1 不修改任何 Slice 0 源码或证据。
 
-## 3. Fixed workflow tests
+## 3. 固定工作流测试
 
-Table-driven tests cover the seven run states, stage states, attempt states, review kinds, and review lifecycle.
+表驱动测试覆盖七种 run 状态、阶段状态、尝试状态、复核类型与复核生命周期。
 
-Compile-time and source-boundary tests prove:
+编译期与源码边界测试证明：
 
-- the concrete constructor has typed adjacent inputs and outputs;
-- RunView and inputs are copied or immutable;
-- stage code has no persistence, lock, raw Docker, unrestricted writer, or mutable run access;
-- no runtime graph or untyped registration can select control flow.
+- 具体构造函数具有类型化的相邻输入与输出；
+- RunView 与输入为副本或不可变；
+- 阶段代码无法访问持久化、锁、原生 Docker、无限制 writer 或可变 run；
+- 没有运行时图或非类型化注册可以决定控制流。
 
-Coordinator tests verify deterministic stage order, input/output digests, event order, downstream invalidation, and READY being unavailable before verified package binding.
+协调器测试验证确定性的阶段顺序、输入/输出摘要、事件顺序、下游失效，以及在已校验题包绑定之前 READY 不可用。
 
-## 4. Process-lock tests
+## 4. 进程锁测试
 
-Use two real subprocesses and a temporary private runtime directory:
+使用两个真实子进程和一个临时私有运行时目录：
 
-- two executors racing for the same RunID admit exactly one;
-- the loser receives the documented conflict without starting a stage;
-- different RunIDs can run concurrently;
-- read-only show and events work while execution owns the lock;
-- cancel can insert its idempotent request;
-- forced process termination releases the OS lock;
-- a later resume obtains the released lock and reconciles the current stage;
-- invalid RunID values cannot influence the lock path.
+- 两个执行器竞争同一 RunID 时只准入一个；
+- 失败方收到文档化的冲突，且不启动任何阶段；
+- 不同 RunID 可以并发运行；
+- 执行持有锁期间，只读的 show 与 events 仍可工作；
+- cancel 可以插入其幂等请求；
+- 强制终止进程会释放操作系统锁；
+- 后续 resume 取得已释放的锁并核对当前阶段；
+- 非法 RunID 取值不能影响锁路径。
 
-Tests must synchronize on observable readiness, not sleeps.
+测试必须基于可观测的就绪状态同步，而不是依靠 sleep。
 
-## 5. SQLite and stage-boundary crash tests
+## 5. SQLite 与阶段边界崩溃测试
 
-For each durable boundary, inject process termination before and after commit:
+对每个持久化边界，在提交前后分别注入进程终止：
 
-- run creation and first event;
-- attempt creation and budget reservation;
-- call authorization;
-- external call return;
-- budget settlement;
-- Blob publication and token finalization;
-- occurrence attachment;
-- stage projection and event;
-- sandbox resource creation and cleanup;
-- package verification and READY binding.
+- run 创建与首个事件；
+- 尝试创建与预算预留；
+- 调用授权；
+- 外部调用返回；
+- 预算结算；
+- Blob 发布与 token 封存；
+- occurrence 挂接；
+- 阶段投影与事件；
+- 沙箱资源创建与清理；
+- 题包校验与 READY 绑定。
 
-Restart must produce one authoritative projection, no duplicate event version, no budget overspend, no orphaned active writer token, and no repeated irreversible effect under a new identity.
+重启必须产生唯一权威来源投影、无重复事件版本、无预算超支、无遗留的活跃 writer token，并且不会以新身份重复不可逆副作用。
 
-Transaction instrumentation fails the test if network, Docker, hashing, fsync, rename, verified Blob read, watchdog IPC, or blocking wait occurs during a SQLite write transaction.
+若在 SQLite 写事务期间发生网络、Docker、哈希、fsync、rename、已校验 Blob 读取、看门狗 IPC 或阻塞等待，事务插桩会使测试失败。
 
-## 6. Retry, blocking, and idempotency
+## 6. 重试、阻塞与幂等
 
-Tests prove:
+测试证明：
 
-- bounded retry creates new physical records and preserves logical identity;
-- success, block, review, failure, cancellation, and budget exhaustion stop retry;
-- an unknown send boundary reconciles the original identity or charges conservatively;
-- BLOCKED resume creates a fresh same-stage attempt;
-- the first dependency action uses the checkpoint identity and current policy;
-- old health data cannot by itself resume the stage;
-- failure returns to BLOCKED with new evidence;
-- success may continue normal stage work.
+- 有界重试创建新的物理记录并保留逻辑身份；
+- 成功、阻塞、复核、失败、取消与预算耗尽都会停止重试；
+- 未知发送边界会核对原身份或按保守方式计费；
+- BLOCKED 的 resume 会创建同一阶段的新尝试；
+- 首次依赖操作使用 checkpoint 身份与当前策略；
+- 旧健康数据本身不能使阶段恢复；
+- 失败携带新证据回到 BLOCKED；
+- 成功可以继续正常的阶段工作。
 
-## 7. Review and cancellation
+## 7. 复核与取消
 
-Review tests cover immutable PENDING creation, exact decision matching, stale rejection, revision invalidation, bounded waiver scope, and REJECT termination.
+复核测试覆盖不可变 PENDING 的创建、精确的决定匹配、过期拒绝、revision 失效、有界豁免范围以及 REJECT 终止。
 
-Cancellation tests cover concurrent request insertion, root-context cancellation, refusal of new authorization, settlement of existing reservations, review staleness, and idempotent repeated cancel.
+取消测试覆盖并发请求插入、根上下文取消、拒绝新授权、现有预留的结算、复核过期以及幂等的重复 cancel。
 
-A cancellation test with a live Docker target must prove the run does not commit CANCELLED until the target is stopped and stop evidence is durable.
+使用真实 Docker 目标的取消测试必须证明：在目标停止且停止证据持久化之前，run 不会提交 CANCELLED。
 
-## 8. Budget and CallTrace
+## 8. 预算与 CallTrace
 
-Concurrent reservation tests verify every configured dimension, exact limit enforcement, monotone settlement, and replay. Provider and Docker calls must persist complete CallTrace evidence. Cache results must retain source-call and artifact provenance.
+并发预留测试验证每个已配置维度、精确限额执行、单调结算与重放。供应商与 Docker 调用必须持久化完整的 CallTrace 证据。缓存结果必须保留来源调用与制品溯源。
 
-Active-time tests inject clock movement, clean pause, crash after accounting heartbeat, conservative one-interval charging, and deadline caps.
+活跃时间测试注入时钟推进、正常暂停、计费心跳后崩溃、保守的单区间计费以及截止时间上限。
 
-## 9. Blob, cache, and package tests
+## 9. Blob、缓存与题包测试
 
-Blob tests include traversal, symlink escape, partial write, crash before and after rename, digest collision simulation, corruption on verified read, deduplication, token reuse, pin lifecycle, and explicit GC lock exclusion.
+Blob 测试包括路径穿越、符号链接逃逸、部分写入、rename 前后崩溃、摘要碰撞模拟、已校验读取时的损坏、去重、token 复用、pin 生命周期以及显式 GC 锁排除。
 
-Cache tests include canonical keys, policy mismatch, expiry, corrupt source Blob, complete current-run provenance, and stale health data.
+缓存测试包括规范化键、策略不匹配、过期、源 Blob 损坏、完整的当前 run 溯源以及过期健康数据。
 
-Package tests include path normalization, duplicate logical paths, manifest canonicalization, structural gates, semantic gates, verification receipts, publication crash points, and the same-run READY constraint.
+题包测试包括路径规范化、重复逻辑路径、manifest 规范化、结构门禁、语义门禁、校验回执、发布崩溃点以及同 run 的 READY 约束。
 
-## 10. Narrow Docker recovery
+## 10. 窄范围 Docker 恢复
 
-Use the real Docker Engine when the profile is available. Required scenarios:
+在 profile 可用时使用真实 Docker Engine。必需场景：
 
-- CLI killed while target runs;
-- target stops before output transfer;
-- CLI killed during cleanup;
-- watchdog control EOF;
-- watchdog process death detected by the runner;
-- late create discovered by deterministic name and labels;
-- unrelated container with similar metadata is never touched;
-- repeated reconciliation is idempotent;
-- later resume does not continue an incomplete prior export.
+- 目标运行期间 CLI 被终止；
+- 目标在输出传输前停止；
+- 清理期间 CLI 被终止；
+- 看门狗控制 EOF；
+- 运行器检测到看门狗进程死亡；
+- 通过确定性名称与标签发现迟到的 create；
+- 永不触碰元数据相似但无关的容器；
+- 重复核对是幂等的；
+- 后续 resume 不会继续先前未完成的导出。
 
-The reconciler may only inspect, stop, kill, wait, remove, and settle exact persisted resources. Test instrumentation fails if it schedules a stage or publishes an artifact.
+核对器只能检查、停止、kill、等待、移除并结算精确的已持久化资源。若它调度阶段或发布制品，测试插桩即判定失败。
 
-## 11. Similarity, model, Judge, and package gates
+## 11. 查重、模型、评测与题包门禁
 
-Model adapters are tested with strict structured fixtures, bounded stage-local retry, privacy redaction, canonical request digest, idempotency, and conservative unknown-boundary handling.
+模型适配器以严格结构化 fixture、有界的阶段内重试、隐私脱敏、规范化请求摘要、幂等性以及保守的未知边界处理进行测试。
 
-Similarity tests cover HTTPS and allowlists, redirects, response limits, evidence cache provenance, policy thresholds, review bands, and fresh dependency checks on resume.
+查重测试覆盖 HTTPS 与允许列表、重定向、响应上限、证据缓存溯源、策略阈值、复核区间以及 resume 时的最新依赖检查。
 
-Judge tests preserve precedence, checker protocol, resource evidence, differential validation, and deterministic ordering. Package gates must reject any missing or inconsistent required evidence.
+评测测试保留优先级、checker 协议、资源证据、差分校验与确定性排序。题包门禁必须拒绝任何缺失或不一致的必需证据。
 
-## 12. Commands and release gates
+## 12. 命令与发布门禁
 
-Required gates:
+必需门禁：
 
 ~~~powershell
 go test ./...
@@ -148,8 +148,8 @@ pwsh -NoProfile -File scripts/check-slice1-architecture.ps1
 git diff --check
 ~~~
 
-Linux cross-build and Docker-required tests run in their documented environments. Real provider smoke tests require explicit configuration and never run in ordinary CI.
+Linux 交叉构建与需要 Docker 的测试在各自文档化的环境中运行。真实供应商冒烟测试需要显式配置，且绝不在常规 CI 中运行。
 
-## 13. Slice acceptance
+## 13. Slice 验收
 
-Slice 1 is accepted only when the process lock, projections, domain ledgers, Fake pipeline, CLI commands, restart boundaries, cancellation safety, and narrow Docker reconciliation pass together while all completed Slice 0 tests remain green.
+只有当进程锁、投影、领域账本、Fake 流水线、CLI 命令、重启边界、取消安全性以及窄范围 Docker 核对同时通过，且所有已完成的 Slice 0 测试保持绿色时，Slice 1 才被验收。

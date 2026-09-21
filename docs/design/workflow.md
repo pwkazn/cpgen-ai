@@ -1,31 +1,31 @@
-# Fixed Workflow, Revisions, and Budgets
+# 固定工作流、revision 与预算
 
-Status: Current under ADR-0006
+状态：ADR-0006 下为当前设计
 
-## 1. Scope
+## 1. 范围
 
-This design defines the concrete typed CPGen pipeline, durable stage boundaries, stage-local retry, manual resume, review, cancellation, and downstream invalidation. The coordinator is a foreground CLI component for one host.
+本设计定义具体的类型化 CPGen 流水线、持久化阶段边界、阶段内重试、人工恢复、复核、取消与下游失效。协调器是面向单台主机的前台 CLI 组件。
 
-The forward MVP continues from committed Similarity ACCEPT through Solution/Data/Docker/Judge/Quality/Package. The 2026-09-15 scope adds bounded content regeneration in `mvp.idea.statement.similarity.solution.data.judge.package.v2`; V1 and historical checkpoints retain their existing stopping behavior. Transport retry, JSON-format repair, dependency recovery and explicit human review remain separate. General idea mutation remains deferred.
+前向 MVP 从已提交的 Similarity ACCEPT 继续，依次经过 Solution/Data/Docker/Judge/Quality/Package。2026-09-15 的范围在 `mvp.idea.statement.similarity.solution.data.judge.package.v2` 中增加有界的内容重生成；V1 与历史 checkpoint 保留其原有的停止行为。传输重试、JSON 格式修复、依赖恢复与显式人工复核保持独立。通用 idea 变更仍暂缓。
 
-## 2. Identities and revisions
+## 2. 身份与 revision
 
-A run persists:
+run 持久化：
 
-- RunID and validated request identity;
-- WorkflowRevision and SchemaVersion;
-- canonical request and configuration digests;
-- current run version, state, stage name, and stage ordinal;
-- active-time accounting and final package pointer;
-- timestamps from the injected canonical clock.
+- RunID 与已校验的请求身份；
+- WorkflowRevision 与 SchemaVersion；
+- 规范请求与配置摘要；
+- 当前 run 版本、状态、阶段名称与阶段序号；
+- 活跃时间核算与最终题包指针；
+- 来自注入的规范时钟的时间戳。
 
-Every stage record persists its typed input digest, optional output digest, attempt count, current attempt ID, state, last typed error, logical idempotency key, and committed evidence references.
+每条阶段记录持久化其类型化输入摘要、可选输出摘要、attempt 计数、当前 attempt ID、状态、最后一次类型化错误、逻辑幂等键与已提交证据引用。
 
-The compiled constructor is authoritative. Persisted names and ordinals are compatibility selectors and audit fields, not a user-defined graph. Immutable `workflow.Definition` is the single source for fixed stage order, package completion and attempt preservation. `NewGenerationRunService` uses the flat `GenerationRunConfig` with explicit owner resources; historical Go constructor helpers exist only in tests. Resource/admission/frozen-policy checks run at composition, while run/attempt/evidence checks remain at execution boundaries.
+编译后的构造器是权威来源。持久化的名称与序号是兼容性选择器和审计字段，不是用户定义的图。不可变的 `workflow.Definition` 是固定阶段顺序、题包完成与 attempt 保留的唯一来源。`NewGenerationRunService` 使用带显式属主资源的扁平 `GenerationRunConfig`；历史 Go 构造器辅助函数只存在于测试中。资源/准入/冻结策略检查在装配时运行，而 run/attempt/证据检查仍留在执行边界。
 
-## 3. Concrete typed pipeline
+## 3. 具体类型化流水线
 
-The generation constructor assembles these business stages:
+生成构造器装配以下业务阶段：
 
 1. Idea
 2. Statement
@@ -36,145 +36,153 @@ The generation constructor assembles these business stages:
 7. Quality
 8. Package
 
-The current `GenerationRevision` assembles the complete ordinary-problem pipeline, including separate verification and decision boundaries. `revisions.go` isolates the unchanged persisted revision strings and historical stopping points. All revisions use the application scheduler; there is no separate historical pipeline executor. The default deterministic Fake pipeline and its capability configuration live in `internal/adapter/fake`.
+当前 `GenerationRevision` 装配完整的普通题流水线，包括独立的验证边界与决策边界。`revisions.go` 隔离未变的持久化 revision 字符串与历史停止点。所有 revision 都使用应用调度器；不存在单独的历史流水线执行器。默认的确定性 Fake 流水线及其能力配置位于 `internal/adapter/fake`。
 
-The local fixed loop in `internal/application` runs one stage boundary at a time. It validates identity, stage order and committed version before selecting the next stage, checks cancellation before invocation and returns on a pause or terminal result. For V2 it also accepts the explicit compiled content-retry routes; the durable boundary owns eligibility and the persisted retry limit. The scheduler performs no independent checkpoint writes. A failed boundary may return an updated same-stage projection when BeginStage or accounting already committed; foreign or regressed projections are rejected.
+`internal/application` 中的本地固定循环一次推进一个阶段边界。它在选择下一阶段之前校验身份、阶段顺序与已提交版本，在调用前检查取消，并在暂停或终态结果时返回。对 V2，它还接受显式编译的内容重试路由；持久化边界拥有资格判定与持久化重试上限。调度器不执行独立的 checkpoint 写入。当 BeginStage 或核算已经提交时，失败的边界可以返回更新后的同阶段投影；外来或回退的投影会被拒绝。
 
-Progress is reconstructed from the compatible compiled workflow revision, stage/input/config/schema bindings and verified stored outputs. SQLite remains authoritative; no graph.json store or unchecked automatic checkpoint callback is used. The scheduler shares no invocation state between runs. `LocalRunService` directly manages attempts, result commits, review and recovery under the run lock; its stageControl helper joins pollers. `fixedStages` adapts typed business inputs/results and selects recovery through an explicit switch. Its recovery switch performs stage admission and verifies cleanup proof, then delegates retained physical-call settlement to `internal/adapter/sandbox`. Model and Similarity retry/receipt/cache protocols live in `internal/execution`; they do not import application or advance workflow stages. There is no recovery registration table or separate lifecycle/termination object. Bootstrap/Application owns and closes execution resources before storage. The existing stage-sequence, error, cancellation, concurrent-run and subprocess recovery tests remain the behavioral contract after removing the graph library.
+进度由兼容的编译工作流 revision、阶段/输入/配置/schema 绑定与经验证的已存储输出重建。SQLite 仍是权威来源；不使用 graph.json 存储，也不使用未经检查的自动 checkpoint 回调。调度器不在 run 之间共享调用状态。`LocalRunService` 在 run 锁下直接管理 attempt、结果提交、复核与恢复；其 stageControl 辅助函数负责 join poller。`fixedStages` 适配类型化业务输入/结果，并通过显式 switch 选择恢复。其恢复 switch 执行阶段准入并验证清理证明，然后把保留的物理调用结算委托给 `internal/adapter/sandbox`。模型与 Similarity 的重试/收据/缓存协议位于 `internal/execution`；它们不导入 application，也不推进工作流阶段。不存在恢复注册表或独立的生命周期/终止对象。Bootstrap/Application 在存储之前拥有并关闭执行资源。移除图库之后，现有的阶段序列、错误、取消、并发 run 与子进程恢复测试仍是行为契约。
 
-A stage is parameterized by concrete Go input and output values. It receives an immutable RunView, a copied input, and a narrow set of metered ports. It never receives persistence, the process lock, raw Docker, unrestricted Blob writing, or mutable coordinator state.
+阶段由具体的 Go 输入与输出值参数化。它接收不可变的 RunView、一份复制的输入，以及一小组受计量的端口。它绝不接收持久化、进程锁、裸 Docker、不受限的 Blob 写入或可变的协调器状态。
 
-## 4. State model
+## 4. 状态模型
 
-Run states are CREATED, RUNNING, BLOCKED, NEEDS_REVIEW, READY, FAILED, and CANCELLED.
+run 状态为 CREATED、RUNNING、BLOCKED、NEEDS_REVIEW、READY、FAILED 与 CANCELLED。
 
-Stage states are PENDING, RUNNING, SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, and CANCELLED.
+阶段状态为 PENDING、RUNNING、SUCCEEDED、BLOCKED、NEEDS_REVIEW、FAILED 与 CANCELLED。
 
-Stage-attempt states are RUNNING, SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, CANCELLED, and INTERRUPTED.
+阶段 attempt 状态为 RUNNING、SUCCEEDED、BLOCKED、NEEDS_REVIEW、FAILED、CANCELLED 与 INTERRUPTED。
 
-READY cannot be committed until the verified package occurrence and final quality report for the same run are bound atomically.
+只有当同一 run 的经验证题包 occurrence 与最终质量报告被原子绑定后，才能提交 READY。
 
-## 5. Coordinator protocol
+## 5. 协调器协议
 
-A stateful execution command:
+一条有状态的执行命令：
 
-1. acquires the deterministic per-run process lock;
-2. opens and migrates SQLite;
-3. reconciles unfinished exact sandbox resources for the run;
-4. validates request, configuration, workflow revision, and current projection;
-5. starts or replays the current stage attempt in a short transaction;
-6. reserves required budgets and effect records;
-7. invokes the stage outside all SQLite write transactions;
-8. verifies returned evidence and artifacts;
-9. settles ledgers, finishes the attempt, updates stage and run projection, and appends ordered events in a short transaction;
-10. advances to the next compiled stage or exits at a pause or terminal state.
+1. 获取确定性的按 run 进程锁；
+2. 打开并迁移 SQLite；
+3. 对该 run 未完成的精确沙箱资源进行对账；
+4. 校验请求、配置、工作流 revision 与当前投影；
+5. 在短事务中启动或回放当前阶段 attempt；
+6. 预留所需预算与效果记录；
+7. 在所有 SQLite 写事务之外调用阶段；
+8. 验证返回的证据与制品；
+9. 在短事务中结算账本、完成 attempt、更新阶段与 run 投影，并追加有序事件；
+10. 推进到下一个已编译阶段，或在暂停或终态时退出。
 
-Expected run version is checked on every transition. Replaying a committed transition returns its stored result and never duplicates events or accounting.
+每次转移都检查预期的 run 版本。回放已提交的转移会返回其存储结果，绝不重复事件或核算。
 
-## 6. Retry
+## 6. 重试
 
-V2 automatically regenerates content at most **twice per run**, shared across stages and process restarts. The example configuration selects V2; existing frozen V1 runs remain V1. This initial policy regenerates from the original typed input; it does not yet feed compiler diagnostics or prior drafts back into the prompt.
+V2 每次 run 最多自动重生成内容 **两次**，该配额在阶段与进程重启之间共享。示例配置选择 V2；现有冻结的 V1 run 保持为 V1。这一初始策略从原始类型化输入重生成；尚不把编译器诊断或先前草稿回灌到 prompt 中。
 
-| Failure | Regenerate from |
+| 失败 | 重生成起点 |
 | --- | --- |
-| No feasible ideas; draft/input binding rejected | Current draft stage |
-| Verified JSON-format rejection after the configured format allowance | Current draft stage |
-| Solution or brute compile failure | Solution |
-| Solution sample failure (the sample itself may be wrong) | Statement, then Similarity and all later stages |
-| Generator/validator compile, execution, validation or reproducibility failure | Data |
-| Judge reference/brute failure or differential mismatch | Solution, then Data and all later stages |
+| 没有可行 idea；草稿/输入绑定被拒绝 | 当前草稿阶段 |
+| 在配置的格式配额用尽后仍发生经验证的 JSON 格式拒绝 | 当前草稿阶段 |
+| Solution 或 brute 编译失败 | Solution |
+| Solution 样例失败（样例本身可能出错） | Statement，然后是 Similarity 及之后所有阶段 |
+| Generator/validator 编译、执行、校验或可复现性失败 | Data |
+| Judge 的 reference/brute 失败或差分不一致 | Solution，然后是 Data 及之后所有阶段 |
 
-Similarity decisions, fixed-checker Quality failures, provider HTTP rejection, unknown send boundaries, unsupported diagnostics and exhausted budgets do not authorize content regeneration. They retain the existing review/block/error behavior.
+Similarity 决策、固定 checker 的 Quality 失败、provider HTTP 拒绝、未知发送边界、不支持的诊断与预算耗尽都不授权内容重生成。它们保留现有的复核/阻塞/错误行为。
 
-`FinishContentRetry` completes the failed attempt, inserts immutable `content_retries` evidence and invalidates the target's entire downstream suffix in the same SQLite transaction. It preserves attempt ordinals, earlier artifacts, request/configuration bindings and all budget accounts. A replay cannot spend another allowance. Regenerated draft attempts bypass cache lookup; already dispatched calls retain normal durable replay. Every downstream verification must pass again before READY. When the two allowances are spent, the same transaction finishes at the ordinary non-waivable NEEDS_REVIEW gate. Pending cancellation prevents regeneration.
+`FinishContentRetry` 在同一个 SQLite 事务中完成失败的 attempt、插入不可变的 `content_retries` 证据，并使目标的整个下游后缀失效。它保留 attempt 序号、更早的制品、请求/配置绑定与所有预算账户。回放不能再次消耗配额。重生成的草稿 attempt 绕过缓存查找；已经派发的调用保留正常的持久化回放。READY 之前，每个下游验证都必须重新通过。两次配额用尽后，同一事务在普通且不可豁免的 NEEDS_REVIEW 门禁处结束。待处理的取消会阻止重生成。
 
-Retry is a bounded loop within the current stage and its versioned policy. Each physical attempt has a new ordinal and persisted call record. The logical operation identity and idempotency key remain stable across attempts.
+重试是当前阶段及其带版本策略内的有界循环。每次物理 attempt 都有新的序号与持久化调用记录。逻辑操作身份与幂等键在多次 attempt 之间保持稳定。
 
-Retry stops on success, a blocking condition, human review, permanent failure, user cancellation, or exhausted stage budget. A request with an unknown external send boundary is never resent under a new key. The adapter reconciles the original identity where supported; otherwise it settles reservations conservatively and returns a typed pause or failure.
+重试在成功、阻塞条件、人工复核、永久失败、用户取消或阶段预算耗尽时停止。外部发送边界未知的请求绝不会以新键重新发送。适配器在支持时对账原始身份；否则保守地结算预留，并返回类型化的暂停或失败。
 
-Backoff is applied only while the foreground command is running. There is no background timer. A future retry time is persisted as part of a blocked checkpoint and requires manual resume.
+退避仅在前台命令运行期间生效。不存在后台计时器。未来的重试时间作为阻塞 checkpoint 的一部分持久化，并需要人工恢复。
 
-## 7. Blocking and manual resume
+## 7. 阻塞与人工恢复
 
-A BLOCKED checkpoint contains:
+BLOCKED checkpoint 包含：
 
-- stage name and typed input digest;
-- dependency identity and policy digest;
-- canonical error evidence;
-- retry-after timestamp;
-- relevant budget and revision bindings.
+- 阶段名称与类型化输入摘要；
+- 依赖身份与策略摘要；
+- 规范错误证据；
+- retry-after 时间戳；
+- 相关预算与 revision 绑定。
 
-Manual resume reacquires the run lock and creates a fresh attempt of the same stage. Its first authorized dependency operation uses the ordinary metered port and current policy to revalidate the exact checkpoint dependency. Cached historical health is diagnostic only and cannot establish recovery by itself.
+人工恢复重新获取 run 锁，并为同一阶段创建新的 attempt。其首个被授权的依赖操作使用普通计量端口与当前策略，重新校验 checkpoint 中的确切依赖。缓存的历史健康状态仅为诊断信息，本身不能确立恢复。
 
-If the dependency remains unavailable, the new attempt ends BLOCKED and updates evidence. If it is healthy, the same attempt may continue ordinary stage work. No separate run mode or special scheduler path is introduced.
+如果依赖仍不可用，新的 attempt 以 BLOCKED 结束并更新证据。如果依赖健康，同一 attempt 可以继续普通阶段工作。不引入单独的 run 模式或特殊调度器路径。
 
-## 8. Process restart
+## 8. 进程重启
 
-An abnormal exit may leave run, stage, and current attempt recorded as RUNNING. The OS releases the run lock. On manual resume, the coordinator first reconciles the attempt:
+异常退出可能使 run、阶段与当前 attempt 仍记录为 RUNNING。操作系统会释放 run 锁。人工恢复时，协调器首先对账该 attempt：
 
-- if no irreversible effect was authorized, mark it INTERRUPTED and rerun;
-- if a provider supports the stable idempotency key, query or replay that identity;
-- if dispatch status is unknown and cannot be queried, settle conservatively and pause or fail;
-- if Blob bytes were published, verify them and attach or release the writer token;
-- if Docker work started, settle the persisted SandboxExecution before rerunning;
-- if the completed result and ledgers already committed, advance from the authoritative projection.
+- 如果没有授权任何不可逆效果，将其标记为 INTERRUPTED 并重跑；
+- 如果 provider 支持稳定幂等键，则查询或回放该身份；
+- 如果派发状态未知且无法查询，保守结算并暂停或失败；
+- 如果 Blob 字节已发布，验证它们并附加或释放 writer token；
+- 如果 Docker 工作已开始，在重跑之前结算持久化的 SandboxExecution；
+- 如果已完成的结果与账本已经提交，则从权威来源投影推进。
 
-Only the current stage is considered. Recovery never chooses an arbitrary graph node or changes unrelated runs.
+只考虑当前阶段。恢复绝不选择任意图节点，也不改动无关的 run。
 
-## 9. Review
+## 9. 复核
 
-ReviewDecision kinds are REVISE, RETRY, WAIVE, and REJECT. States are PENDING, APPLIED, REJECTED, and STALE.
+ReviewDecision 的种类为 REVISE、RETRY、WAIVE 与 REJECT。状态为 PENDING、APPLIED、REJECTED 与 STALE。
 
-Review commands insert an immutable PENDING decision with run version, workflow revision, stage input, evidence, policy, requested edits, and waiver scope. Manual resume validates exactly one decision:
+复核命令插入一条不可变的 PENDING 决策，携带 run 版本、工作流 revision、阶段输入、证据、策略、请求的修改与豁免范围。人工恢复恰好校验一个决策：
 
-- REVISE creates a new revision, invalidates downstream outputs, and restarts at the earliest affected compiled stage;
-- RETRY creates a fresh attempt of the reviewed stage;
-- WAIVE records bounded policy evidence and continues only where the policy permits;
-- REJECT ends the run as FAILED with review evidence.
+- REVISE 创建新 revision、使下游输出失效，并从最早受影响的已编译阶段重新开始；
+- RETRY 为被复核的阶段创建新的 attempt；
+- WAIVE 记录有界策略证据，并仅在策略允许处继续；
+- REJECT 以复核证据将 run 结束为 FAILED。
 
-A stale or ambiguous decision is never applied.
+过期或有歧义的决策绝不应用。
 
-## 10. Cancellation
+## 10. 取消
 
-The cancel command inserts one idempotent control request even when another process owns the run lock. The foreground coordinator polls that table and cancels its root context.
+即使另一个进程持有 run 锁，取消命令也会插入一条幂等控制请求。前台协调器轮询该表并取消其根 context。
 
-After cancellation is observed:
+观察到取消之后：
 
-- no new call, artifact writer, or sandbox start may be authorized;
-- already-authorized operations are settled;
-- each untrusted target is stopped and proven stopped;
-- cleanup evidence and budget outcomes are recorded;
-- pending review decisions become stale;
-- the run commits CANCELLED in one short transaction.
+- 不得授权新的调用、制品 writer 或沙箱启动；
+- 已授权的操作会被结算；
+- 每个不可信目标都被停止并证明已停止；
+- 记录清理证据与预算结果；
+- 待处理的复核决策变为过期；
+- run 在一个短事务中提交为 CANCELLED。
 
-If no executor is active, cancel may acquire the run lock and perform the same exact-resource reconciliation before committing.
+如果没有执行器处于活跃状态，取消可以获取 run 锁，并在提交前执行同样的精确资源对账。
 
-## 11. Downstream invalidation
+## 11. 下游失效
 
-Every stage declares the input components and prior-stage outputs that form its input digest. A revision change computes the earliest affected stage from the compiled definition. Current outputs at that stage and later stages become non-current, but immutable prior attempts, events, Blobs, occurrences, call traces, and review decisions remain auditable.
+每个阶段都声明构成其输入摘要的输入组件与先前阶段输出。revision 变化会从编译后的定义计算最早受影响的阶段。该阶段及之后阶段的当前输出变为非当前，但不可变的先前 attempt、事件、Blob、occurrence、调用轨迹与复核决策仍可审计。
 
-An unchanged digest may reuse a verified committed stage output only when schema, workflow revision compatibility, policy, provenance, and budget rules permit it.
+未变化的摘要只有在 schema、工作流 revision 兼容性、策略、来源与预算规则允许时，才可以复用经验证的已提交阶段输出。
 
-## 12. Budgets
+## 12. 预算
 
-The coordinator exposes each stage a RunView containing read-only remaining limits. Metered ports own reservations and settlement for model calls, similarity calls, Docker runs, artifact bytes, tokens, cost, and active time.
+协调器向每个阶段暴露包含只读剩余额度的 RunView。计量端口拥有模型调用、similarity 调用、Docker run、制品字节、token、成本与活跃时间的预留和结算。
 
-Stage publication takes the existing admitted attempt and version and artifact declaration plus bytes; the publication adapter owns physical call, reservation and writer identities. Committed proof readers use read-only response policy and sandbox planning inputs without transports or lifecycle resources. No database revision, schema, canonical encoding or audit identity changes accompany these capability boundaries.
+阶段发布接收现有的已准入 attempt 与版本，以及制品声明和字节；发布适配器拥有物理调用、预留与 writer 身份。已提交证明的读取器使用只读响应策略与沙箱规划输入，不涉及传输或生命周期资源。这些能力边界不伴随任何数据库 revision、schema、规范编码或审计身份的变化。
 
-Stage code cannot mutate counters. Parallel-safe account updates use database constraints and expected account versions. Cache results still create logical call evidence and retain the source call and artifact provenance.
+阶段代码不能修改计数器。并行安全的账户更新使用数据库约束与预期账户版本。缓存结果仍会创建逻辑调用证据，并保留源调用与制品来源。
 
-Adding an ordinary business stage requires its typed implementation, committed evidence reader, a new compatible workflow definition and fixed execution/commit/recovery adapters. Existing persisted definitions must retain their sequences. Timer, cancellation, budget, writer and generic terminal-cleanup state machines do not gain business-stage branches; only a new effect protocol would require a separately reviewed adapter change.
+新增一个普通业务阶段需要其类型化实现、已提交证据读取器、新的兼容工作流定义，以及固定的执行/提交/恢复适配器。现有持久化定义必须保留其序列。计时器、取消、预算、writer 与通用终态清理状态机不增加业务阶段分支；只有新的效果协议才需要单独复核的适配器改动。
 
-## 13. Acceptance
+## 13. 验收
 
-Tests must prove:
+测试必须证明：
 
-- only the compiled stage order can execute;
-- RunView and inputs cannot be mutated through aliases;
-- the run lock excludes a second executor for the same run;
-- every durable boundary can restart without duplicate effects;
-- retry keeps logical identity and gets new physical records;
-- blocked resume performs a current-policy dependency check;
-- review and cancellation follow the rules above;
-- external I/O never overlaps a SQLite write transaction;
-- READY is impossible before same-run package verification.
+- 只有编译后的阶段顺序可以执行；
+- RunView 与输入不能通过别名被修改；
+- run 锁排除同一 run 的第二个执行器；
+- 每个持久化边界都能在不产生重复效果的情况下重启；
+- 重试保持逻辑身份并获得新的物理记录；
+- 阻塞恢复执行当前策略的依赖检查；
+- 复核与取消遵循上述规则；
+- 外部 I/O 绝不与 SQLite 写事务重叠；
+- 在同一 run 的题包验证之前不可能进入 READY。
+
+## 契约短语（canonical contract phrases）
+
+架构检查脚本以这些英文短语作为契约锚点：
+
+- local fixed loop
+- internal/application
+- SQLite remains authoritative

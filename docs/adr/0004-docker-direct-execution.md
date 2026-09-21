@@ -1,37 +1,37 @@
-# ADR-0004: Run Target Programs Directly in an Isolated Docker cgroup
+# ADR-0004：在隔离的 Docker cgroup 中直接运行目标程序
 
-Status: Accepted (amended by ADR-0006)
+Status: Accepted（由 ADR-0006 修订）
 
 Date: 2026-08-30
 
-## Context
+## 背景
 
-Judge measurements must describe the untrusted target rather than a shell, helper, or exporter. Docker remains outside target code, and the host-side runner must retain authoritative timing, output, stop, and resource evidence.
+评测测量必须描述不受信任的目标本身，而不是某个 shell、辅助程序或导出器。Docker 保持在目标代码之外，且宿主侧的 Runner 必须保留权威的计时、输出、停止与资源证据。
 
-## Decision
+## 决策
 
-- A trusted Go Runner outside the container creates and starts each target directly with an explicit argv and no shell.
-- The target is the measured cgroup process. Transfer helpers, keepers, and exporters are separate roles and never contribute target verdict measurements.
-- Every Docker action belongs to a persisted SandboxExecution and exact planned resource identity. Authorization binds RunID, AttemptID, SandboxExecutionID, logical operation, scope, plan, and engine identity.
-- The foreground CLI holds the per-run process lock while it may authorize new Docker work. Database lifecycle versions reject stale or duplicate commands within that process.
-- CPU, wall time, memory, pids, stdout, stderr, exit status, OOM, and stop evidence are collected by trusted host code.
-- Target containers have no Docker socket, no network unless a specific profile permits it, a read-only root filesystem, explicit mounts, dropped capabilities, no-new-privileges, non-root credentials, and strict resource limits.
-- Cross-stop output transfer, detached watchdog behavior, and exact-resource cleanup follow ADR-0005.
+- 容器之外的可信 Go Runner 以显式 argv 且不经 shell，直接创建并启动每个目标。
+- 目标就是被计量的 cgroup 进程。传输辅助程序、keeper 和导出器属于独立角色，绝不为目标判决测量贡献数据。
+- 每个 Docker 动作都属于一个持久化的 SandboxExecution 与精确计划的资源身份。授权绑定 RunID、AttemptID、SandboxExecutionID、逻辑操作、范围、计划与引擎身份。
+- 前台 CLI 在可能授权新的 Docker 工作时持有每 run 进程锁。数据库生命周期版本在该进程内拒绝过期或重复的命令。
+- CPU、墙钟时间、内存、pids、stdout、stderr、退出状态、OOM 与停止证据由可信宿主代码收集。
+- 目标容器没有 Docker socket，除非特定 profile 允许否则没有网络；它们具有只读根文件系统、显式挂载、被丢弃的能力、no-new-privileges、非 root 凭据以及严格的资源限制。
+- 跨停止的输出传输、分离式看门狗行为与精确资源清理遵循 ADR-0005。
 
-## Consequences
+## 后果
 
-- Judge evidence refers to the target itself.
-- Shell injection and wrapper-accounting ambiguity are removed.
-- Platform capability checks may reject a host that cannot produce the required evidence.
-- Cleanup authorization depends on persisted execution and resource identity, not process ancestry.
+- 评测证据指向目标本身。
+- shell 注入与包装器记账的歧义被消除。
+- 平台能力检查可能拒绝无法产生所需证据的宿主。
+- 清理授权取决于持久化的执行与资源身份，而不是进程祖先关系。
 
-## Superseded design
+## 被取代的设计
 
 <!-- Superseded design: begin -->
-The former wording tied Runner calls to a distributed fencing claim. ADR-0006 replaces that ownership mechanism with the OS-backed run lock and expected lifecycle versions while retaining exact authorization identity.
+原先的措辞把 Runner 调用绑定到一种分布式栅栏声明。ADR-0006 用由操作系统支撑的 run 锁与期望生命周期版本取代了那种所有权机制，同时保留精确的授权身份。
 <!-- Superseded design: end -->
 
-## References
+## 参考
 
 - ADR-0005
 - docs/design/sandbox.md

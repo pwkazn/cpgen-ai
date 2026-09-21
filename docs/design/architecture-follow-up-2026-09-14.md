@@ -1,6 +1,6 @@
 # 架构问题复核与后续收敛方案
 
-日期：2026-09-14。**本方案的第一版实现因增加过多抽象而被用户退回，以下内容仅作历史分析，不再作为当前实施要求。** 当前已改为合并协调状态、删除镜像接口与重复配置，见 [返工记录](../evidence/architecture-follow-up-2026-09-14.md)。完整工具链快照和专用 publication 账本仍是单独决策。
+日期：2026-09-14。**本方案的第一版实现因增加过多抽象而被用户退回，以下内容仅作历史分析，不再作为当前实施要求。** 当前已改为合并协调状态、删除镜像接口与重复配置，见 [返工记录](../evidence/architecture-follow-up-2026-09-14.md)。完整工具链快照和专用发布账本仍是单独决策。
 
 本次开始时，工作区已有大量未提交的代码和文档改动，包括 [2026-09-13 收敛计划](../superpowers/plans/2026-09-13-architecture-simplification.md) 及其 [实施记录](../evidence/architecture-simplification-baseline.md)。以下结论针对包含这些改动的工作区，不把它们视为本次新增，也不把旧代码的问题直接套到当前实现上。
 
@@ -106,22 +106,22 @@
 
 ## 5. 审计：区分持久化事实、原子投影和读取视图
 
-这些名词处在不同层次，不能按“看起来重复”合并。尤其 logical operation 并非必然对应一张额外表：当前 `CallRecord` 中就有 `LogicalOperationID`，分别表达业务槽位和持久化记录身份。
+这些名词处在不同层次，不能按“看起来重复”合并。尤其逻辑操作并非必然对应一张额外表：当前 `CallRecord` 中就有 `LogicalOperationID`，分别表达业务槽位和持久化记录身份。
 
 | 概念 | 必须保留的信息与故障用途 | 所有者/建议 |
 |---|---|---|
-| stage attempt | 当前阶段哪次尝试被授权、输入绑定、是否已提交；服务重启可继续同一次 attempt，不能等同于进程启动次数 | RuntimeStore 原子开始/完成，生命周期及恢复组件使用 |
-| logical operation / CallRecord | 一次业务操作的请求、策略、幂等范围、结果选择或缓存来源；一次 attempt 可有多个操作 | 调用能力内部创建；业务声明稳定 operation key，不手工组装全部 ID |
-| physical call | 某次被计划的物理尝试，以及授权、发送、成功、失败或未知边界；记录存在不代表已经发生 HTTP 请求 | CallCoordinator/适配器推进，receipt/reconciler 恢复；已知可重试失败与未知发送分开 |
-| reservation | 副作用前已授权的预算上界和后续结算/释放；不能从成功结果推断尚未结算的授权 | 账本事务管理；不因本地串行而删除，进程崩溃仍留下未完成授权 |
-| writer token | 发布者、声明、封存状态、Blob 绑定和临时 pin；跨 SQLite 与文件系统的发布窗口 | artifact session 管理；业务只返回 pending publication |
-| receipt | 当前私有 receipt 保存响应/结果及其请求与物理身份绑定，支持“结果已封存但账本尚未完成”的回放；并非天然等同于供应商签发的收据 | provider/publication 适配器创建，恢复和只读核验消费；摘要不能代替内容 |
+| 阶段尝试 | 当前阶段哪次尝试被授权、输入绑定、是否已提交；服务重启可继续同一次 attempt，不能等同于进程启动次数 | RuntimeStore 原子开始/完成，生命周期及恢复组件使用 |
+| 逻辑操作 / CallRecord | 一次业务操作的请求、策略、幂等范围、结果选择或缓存来源；一次 attempt 可有多个操作 | 调用能力内部创建；业务声明稳定操作键，不手工组装全部 ID |
+| 物理调用 | 某次被计划的物理尝试，以及授权、发送、成功、失败或未知边界；记录存在不代表已经发生 HTTP 请求 | CallCoordinator/适配器推进，receipt/reconciler 恢复；已知可重试失败与未知发送分开 |
+| 预留 | 副作用前已授权的预算上界和后续结算/释放；不能从成功结果推断尚未结算的授权 | 账本事务管理；不因本地串行而删除，进程崩溃仍留下未完成授权 |
+| writer token | 发布者、声明、封存状态、Blob 绑定和临时 pin；跨 SQLite 与文件系统的发布窗口 | artifact session 管理；业务只返回待发布状态 |
+| receipt | 当前私有 receipt 保存响应/结果及其请求与物理身份绑定，支持“结果已封存但账本尚未完成”的回放；并非天然等同于供应商签发的收据 | 供应商/发布适配器创建，恢复和只读核验消费；摘要不能代替内容 |
 | Blob / digest | Blob 是内容；digest 用于比较内容、策略与请求身份 | digest 可由原始字节重算，但持久化的期望 digest 是不可变绑定，不能一并删掉 |
 | occurrence | 某 run/attempt 以什么角色、路径、来源提交引用了某 Blob；相同内容可以有多个合法使用关系 | 阶段提交创建；不能仅按 Blob digest 推导授权来源 |
-| pin / cleanup proof | 临时内容的存活保护及外部资源已清理的事实 | 发布/GC 与 sandbox 生命周期拥有；不从“阶段完成”反推资源已清理 |
-| run projection / budget account | 当前实现使用版本化投影执行 CAS 和预算准入，是原子事务中的运行权威 | 即使部分聚合理论上可重算，本轮仍保留；不能假设现有 events 足以重建全部状态 |
+| pin / 清理证明 | 临时内容的存活保护及外部资源已清理的事实 | 发布/GC 与 sandbox 生命周期拥有；不从“阶段完成”反推资源已清理 |
+| run 投影 / 预算账户 | 当前实现使用版本化投影执行 CAS 和预算准入，是原子事务中的运行权威 | 即使部分聚合理论上可重算，本轮仍保留；不能假设现有 events 足以重建全部状态 |
 | RunView / BudgetSnapshot / CallTrace | 面向读取或阶段执行的组合结果、剩余额度与调用轨迹 | 从已提交记录构造，不新增独立可变账本；已嵌入历史 receipt 的序列化内容保持兼容 |
-| cache index | 已提交结果的可选查找加速 | 保留失败不影响阶段完成的语义；索引可重建与来源证明可删除是两回事 |
+| 缓存索引 | 已提交结果的可选查找加速 | 保留失败不影响阶段完成的语义；索引可重建与来源证明可删除是两回事 |
 
 一个已存在的崩溃用例说明为什么不能只存一个 `operation.status`：
 
@@ -130,17 +130,17 @@
 3. 结果已完成但阶段未提交：继续原 attempt 的结果验证与 occurrence 提交。
 4. 阶段已提交：从持久化后继继续，不能因缓存发布或进程退出重复前一阶段。
 
-这几种窗口必须可以区分。现有 `TestLLMReplayProcessCrashBoundaries` 覆盖 before-seal、sealed、finalized、sent、completed、finished，并检查恢复后 HTTP 次数仍为 1。可靠性目标包含“无可信结果时停下”，不承诺跨任意外部服务的全局 exactly-once。
+这几种窗口必须可以区分。现有 `TestLLMReplayProcessCrashBoundaries` 覆盖 before-seal、sealed、finalized、sent、completed、finished，并检查恢复后 HTTP 次数仍为 1。可靠性目标包含“无可信结果时停下”，不承诺跨任意外部服务的全局恰好一次。
 
-**最有价值的减法是缩小业务可见协议。** 建议在现有实现上分别收敛受控模型调用、受控 sandbox 执行、阶段产物发布三种能力。它们内部继续共用已经验证的账本协议；阶段只提供业务请求、稳定操作键、声明和结果，不自行创建 reservation、physical ID、writer token 或恢复分支。
+**最有价值的减法是缩小业务可见协议。** 建议在现有实现上分别收敛受控模型调用、受控 sandbox 执行、阶段产物发布三种能力。它们内部继续共用已经验证的账本协议；阶段只提供业务请求、稳定操作键、声明和结果，不自行创建预留、物理 ID、writer token 或恢复分支。
 
 一个具体试点是 Package 发布：当前 `packagePublicationIdentity` 构造 `SandboxAuthorizationIdentity` 并设置 `CallSandboxCompile`；`SandboxArtifactSink` 又通过 `RunBoundLLMLedger` 记录 `PhysicalLocalArtifactWrite`。这证明命名和公开能力混合了不同用途，不证明账本字段可以立即删除。
 
-先引入面向阶段的 publication scope/工厂，在内部适配现有身份与调用类型，保持 canonical JSON、摘要和恢复身份不变。随后再评估是否需要真正独立的 publication 账本。后者涉及预算预留、声明外键、崩溃恢复、GC 和旧记录读取，应单列迁移设计；没有这份证明前，不承诺通过“合并几个表”获得安全简化。
+先引入面向阶段的发布 scope/工厂，在内部适配现有身份与调用类型，保持 canonical JSON、摘要和恢复身份不变。随后再评估是否需要真正独立的发布账本。后者涉及预算预留、声明外键、崩溃恢复、GC 和旧记录读取，应单列迁移设计；没有这份证明前，不承诺通过“合并几个表”获得安全简化。
 
 ## 离线导出的剩余缺口
 
-读取命令已由 `BootstrapLocal` 避开 Docker 与模型客户端，但 `NewFrozenReadPolicy` 仍需打开原 frozen config 中的工具链 lock 路径并比较摘要。因此“没有 Docker 也可导出”与“原工具链文件丢失仍可导出”是两个不同验收目标，后者尚未完成。
+读取命令已由 `BootstrapLocal` 避开 Docker 与模型客户端，但 `NewFrozenReadPolicy` 仍需打开原冻结配置中的工具链 lock 路径并比较摘要。因此“没有 Docker 也可导出”与“原工具链文件丢失仍可导出”是两个不同验收目标，后者尚未完成。
 
 可选后续方案：新 run 在冻结配置时持久化完整工具链 lock 的不可变快照，记录 run 与 snapshot Blob 的绑定；快照必须在需要它的执行阶段之前完成可恢复发布。采用原有 `toolchain.Lock.Digest()` 校验工具链身份，另用 Blob digest 校验快照字节，不能假设两者相同。导出用快照重建计划，不读取宿主原路径，也不重新执行 Docker。
 
@@ -150,11 +150,11 @@
 
 | 步骤 | 范围与交付 | 完成依据 |
 |---|---|---|
-| R1 | Package/Quality 的命名能力接口、reader 所需存储接口、只读响应与 sandbox 策略；推广 Solution/Data 配置构造 | 单独构造 Package/Quality 不需要上游 Executor、provider transport 或 Engine；真实证据拒绝用例继续通过 |
+| R1 | Package/Quality 的命名能力接口、reader 所需存储接口、只读响应与 sandbox 策略；推广 Solution/Data 配置构造 | 单独构造 Package/Quality 不需要上游 Executor、供应商传输或 Engine；真实证据拒绝用例继续通过 |
 | R2 | 独立当前流程配置和装配；集中兼容解释；单一固定流程定义与恢复策略 | MVP 主装配不调用 Slice 构造或从 Generation 抽基础资源；旧 revision 不发生隐式升级 |
 | R3 | 从 LocalRunService 移交阶段生命周期、typed 分派、提交适配、资源关闭所有权 | 阶段变化不需要改计时/取消；READY 仍原子提交；join/清理/Close 顺序保持 |
 | R4 | 用 Package 试点阶段发布能力；收敛普通调用的身份构造与诊断视图 | 阶段只声明发布意图，不接触低层物理调用/预留/writer 协议；原账本身份与计数一致 |
-| 单独决策 | frozen lock snapshot；如确有收益，再讨论 publication 专用持久化模型 | 分别提供迁移、历史读取、崩溃恢复与 GC 证明，不绑定前四步完成 |
+| 单独决策 | 冻结 lock 快照；如确有收益，再讨论发布专用持久化模型 | 分别提供迁移、历史读取、崩溃恢复与 GC 证明，不绑定前四步完成 |
 
 R1 可从一个纵向切片开始，不要求先重写全体 reader。R2/R3 如出现“必须先搬完所有阶段才能编译”，应缩小迁移单元，用内部适配保持旧实现可运行。每步独立提交，结构调整先不改数据库与摘要契约，便于回退代码；涉及持久化变更的步骤须另行约定回退限制。
 

@@ -1,18 +1,18 @@
-# ADR-0002: Run State, Review, Retry, and Local Recovery
+# ADR-0002：run 状态、评审、重试与本地恢复
 
-Status: Accepted (amended by ADR-0006)
+Status: Accepted（由 ADR-0006 修订）
 
 Date: 2026-08-30
 
-## Context
+## 背景
 
-Phase 1 needs durable restart and human review for a fixed local pipeline. It does not need distributed ownership or a general workflow engine.
+阶段 1 需要针对固定本地流水线的持久化重启与人工评审。它不需要分布式所有权或通用工作流引擎。
 
-## Decision
+## 决策
 
-### Run states
+### run 状态
 
-The closed run state set is:
+封闭的 run 状态集合为：
 
 - CREATED
 - RUNNING
@@ -22,42 +22,42 @@ The closed run state set is:
 - FAILED
 - CANCELLED
 
-READY is unreachable until Slice 5 atomically binds the same-run verified package occurrence and final quality report.
+在 Slice 5 原子地绑定同一 run 的已验证题包 occurrence 与最终质量报告之前，READY 不可达。
 
-### Stage and attempt states
+### 阶段与尝试状态
 
-A compiled stage has PENDING, RUNNING, SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, or CANCELLED state. Each physical execution is an append-only stage attempt with RUNNING, SUCCEEDED, BLOCKED, NEEDS_REVIEW, FAILED, CANCELLED, or INTERRUPTED state.
+编译后的阶段具有 PENDING、RUNNING、SUCCEEDED、BLOCKED、NEEDS_REVIEW、FAILED 或 CANCELLED 状态。每次物理执行都是一条只追加的阶段尝试，具有 RUNNING、SUCCEEDED、BLOCKED、NEEDS_REVIEW、FAILED、CANCELLED 或 INTERRUPTED 状态。
 
-An abnormal process exit can leave the run and current attempt recorded as RUNNING. The next manual resume command acquires the per-run process lock, reconciles unfinished sandbox work, records the interrupted attempt, and starts or replays the current stage according to its domain evidence.
+异常的进程退出可能使 run 与当前尝试被记录为 RUNNING。下一次人工 resume 命令会获取每 run 进程锁，对未完成的沙箱工作进行对账，记录被中断的尝试，并根据其领域证据启动或重放当前阶段。
 
-### Retry and blocked resume
+### 重试与阻塞后恢复
 
-Retry is bounded and owned by the current stage policy. A physical retry gets a new attempt ordinal and call record while retaining the stable logical idempotency key. Unknown external send boundaries must reconcile the original identity or settle conservatively into a typed pause or failure.
+重试是有界的，并由当前阶段策略负责。物理重试获得新的尝试序号与调用记录，同时保留稳定的逻辑幂等键。未知的外部发送边界必须对账原始身份，或保守地结算为类型化的暂停或失败。
 
-BLOCKED stores the current stage input digest, dependency identity, policy digest, error evidence, and retry-after time. Manual resume creates a fresh attempt of that same stage. Its first authorized operation revalidates the dependency through the ordinary metered port and current policy; stale capability data cannot by itself resume work.
+BLOCKED 保存当前阶段输入摘要、依赖身份、策略摘要、错误证据与重试等待时间。人工 resume 会为该同一阶段创建一次全新尝试。其首个被授权的操作通过普通计量端口与当前策略重新校验依赖；过期的能力数据本身不能恢复工作。
 
 ### ReviewDecision
 
-ReviewDecision kinds are REVISE, RETRY, WAIVE, and REJECT. Their lifecycle is PENDING, APPLIED, REJECTED, or STALE.
+ReviewDecision 的种类为 REVISE、RETRY、WAIVE 与 REJECT。其生命周期为 PENDING、APPLIED、REJECTED 或 STALE。
 
-Review commands create an immutable PENDING decision. They do not directly mutate generated content or advance the run. Manual resume applies exactly one matching decision in a short transaction after validating run version, revision, evidence, policy, and budget bindings.
+评审命令创建不可变的 PENDING 决策。它们不直接修改生成内容，也不推进 run。人工 resume 在校验 run 版本、修订号、证据、策略与预算绑定之后，于一个短事务中恰好应用一个匹配的决策。
 
-### Cancellation
+### 取消
 
-The cancel command inserts one idempotent control request. A foreground executor polls it, cancels the root context, stops authorizing new work, and settles already-authorized effects.
+取消命令插入一条幂等的控制请求。前台执行器轮询它，取消根上下文，停止授权新工作，并结算已经授权的效果。
 
-A run cannot become CANCELLED until every untrusted sandbox target is proven stopped. If no executor holds the process lock, the cancel command may acquire it, reconcile the exact persisted sandbox resources, and commit the terminal state. Cleanup evidence may still be settled after cancellation, but no ordinary stage work may start.
+在每一个不受信任的沙箱目标都被证明已停止之前，run 不能变为 CANCELLED。如果没有执行器持有进程锁，取消命令可以获取它，对精确持久化的沙箱资源进行对账，并提交终态。清理证据仍可在取消之后结算，但任何普通阶段工作都不得启动。
 
-## Consequences
+## 后果
 
-- Seven run states are sufficient for CLI presentation and persistence.
-- Restart behavior is current-stage and domain-specific.
-- Review is immutable, auditable, and applied only by the coordinator.
-- Cancellation remains responsive without allowing two executors for one run.
-- Docker stop safety is represented by SandboxExecution state, not an extra run mode.
+- 七个 run 状态足以用于 CLI 呈现与持久化。
+- 重启行为针对当前阶段且领域特定。
+- 评审不可变、可审计，且仅由协调器应用。
+- 取消保持响应性，同时不允许一个 run 出现两个执行器。
+- Docker 停止安全性由 SandboxExecution 状态表示，而不是额外的 run 模式。
 
-## Superseded design
+## 被取代的设计
 
 <!-- Superseded design: begin -->
-The earlier design required NORMAL/PROBING/QUIESCING modes, execution leases, fencing epochs, observation tickets, and generic recovery intents. ADR-0006 replaces those mechanisms with one OS-backed run lock, expected-version database writes, fresh same-stage attempts, and domain-specific reconciliation.
+更早的设计要求 NORMAL、探测中、静默中三种模式，以及执行租约、栅栏纪元、观察票据和通用恢复意图。ADR-0006 用一把由操作系统支撑的 run 锁、期望版本的数据库写入、全新的同阶段尝试和领域特定的对账取代了这些机制。
 <!-- Superseded design: end -->

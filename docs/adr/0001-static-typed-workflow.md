@@ -1,47 +1,47 @@
-# ADR-0001: Static Typed CPGen Pipeline and Activity Contracts
+# ADR-0001：静态类型化 CPGen 流水线与活动契约
 
-Status: Accepted (amended by ADR-0006)
+Status: Accepted（由 ADR-0006 修订）
 
 Date: 2026-08-30
 
-## Context
+## 背景
 
-CPGen needs an auditable path from a generation request to a verified contest package. Adjacent stages must exchange versioned domain values without giving stage code control over persistence, Docker, or unrestricted artifact publication.
+CPGen 需要一条从生成请求到经过验证的竞赛题包的可审计路径。相邻阶段必须交换带版本的领域值，同时不得让阶段代码掌控持久化、Docker 或不受限制的制品发布。
 
-## Decision
+## 决策
 
-Phase 1 uses a statically assembled typed Go pipeline. The binary contains a concrete constructor for the ordered Idea, Statement, Similarity, Solution, Data, Judge, Quality, and Package stages. Slice 1 begins with a deterministic Fake pipeline that exercises the same coordinator and persistence boundaries.
+阶段 1 使用静态组装的类型化 Go 流水线。二进制中为有序的 Idea、Statement、Similarity、Solution、Data、Judge、Quality 和 Package 阶段各包含一个具象构造函数。Slice 1 从一条确定性的 Fake 流水线开始，它演练同一套协调器与持久化边界。
 
-Each stage contract has:
+每个阶段契约包含：
 
-- a concrete, versioned input type and output type;
-- an immutable RunView plus value or copied inputs;
-- only the metered ports authorized for that stage;
-- explicit typed outcomes for success, blocking, review, permanent failure, and cancellation;
-- deterministic input and output digests used for restart and downstream invalidation.
+- 具象、带版本的输入类型与输出类型；
+- 一个不可变的 RunView，加上值输入或复制后的输入；
+- 仅该阶段被授权的计量端口；
+- 针对成功、阻塞、评审、永久失败与取消的显式类型化结果；
+- 用于重启与下游失效的确定性输入与输出摘要。
 
-The application coordinator owns stage selection, persistence, transitions, retry entry, and result commit. Stage code cannot receive SQLite handles, repositories, the run process lock, raw Docker clients, unrestricted Blob writers, or mutable run state. A port may expose only the narrow capability required by the stage and must return CallTrace and budget evidence when it crosses an accounted boundary.
+应用协调器拥有阶段选择、持久化、状态转移、重试入口与结果提交。阶段代码不得接收 SQLite 句柄、仓储、run 进程锁、原始 Docker 客户端、不受限制的 Blob 写入器或可变 run 状态。端口只能暴露该阶段所需的窄能力，并且当它跨越计费边界时必须返回 CallTrace 与预算证据。
 
-Workflow revision and schema version select a compatible compiled definition. Persisted names and ordinals are audit and compatibility data; they do not define an arbitrary graph. Runtime registration and map[string]any cannot bypass compile-time contracts.
+工作流修订号与 schema 版本共同选择一个兼容的编译期定义。持久化的名称与序号属于审计与兼容性数据；它们并不定义任意图。运行时注册与 map[string]any 不能绕过编译期契约。
 
-## Consequences
+## 后果
 
-- Interface drift is caught at compile time.
-- Tests can copy RunView values and use deterministic Fake ports.
-- External I/O remains outside SQLite write transactions.
-- A later durable-workflow product can wrap the same serializable inputs, outputs, and idempotent application services without changing domain stage logic.
-- Adding or reordering a stage requires a workflow-revision change and explicit downstream invalidation rules.
+- 接口漂移在编译期被捕获。
+- 测试可以复制 RunView 值并使用确定性的 Fake 端口。
+- 外部 I/O 保持在 SQLite 写事务之外。
+- 后续的持久化工作流产品可以包装同样的可序列化输入、输出与幂等应用服务，而无需改动领域阶段逻辑。
+- 新增或重排阶段需要变更工作流修订号，并制定明确的下游失效规则。
 
-## Prohibited shortcuts
+## 被禁止的捷径
 
-- heterogeneous stage registries or reflection-selected control flow;
-- mutable shared context passed between stages;
-- repositories or infrastructure clients passed directly to stage code;
-- unversioned payloads or untyped maps at stage boundaries;
-- publishing artifacts without the metered artifact port and occurrence binding.
+- 异构的阶段注册表或由反射选择的控制流；
+- 在阶段之间传递的可变共享上下文；
+- 直接传给阶段代码的仓储或基础设施客户端；
+- 阶段边界上的无版本载荷或无类型 map；
+- 未经计量制品端口与 occurrence 绑定就发布制品。
 
-## Superseded design
+## 被取代的设计
 
 <!-- Superseded design: begin -->
-The original ADR text described a reusable generic Step[I,O] runtime as the workflow center. ADR-0006 supersedes that implication: typed contracts remain, while the concrete CPGen coordinator owns the fixed stage sequence.
+最初的 ADR 文本把可复用的泛型 Step[I,O] 运行时描述为工作流中心。ADR-0006 取代了该含义：类型化契约保留，而具象的 CPGen 协调器掌握固定的阶段序列。
 <!-- Superseded design: end -->
