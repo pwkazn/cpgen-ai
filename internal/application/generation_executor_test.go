@@ -365,11 +365,13 @@ func newGenerationExecutorFixtureWithWorkflow(t *testing.T, maxCalls int64, repa
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "generation.db")
+	busyTimeout := time.Second
 	clock := newRecordingClock(time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC))
 	if workflow.HasSolutionStages(revision) {
 		clock = newRecordingClock(time.Now().UTC())
+		busyTimeout = 5 * time.Second
 	}
-	store, err := openFreshApplicationSQLite(t, sqlite.Config{Path: path, BusyTimeout: time.Second, MaxReaders: 4}, clock)
+	store, err := openFreshApplicationSQLite(t, sqlite.Config{Path: path, BusyTimeout: busyTimeout, MaxReaders: 4}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
