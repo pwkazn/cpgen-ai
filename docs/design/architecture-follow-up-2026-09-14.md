@@ -14,7 +14,7 @@
 | 执行器依赖链 | Package/Quality 已使用 Reader、Admission、Publisher；但 `PackageReader → QualityReader → DataReader → SolutionReader` 仍依赖具体类型，Solution/Data 构造器仍接收上游执行器 | 已解除执行对象的部分耦合，能力和构造边界仍需收敛 |
 | 里程碑成为生产概念 | `NewMVPRunService` 已被生产 Bootstrap 调用；但 `MVPRunServiceConfig = Slice2RunServiceConfig`，实际装配仍从 Generation 内部取得存储、锁和时钟 | 入口名称改善，当前流程与兼容装配尚未真正独立 |
 | 总协调器过大 | 已有不持有整个服务指针的 `stageControl`、`runRecoveryHandler`、`runReviewHandler`；但 `LocalRunService` 仍持有各执行器、Docker 配置、关闭函数，以及输入、结果、提交分派 | 生命周期拆分有实际效果，下一步应移交职责及其依赖，而不是继续搬方法到新文件 |
-| 审计接线成本高 | 已有 `CallCoordinator`、`DraftExecution`、发布 session；但本地发布仍通过 `RunBoundLLMLedger`，Package 使用 sandbox 身份及 `CallSandboxCompile` | 先让阶段只看到所需能力；账本是否可减少，按故障边界逐项论证 |
+| 审计接线成本高 | 已有 `CallCoordinator`、`DraftExecution`、发布 session；但本地发布仍通过 `RunBoundLLMLedger`，Package 使用 沙箱 身份及 `CallSandboxCompile` | 先让阶段只看到所需能力；账本是否可减少，按故障边界逐项论证 |
 
 主要代码入口：[调度](../../internal/application/compiled_graph.go)、[执行服务](../../internal/application/run_service.go)、[当前装配](../../internal/application/generation_run_service.go)、[历史适配](../../internal/application/legacy_executor_helpers_test.go)、[Package](../../internal/application/package_executor.go)、[读取链](../../internal/application/package_reader.go)。
 
@@ -54,7 +54,7 @@
 2. Quality 只声明 Judge 输入及报告的读取方法，Data 只声明已验证 Solution 的读取方法。使用方无需要求一个完整上游 Reader，更无需上游 Executor。
 3. 为 reader 声明包含所有实际读取方法的命名接口，把“存储缺少方法”的错误提前到装配或编译时。不要把 RuntimeStore 或 RunLLMStore 全部塞入这些接口。
 4. 从 `StructuredLLMCalls.ReadCommitted` 提取真正只读的证明核验对象；生产调用与离线读取共用身份、摘要和响应验证函数。只读构造不再需要实现 `GeneratePhysical` 的替身。
-5. 将 sandbox 的计划重建输入与 Engine/Watchdog 分开。Reader 接收冻结工具链、引擎身份摘要、协议和限制等证明策略；运行器才持有可调用的 Engine 和生命周期资源。
+5. 将 沙箱 的计划重建输入与 Engine/Watchdog 分开。Reader 接收冻结工具链、引擎身份摘要、协议和限制等证明策略；运行器才持有可调用的 Engine 和生命周期资源。
 6. 给 Solution/Data 提供能力配置构造器，在 Bootstrap 显式装配共享的存储、策略、准入和调用能力。不要仅删除原有“同一 StageAdmission”检查：新的装配仍须保证 store、run、attempt、冻结策略的一致绑定。
 
 接口只用于真实的替换与权限边界，不要求给每个结构体配一份同形接口。`PackageInputs` 这类返回值可先使用应用层对象，避免修改已持久化 JSON。拿到 DTO 也不等于来源合法；真实 reader 必须保留错 run、错 attempt、未提交、错误摘要和损坏 Blob 的拒绝行为。
@@ -75,7 +75,7 @@
 | `slice2.idea.statement.similarity.v1` | 保留代码支持的旧序列；不因此新增当前 CLI 配置选项 |
 | `slice2.idea.statement.similarity.checkpoint.v1` | 保留 similarity 后的非豁免 preview checkpoint |
 | `slice3.idea.statement.similarity.solution.checkpoint.v1` | 保留 solution 验证后的历史 checkpoint |
-| `mvp.idea.statement.similarity.solution.data.judge.package.v1` | 当前完整普通题流程；只有 package 原子提交可以产生 READY |
+| `mvp.idea.statement.similarity.solution.data.judge.package.v1` | 当前完整普通题流程；只有 题包 原子提交可以产生 READY |
 
 这里区分“二进制中有定义”“当前配置允许新建”“能够读取”“满足配置及资源前提时可恢复”。不能从调度器支持旧序列推断 CLI 可以无条件恢复任意历史 run。当前恢复会检查 revision 和配置 digest，这一拒绝边界必须保留。
 
@@ -90,15 +90,15 @@
 | 组件 | 拥有什么 | 不需要持有什么 |
 |---|---|---|
 | Bootstrap/Application | SQLite、锁管理器、Docker 工厂及 Close 所有权；校验完整装配 | 业务阶段推进状态 |
-| RunService | Generate/Resume/Cancel 用例、run 锁与 artifact 锁的顺序、调用固定调度和恢复 | 每个业务 Executor 字段、Docker 配置细节 |
+| RunService | Generate/Resume/Cancel 用例、run 锁与 制品 锁的顺序、调用固定调度和恢复 | 每个业务 Executor 字段、Docker 配置细节 |
 | 固定阶段分派 | 各阶段的输入读取、typed 执行适配和结果绑定 | 后台计时、资源关闭、通用注册能力 |
 | 阶段生命周期 | Begin/Resume attempt、RunView、现有 stageControl、结果提交；使用窄的清理能力 | 全部历史请求解释器、具体 Docker Engine |
-| 恢复/终态清理 | 已有调用和发布身份的结算、精确 sandbox 清理、恢复计时 | 新业务工作规划和新发送授权 |
+| 恢复/终态清理 | 已有调用和发布身份的结算、精确 沙箱 清理、恢复计时 | 新业务工作规划和新发送授权 |
 | 已有 Review handler | 读取并应用绑定当前版本/证据的持久化复核决定 | 模型与 Docker 执行器 |
 
 实施时把现有 `stageExecution` 作为收敛起点。阶段 adapter 负责把自己的 typed 结果转换为提交材料，生命周期组件处理共同的开始、控制与完成协议。可以保留显式 switch；不要为了删除 switch 引入反射或动态插件。
 
-普通完成与 Package 完成保留不同的事务命令。`finishExecution` 当前使用 `FinalizeVerifiedPackage` 同时绑定质量摘要、package occurrence 和 READY；不能抽成“先发布包、再 SetReady”的两步通用接口。缓存索引仍属于提交后的可选操作，不得让缓存失败撤销或掩盖已提交阶段。
+普通完成与 Package 完成保留不同的事务命令。`finishExecution` 当前使用 `FinalizeVerifiedPackage` 同时绑定质量摘要、题包 occurrence 和 READY；不能抽成“先发布包、再 SetReady”的两步通用接口。缓存索引仍属于提交后的可选操作，不得让缓存失败撤销或掩盖已提交阶段。
 
 取消也不能被简化成写一个 CANCELLED：先持久化请求，执行所有者停止工作并 join poller，结算调用/计时并取得清理证明，最后提交终态。若以后拆出不需要 Docker 的取消请求写入入口，应另行明确它返回“请求已记录”还是“已取消”，不能静默改变现有 CLI 语义。
 
@@ -114,11 +114,11 @@
 | 逻辑操作 / CallRecord | 一次业务操作的请求、策略、幂等范围、结果选择或缓存来源；一次 attempt 可有多个操作 | 调用能力内部创建；业务声明稳定操作键，不手工组装全部 ID |
 | 物理调用 | 某次被计划的物理尝试，以及授权、发送、成功、失败或未知边界；记录存在不代表已经发生 HTTP 请求 | CallCoordinator/适配器推进，receipt/reconciler 恢复；已知可重试失败与未知发送分开 |
 | 预留 | 副作用前已授权的预算上界和后续结算/释放；不能从成功结果推断尚未结算的授权 | 账本事务管理；不因本地串行而删除，进程崩溃仍留下未完成授权 |
-| writer token | 发布者、声明、封存状态、Blob 绑定和临时 pin；跨 SQLite 与文件系统的发布窗口 | artifact session 管理；业务只返回待发布状态 |
+| writer token | 发布者、声明、封存状态、Blob 绑定和临时 pin；跨 SQLite 与文件系统的发布窗口 | 制品 session 管理；业务只返回待发布状态 |
 | receipt | 当前私有 receipt 保存响应/结果及其请求与物理身份绑定，支持“结果已封存但账本尚未完成”的回放；并非天然等同于供应商签发的收据 | 供应商/发布适配器创建，恢复和只读核验消费；摘要不能代替内容 |
 | Blob / digest | Blob 是内容；digest 用于比较内容、策略与请求身份 | digest 可由原始字节重算，但持久化的期望 digest 是不可变绑定，不能一并删掉 |
 | occurrence | 某 run/attempt 以什么角色、路径、来源提交引用了某 Blob；相同内容可以有多个合法使用关系 | 阶段提交创建；不能仅按 Blob digest 推导授权来源 |
-| pin / 清理证明 | 临时内容的存活保护及外部资源已清理的事实 | 发布/GC 与 sandbox 生命周期拥有；不从“阶段完成”反推资源已清理 |
+| pin / 清理证明 | 临时内容的存活保护及外部资源已清理的事实 | 发布/GC 与 沙箱 生命周期拥有；不从“阶段完成”反推资源已清理 |
 | run 投影 / 预算账户 | 当前实现使用版本化投影执行 CAS 和预算准入，是原子事务中的运行权威 | 即使部分聚合理论上可重算，本轮仍保留；不能假设现有 events 足以重建全部状态 |
 | RunView / BudgetSnapshot / CallTrace | 面向读取或阶段执行的组合结果、剩余额度与调用轨迹 | 从已提交记录构造，不新增独立可变账本；已嵌入历史 receipt 的序列化内容保持兼容 |
 | 缓存索引 | 已提交结果的可选查找加速 | 保留失败不影响阶段完成的语义；索引可重建与来源证明可删除是两回事 |
@@ -132,7 +132,7 @@
 
 这几种窗口必须可以区分。现有 `TestLLMReplayProcessCrashBoundaries` 覆盖 before-seal、sealed、finalized、sent、completed、finished，并检查恢复后 HTTP 次数仍为 1。可靠性目标包含“无可信结果时停下”，不承诺跨任意外部服务的全局恰好一次。
 
-**最有价值的减法是缩小业务可见协议。** 建议在现有实现上分别收敛受控模型调用、受控 sandbox 执行、阶段产物发布三种能力。它们内部继续共用已经验证的账本协议；阶段只提供业务请求、稳定操作键、声明和结果，不自行创建预留、物理 ID、writer token 或恢复分支。
+**最有价值的减法是缩小业务可见协议。** 建议在现有实现上分别收敛受控模型调用、受控 沙箱 执行、阶段产物发布三种能力。它们内部继续共用已经验证的账本协议；阶段只提供业务请求、稳定操作键、声明和结果，不自行创建预留、物理 ID、writer token 或恢复分支。
 
 一个具体试点是 Package 发布：当前 `packagePublicationIdentity` 构造 `SandboxAuthorizationIdentity` 并设置 `CallSandboxCompile`；`SandboxArtifactSink` 又通过 `RunBoundLLMLedger` 记录 `PhysicalLocalArtifactWrite`。这证明命名和公开能力混合了不同用途，不证明账本字段可以立即删除。
 
@@ -150,7 +150,7 @@
 
 | 步骤 | 范围与交付 | 完成依据 |
 |---|---|---|
-| R1 | Package/Quality 的命名能力接口、reader 所需存储接口、只读响应与 sandbox 策略；推广 Solution/Data 配置构造 | 单独构造 Package/Quality 不需要上游 Executor、供应商传输或 Engine；真实证据拒绝用例继续通过 |
+| R1 | Package/Quality 的命名能力接口、reader 所需存储接口、只读响应与 沙箱 策略；推广 Solution/Data 配置构造 | 单独构造 Package/Quality 不需要上游 Executor、供应商传输或 Engine；真实证据拒绝用例继续通过 |
 | R2 | 独立当前流程配置和装配；集中兼容解释；单一固定流程定义与恢复策略 | MVP 主装配不调用 Slice 构造或从 Generation 抽基础资源；旧 revision 不发生隐式升级 |
 | R3 | 从 LocalRunService 移交阶段生命周期、typed 分派、提交适配、资源关闭所有权 | 阶段变化不需要改计时/取消；READY 仍原子提交；join/清理/Close 顺序保持 |
 | R4 | 用 Package 试点阶段发布能力；收敛普通调用的身份构造与诊断视图 | 阶段只声明发布意图，不接触低层物理调用/预留/writer 协议；原账本身份与计数一致 |

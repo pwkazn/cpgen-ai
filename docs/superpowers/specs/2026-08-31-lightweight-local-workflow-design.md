@@ -1,93 +1,93 @@
-# Lightweight Local Workflow Design
+# 轻量本地工作流设计
 
 Status: Accepted
 
 Date: 2026-08-31
 
-## 1. Decision
+## 1. 决策
 
-Phase 1 uses one foreground Go CLI executor per run on a single host, a local SQLite database, private content-addressed artifact storage, and the existing detached Docker watchdog. Different runs may use separate CLI processes concurrently. It does not require Temporal, hosted LangGraph, AutoGen, CrewAI, a daemon, a task queue, or any workflow-hosting service. The 2026-09-08 ADR-0006 amendment admits LangGraphGo only for fixed serial assembly inside `internal/application` and LangChainGo only inside `internal/agent`; SQLite and CPGen domain ledgers retain all durable authority.
+阶段 1 在单台宿主上为每个 run 使用一个前台 Go CLI 执行器、一个本地 SQLite 数据库、私有的内容寻址制品存储，以及现有的分离式 Docker 看门狗。不同的 run 可以并发使用不同的 CLI 进程。它不需要 Temporal、托管式 LangGraph、AutoGen、CrewAI、守护进程、任务队列或任何工作流托管服务。2026-09-08 的 ADR-0006 修正案仅允许 LangGraphGo 用于 `internal/application` 内的固定串行装配，仅允许 LangChainGo 用于 `internal/agent` 内；SQLite 与 CPGen 领域账本保留全部持久权威。
 
-The normative contract is: one foreground executor per run, a per-run process lock, a fixed pipeline, and no workflow-hosting service.
+规范性契约是：每个 run 一个前台执行器、每 run 一个进程锁、一条固定流水线，且无工作流托管服务。
 
-The workflow is a fixed, statically assembled CPGen pipeline. SQLite persists the current run and stage projection for audit and restart; it is not an event-sourced general workflow engine. Restart recovery reruns or reconciles the current domain stage under a local process lock. The design does not attempt distributed ownership, generic DAG scheduling, or exactly-once execution across external systems.
+该工作流是一条固定的、静态装配的 CPGen 流水线。SQLite 为审计与重启持久化当前 run 与阶段投影；它不是事件溯源的通用工作流引擎。重启恢复在本地进程锁下重跑或对账当前领域阶段。该设计不尝试分布式所有权、通用 DAG 调度，也不尝试跨外部系统的恰好一次执行。
 
-This decision supersedes the uncommitted 16-task Slice 1 plan that proposed a general durable runtime with execution leases, fencing epochs, observation tickets, three-phase recovery intents, and generic cleanup takeover.
+该决策取代了未提交的 16 任务 Slice 1 计划，该计划曾提议一个通用持久运行时，包含执行租约、栅栏纪元、观察票据、三阶段恢复意图与通用清理接管。
 
-## 2. Product Constraints
+## 2. 产品约束
 
-The Phase 1 runtime is intentionally limited to:
+阶段 1 运行时被有意限制为：
 
-- one host and one local project workspace;
-- foreground CLI execution with no background workflow service;
-- a fixed, versioned pipeline compiled into the Go binary;
-- manual `run resume` after `BLOCKED`, `NEEDS_REVIEW`, or process restart;
-- no remote workers, distributed queue, cross-host checkpoint, web/API server, or arbitrary runtime plugin graph;
-- offline operation except for explicitly configured LLM and Similarity calls;
-- deterministic Fake adapters in ordinary tests and opt-in real-service smoke tests.
+- 一台宿主与一个本地项目工作区；
+- 前台 CLI 执行，无后台工作流服务；
+- 一条编译进 Go 二进制文件的固定、带版本的流水线；
+- 在 `BLOCKED`、`NEEDS_REVIEW` 或进程重启之后人工执行 `run resume`；
+- 没有远程 worker、分布式队列、跨宿主检查点、web/API 服务器或任意运行时插件图；
+- 除显式配置的 LLM 与查重调用外离线运行；
+- 普通测试中使用确定性的 Fake 适配器，冒烟测试中按需选用真实服务。
 
-If these constraints change, adopting Temporal is a separate architecture decision rather than an incremental expansion of this SQLite state machine.
+如果这些约束发生变化，采用 Temporal 是一项独立的架构决策，而不是对这套 SQLite 状态机的增量扩展。
 
-## 3. What ADR-0001 Still Means
+## 3. ADR-0001 仍然意味着什么
 
-ADR-0001 remains valuable as a domain-contract decision, not as a mandate to build a workflow runtime. Its required properties are:
+ADR-0001 作为一项领域契约决策仍然有价值，但它不是构建工作流运行时的授权。其必需属性为：
 
-1. Adjacent pipeline stages use typed Go inputs and outputs.
-2. A stage receives an immutable `RunView` and value/copy inputs.
-3. A stage receives only the metered ports it is authorized to use.
-4. A stage cannot receive a repository, raw Docker client, unrestricted artifact writer, or mutable run context.
-5. Workflow revision, schema version, configuration digest, and downstream invalidation rules are auditable.
-6. `map[string]any` and runtime registration cannot bypass type checks.
+1. 相邻流水线阶段使用类型化的 Go 输入与输出。
+2. 阶段接收不可变的 `RunView` 以及值/副本输入。
+3. 阶段只接收其被授权使用的计量端口。
+4. 阶段不能接收仓储、裸 Docker 客户端、不受限的制品写入器或可变的 run 上下文。
+5. 工作流修订号、schema 版本、配置摘要与下游失效规则可审计。
+6. `map[string]any` 与运行时注册不能绕过类型检查。
 
-The application coordinator, not a generic `Step[I,O]` runtime, owns persistence and stage transitions. A concrete typed constructor assembles the Phase 1 pipeline. Later documentation should rename ADR-0001 to “Static Typed CPGen Pipeline and Activity Contracts.”
+由应用协调器（而非通用的 `Step[I,O]` 运行时）拥有持久化与阶段状态转移。一个具体的类型化构造函数装配阶段 1 流水线。后续文档应将 ADR-0001 更名为“静态类型化 CPGen 流水线与活动契约”。
 
-## 4. Responsibility Boundary
+## 4. 职责边界
 
-### 4.1 Minimal local coordinator
+### 4.1 最小本地协调器
 
-The coordinator owns only:
+协调器只拥有：
 
-- acquiring a local per-run process lock;
-- loading the immutable request/config/workflow revision;
-- selecting the current fixed stage;
-- creating a stage attempt and stable idempotency keys;
-- invoking that stage outside SQLite write transactions;
-- committing the stage result, budget usage, artifacts, evidence, and next projection atomically where they share one database;
-- stopping at `BLOCKED`, `NEEDS_REVIEW`, `READY`, `FAILED`, or `CANCELLED`;
-- cleaning or reconciling unfinished Docker work before resuming ordinary stages.
+- 获取本地的每 run 进程锁；
+- 加载不可变的请求/配置/工作流修订号；
+- 选择当前的固定阶段；
+- 创建阶段尝试与稳定的幂等键；
+- 在 SQLite 写事务之外调用该阶段；
+- 在共享同一数据库的范围内原子地提交阶段结果、预算用量、制品、证据与下一个投影；
+- 在 `BLOCKED`、`NEEDS_REVIEW`、`READY`、`FAILED` 或 `CANCELLED` 处停止；
+- 在恢复普通阶段之前清理或对账未完成的 Docker 工作。
 
-It does not implement a generic scheduler, task queue, lease service, timer service, visibility index, replay engine, or arbitrary DAG.
+它不实现通用调度器、任务队列、租约服务、定时器服务、可见性索引、重放引擎或任意 DAG。
 
-### 4.2 CPGen domain mechanisms retained
+### 4.2 保留的 CPGen 领域机制
 
-These mechanisms are specific to the product and remain implemented locally:
+这些机制是产品特有的，仍在本地实现：
 
-- Docker sandbox plans, deterministic names/labels, target verdicts, resource evidence, and detached watchdog safety;
-- Judge and quality-gate evidence;
-- LLM/Similarity/Docker/artifact budget accounting and `CallTrace` provenance;
-- immutable Blob storage, verified reads, artifact occurrences, package staging, and publication;
-- revisions, downstream invalidation, review decisions, waivers, and package verification;
-- provider-specific idempotency and conservative handling of unknown external-call boundaries.
+- Docker 沙箱计划、确定性名称/标签、目标判定、资源证据与分离式看门狗安全；
+- 评测与质量门禁证据；
+- LLM/查重/Docker/制品预算记账与 `CallTrace` 溯源；
+- 不可变 Blob 存储、经校验的读取、制品 occurrence、题包暂存与发布；
+- 修订号、下游失效、评审决策、豁免与题包校验；
+- provider 特有的幂等性，以及对未知外部调用边界的保守处理。
 
-### 4.3 Generic mechanisms deliberately omitted
+### 4.3 有意省略的通用机制
 
-Phase 1 does not build:
+阶段 1 不构建：
 
-- execution-lease heartbeat or monotone fencing epochs;
-- distributed ownership or remote-worker claims;
-- generic retry/backoff/timer tables;
-- generic event-sourced snapshots or workflow replay;
-- observation ticket/floor machinery for `BLOCKED` recovery;
-- three-phase workflow recovery intents;
-- generic startup janitor or generic cleanup-only workflow mode;
-- a workflow visibility/search subsystem;
-- a heterogeneous Step registry.
+- 执行租约心跳或单调栅栏纪元；
+- 分布式所有权或远程 worker 声明；
+- 通用重试/退避/定时器表；
+- 通用事件溯源快照或工作流重放；
+- 用于 `BLOCKED` 恢复的观察票据/观察下限机制；
+- 三阶段工作流恢复意图；
+- 通用启动清理器或仅清理的通用工作流模式；
+- 工作流可见性/搜索子系统；
+- 异构 Step 注册表。
 
-## 5. Runtime Model
+## 5. 运行时模型
 
-### 5.1 Run states
+### 5.1 Run 状态
 
-The closed run state is:
+封闭的 run 状态集为：
 
 ```text
 CREATED
@@ -99,43 +99,43 @@ FAILED
 CANCELLED
 ```
 
-`READY` remains unreachable until Slice 5 atomically binds the verified package occurrence and final quality report. There are no `PROBING` or `QUIESCING` workflow modes. Dependency probing is an ordinary new attempt of the blocked stage; Docker cleanup is represented by `SandboxExecution` state rather than a general workflow mode.
+`READY` 在 Slice 5 原子地绑定已验证的题包 occurrence 与最终质量报告之前仍不可达。不存在 `PROBING`（探测中）或 `QUIESCING`（静默中）的工作流模式。依赖探测是被阻塞阶段的普通新尝试；Docker 清理由 `SandboxExecution` 状态表示，而不是某种通用工作流模式。
 
-### 5.2 Fixed stages
+### 5.2 固定阶段
 
-The pipeline is statically assembled from versioned typed stages. Phase 1 supplies a small deterministic Fake pipeline that exercises persistence and resume. Slices 2–5 replace or extend the concrete typed constructor with the real Idea, Statement, Similarity, Solution, Data, Judge, Quality, and Package stages.
+流水线由带版本的类型化阶段静态装配而成。阶段 1 提供一条小型确定性 Fake 流水线，用于演练持久化与恢复。Slice 2–5 用真实的 Idea、Statement、Similarity、Solution、Data、Judge、Quality 与 Package 阶段替换或扩展该具体类型化构造函数。
 
-Every persisted stage record contains:
+每条持久化的阶段记录包含：
 
-- run ID, stage name, and ordinal;
-- workflow revision and schema version;
-- input digest and optional output digest;
-- attempt count and current attempt ID;
-- state, last typed error, and timestamps;
-- stable logical idempotency key;
-- references to committed artifact/evidence occurrences.
+- run ID、阶段名与序号；
+- 工作流修订号与 schema 版本；
+- 输入摘要与可选输出摘要；
+- 尝试次数与当前尝试 ID；
+- 状态、最后一次类型化错误与时间戳；
+- 稳定的逻辑幂等键；
+- 对已提交制品/证据 occurrence 的引用。
 
-There is no dynamic stage table that determines arbitrary graph edges. The binary’s typed constructor is authoritative; persisted stage names and workflow revision only select a compatible compiled definition.
+不存在决定任意图边的动态阶段表。二进制的类型化构造函数是权威来源；持久化的阶段名与工作流修订号只用于选择兼容的编译定义。
 
-### 5.3 Run process lock
+### 5.3 Run 进程锁
 
-Before mutating or executing a run, the CLI acquires an exclusive OS-backed lock on a deterministic per-run lock file under the private runtime directory. The operating system releases the lock when the process exits, including abnormal termination.
+在变更或执行某个 run 之前，CLI 在私有运行时目录下确定性的每 run 锁文件上获取独占的、由操作系统支撑的锁。进程退出时（包括异常终止）由操作系统释放该锁。
 
-The lock provides the single-host property actually required by Phase 1:
+该锁提供了阶段 1 实际需要的单宿主属性：
 
-- two CLI processes cannot execute the same run concurrently;
-- a crashed process cannot continue after the OS has released its lock;
-- different runs can execute concurrently;
-- read-only `show` and `events` commands do not require the execution lock;
-- `cancel` may insert an idempotent control request while another process owns the lock.
+- 两个 CLI 进程不能并发执行同一个 run；
+- 在操作系统释放其锁之后，已崩溃的进程无法继续；
+- 不同的 run 可以并发执行；
+- 只读的 `show` 与 `events` 命令不需要执行锁；
+- 在另一个进程持有锁时，`cancel` 可以插入一条幂等控制请求。
 
-The lock path is derived from a validated RunID; it is never user-selected. SQLite state is still protected with expected-version compare-and-swap, but there is no heartbeat, lease expiry, or fencing epoch.
+锁路径由经过校验的 RunID 推导而来，绝不由用户选择。SQLite 状态仍以期望版本比较并交换加以保护，但没有心跳、租约过期或栅栏纪元。
 
-## 6. Persistence Model
+## 6. 持久化模型
 
-### 6.1 Workflow projection tables
+### 6.1 工作流投影表
 
-The minimal workflow projection uses:
+最小工作流投影使用：
 
 ```text
 runs
@@ -146,101 +146,101 @@ control_requests
 review_decisions
 ```
 
-`runs` stores the immutable request/config/workflow digests, current state/stage/version, cancellation summary, active-time counters, and final package pointer. `stage_records` stores the latest projection for each compiled stage. `stage_attempts` is append-only audit for retries and restart. `run_events` is an append-only audit stream, not the source from which runtime state must be replayed.
+`runs` 存储不可变的请求/配置/工作流摘要、当前状态/阶段/版本、取消摘要、活跃时间计数器与最终题包指针。`stage_records` 存储每个已编译阶段的最新投影。`stage_attempts` 是用于重试与重启的追加式审计。`run_events` 是追加式审计流，而不是必须据此重放运行时状态的来源。
 
-Each state-changing command uses one short SQLite transaction to validate expected run version, update the projection, and append the corresponding event. No external I/O, hashing, fsync, Docker call, network call, or verified Blob read occurs while that transaction is open.
+每个改变状态的命令使用一个短 SQLite 事务来校验期望的 run 版本、更新投影并追加相应事件。在该事务打开期间，不发生任何外部 I/O、哈希、fsync、Docker 调用、网络调用或经校验的 Blob 读取。
 
-### 6.2 Domain ledger tables
+### 6.2 领域账本表
 
-Separate domain tables retain integrity where a simple stage projection is insufficient:
+在简单阶段投影不足之处，由独立的领域表保持完整性：
 
-- `budget_accounts` and `call_records`;
-- artifact declarations, writer tokens, Blobs, pins, and occurrences;
-- cache entries and their source/artifact references;
-- mutation claims and provenance records;
-- `sandbox_executions` and deterministic resource records;
-- packages, package occurrences, verification receipts, and quality reports.
+- `budget_accounts` 与 `call_records`；
+- 制品声明、写入器令牌、Blob、pin 与 occurrence；
+- 缓存条目及其来源/制品引用；
+- 变更声明与溯源记录；
+- `sandbox_executions` 与确定性资源记录；
+- 题包、题包 occurrence、校验回执与质量报告。
 
-These are product ledgers, not workflow scheduler tables. They use relational constraints to prevent cross-run provenance and budget corruption.
+这些是产品账本，不是工作流调度器表。它们使用关系约束来防止跨 run 的溯源与预算损坏。
 
-## 7. Stage Execution Protocol
+## 7. 阶段执行协议
 
-For one stage attempt, the coordinator performs:
+对于一次阶段尝试，协调器执行：
 
-1. Acquire the run process lock.
-2. Open/migrate SQLite and reconcile unfinished sandbox work for that run.
-3. Load and validate the immutable run projection and compiled workflow revision.
-4. In a short transaction, create or replay the stage attempt and stable logical idempotency key.
-5. Reserve the declared budget and effect records required by the stage.
-6. Execute network, Docker, hashing, and filesystem operations outside SQLite write transactions.
-7. Verify returned artifacts and external-call evidence.
-8. In a short transaction, settle budgets, attach artifact/evidence occurrences, finish the attempt, update the stage/run projection, and append events.
-9. Continue to the next compiled stage or stop in a pause/terminal state.
+1. 获取 run 进程锁。
+2. 打开/迁移 SQLite，并对该 run 未完成的沙箱工作进行对账。
+3. 加载并校验不可变的 run 投影与已编译的工作流修订号。
+4. 在一个短事务中创建或重放阶段尝试与稳定的逻辑幂等键。
+5. 预留该阶段声明的预算与所需的效果记录。
+6. 在 SQLite 写事务之外执行网络、Docker、哈希与文件系统操作。
+7. 校验返回的制品与外部调用证据。
+8. 在一个短事务中结算预算、附加制品/证据 occurrence、结束该尝试、更新阶段/run 投影并追加事件。
+9. 继续到下一个已编译阶段，或在暂停/终态处停止。
 
-The coordinator releases the process lock when the command exits. A run may remain `RUNNING` after abnormal termination; the next `resume` treats this as an interrupted current-stage attempt and applies the recovery rules below.
+协调器在命令退出时释放进程锁。异常终止后 run 可能仍为 `RUNNING`；下一次 `resume` 会将其视为被中断的当前阶段尝试，并应用下述恢复规则。
 
-## 8. Retry, Blocking, Review, and Cancellation
+## 8. 重试、阻塞、评审与取消
 
-### 8.1 Retry
+### 8.1 重试
 
-Retry is a bounded loop owned by the current domain stage and its policy. It is not a general retry engine. Each physical attempt gets a new ordinal and persisted `call_record`; the logical idempotency key remains stable. Retry stops when the stage succeeds, becomes blocked, requires review, fails permanently, is cancelled, or exhausts its stage budget.
+重试是由当前领域阶段及其策略拥有的有界循环。它不是通用重试引擎。每次物理尝试获得新的序号与持久化的 `call_record`；逻辑幂等键保持稳定。当阶段成功、变为阻塞、需要评审、永久失败、被取消或用尽阶段预算时，重试停止。
 
-An `UNKNOWN` external boundary cannot be converted into a normal retry with a new key. The adapter must reconcile the original provider/Docker identity when supported, otherwise charge the conservative reservation and return a typed review/blocking result.
+`UNKNOWN` 外部边界不能转换为使用新键的普通重试。在支持的情况下，适配器必须对账原始的 provider/Docker 身份，否则计入保守预留并返回类型化的评审/阻塞结果。
 
-### 8.2 BLOCKED resume
+### 8.2 BLOCKED 恢复
 
-`BLOCKED` stores the stage input digest, dependency identity, policy digest, error evidence, and retry-after time. `run resume` acquires the process lock and creates a fresh attempt of that same stage. That attempt probes the dependency through its normal metered port before performing ordinary work.
+`BLOCKED` 存储阶段输入摘要、依赖身份、策略摘要、错误证据与重试等待时间。`run resume` 获取进程锁并为同一阶段创建一次全新尝试。该尝试在开展普通工作之前，通过其常规计量端口探测依赖。
 
-No observation ticket/floor is needed: the run lock ensures an earlier owner is no longer executing, and only a probe result produced or verified by the new attempt can unblock it. Historical capability cache entries may be diagnostic, but cannot by themselves prove recovery unless the new attempt revalidates them under the current policy.
+无需观察票据/观察下限：run 锁确保先前的所有者不再执行，且只有新尝试产生或校验的探测结果才能解除阻塞。历史能力缓存条目可以用于诊断，但除非新尝试在当前策略下重新校验它们，否则其本身不能证明已恢复。
 
-### 8.3 Review
+### 8.3 评审
 
-Review commands create immutable `PENDING` decisions while the workflow command is not executing that run. `run resume` validates and applies exactly one matching decision in a short transaction. `REVISE`, `RETRY`, `WAIVE`, and `REJECT` retain the existing domain semantics and evidence bindings.
+在工作流命令未执行该 run 时，评审命令创建不可变的 `PENDING` 决策。`run resume` 在一个短事务中校验并恰好应用一个匹配的决策。`REVISE`、`RETRY`、`WAIVE` 与 `REJECT` 保留既有领域语义与证据绑定。
 
-### 8.4 Cancellation
+### 8.4 取消
 
-`run cancel` inserts one idempotent cancellation request. An active workflow command polls it and cancels its root context. If no workflow command holds the run lock, the cancel command may acquire the lock, reconcile sandbox resources, and commit `CANCELLED` itself.
+`run cancel` 插入一条幂等的取消请求。活跃的工作流命令轮询该请求并取消其根上下文。如果没有工作流命令持有 run 锁，取消命令可以自行获取锁、对账沙箱资源并提交 `CANCELLED`。
 
-The run cannot become `CANCELLED` until all untrusted targets are proven stopped. This safety rule belongs to `SandboxExecution`, not to a generic `QUIESCING` workflow mode.
+在所有不可信目标被证明已停止之前，run 不能变为 `CANCELLED`。该安全规则属于 `SandboxExecution`，而不属于通用的 `QUIESCING`（静默中）工作流模式。
 
-## 9. Crash Recovery
+## 9. 崩溃恢复
 
-Recovery is local and stage-specific:
+恢复是本地且阶段特定的：
 
-- If no external side effect was authorized, rerun the interrupted stage attempt.
-- If a call has a stable provider idempotency key, reconcile or replay that key.
-- If the send boundary is unknown and cannot be queried, settle conservatively and enter a typed pause/failure path.
-- If artifact bytes were published, verify the canonical Blob and attach or release the existing writer token; never publish over conflicting bytes.
-- If Docker work was started, use the persisted `SandboxExecution`, deterministic resource identities, and watchdog evidence to stop and reconcile it before rerunning the stage.
-- If the prior stage result and all domain ledgers were committed, the projection is already authoritative and the next stage begins normally.
+- 如果未授权任何外部副作用，则重跑被中断的阶段尝试。
+- 如果某次调用具有稳定的 provider 幂等键，则对账或重放该键。
+- 如果发送边界未知且无法查询，则保守结算并进入类型化的暂停/失败路径。
+- 如果制品字节已发布，则校验规范 Blob 并附加或释放既有写入器令牌；绝不覆盖冲突字节发布。
+- 如果 Docker 工作已启动，则使用持久化的 `SandboxExecution`、确定性资源身份与看门狗证据，在重跑该阶段之前停止并对账它。
+- 如果先前阶段结果与全部领域账本均已提交，则投影已是权威来源，下一阶段正常开始。
 
-There is no general recovery-intent state machine. Recovery commands are idempotent named operations over the small set of domain ledgers above.
+不存在通用的恢复意图状态机。恢复命令是针对上述少量领域账本的幂等具名操作。
 
-## 10. Docker Safety Boundary
+## 10. Docker 安全边界
 
-The Slice 0 detached watchdog and its safety properties remain mandatory. Before any Docker Create, the Runner persists the `SandboxExecution`, complete planned resource set, engine identity, deterministic names/labels, and watchdog control digest. It uses the existing pre-create ACK protocol and never exposes Docker to target code.
+Slice 0 的分离式看门狗及其安全属性仍然强制。在任何 Docker Create 之前，Runner 持久化 `SandboxExecution`、完整的计划资源集、引擎身份、确定性名称/标签与看门狗控制摘要。它使用既有的创建前 ACK 协议，绝不将 Docker 暴露给目标代码。
 
-On owner death, watchdog EOF, or deadline, the watchdog stops/kills the planned resources. On the next CLI startup/resume, a narrow sandbox reconciler scans only exact persisted identities and completes cleanup. It cannot schedule stages, continue an old export, publish artifacts, or mutate unrelated runs.
+在所有者死亡、看门狗 EOF 或截止时间到达时，看门狗停止/杀死计划资源。在下一次 CLI 启动/恢复时，一个窄范围的沙箱对账器仅扫描精确的持久化身份并完成清理。它不能调度阶段、继续旧的导出、发布制品或变更无关的 run。
 
-This reconciler is intentionally not a generic janitor. It has only Inspect/Stop/Kill/Wait/Remove and evidence-settlement capabilities for known sandbox resources.
+该对账器有意不是通用清理器。对于已知沙箱资源，它仅具备 Inspect/Stop/Kill/Wait/Remove 与证据结算能力。
 
-## 11. Active-Time Budget
+## 11. 活跃时间预算
 
-If active wall time remains a required budget, store `active_elapsed_ns`, `active_started_at`, and `last_accounting_heartbeat_at` on the run. The execution process updates the accounting heartbeat at a modest interval solely for metering; it does not establish ownership.
+如果活跃墙钟时间仍是必需的预算，则在 run 上存储 `active_elapsed_ns`、`active_started_at` 与 `last_accounting_heartbeat_at`。执行进程以适度的间隔更新记账心跳，仅用于计量；它不建立所有权。
 
-Clean pause/finish adds the interval exactly. After a crash, recovery conservatively charges only through `last_accounting_heartbeat_at + one heartbeat interval`, capped by the configured deadline. Paused and offline time after that bound is not charged. There is no lease-based compensation algorithm.
+干净的暂停/结束精确累加该区间。崩溃之后，恢复只保守地计费到 `last_accounting_heartbeat_at + one heartbeat interval`，并以配置的截止时间为上限。该界限之后的暂停与离线时间不计费。不存在基于租约的补偿算法。
 
-## 12. Artifact and Cache Simplification
+## 12. 制品与缓存简化
 
-Blob publication, verified reads, writer tokens, pins, and occurrences remain because they protect immutable evidence and package integrity. Their APIs stay private and run-scoped.
+Blob 发布、经校验的读取、写入器令牌、pin 与 occurrence 仍然保留，因为它们保护不可变证据与题包完整性。它们的 API 保持私有且以 run 为范围。
 
-GC is an explicit maintenance operation, not a concurrent background workflow. Every stateful workflow command holds a shared global artifact-usage lock; GC takes the corresponding exclusive maintenance lock, rechecks SQLite references, moves bytes through a private trash directory, and records the outcome. A normal run therefore never races an uncoordinated background GC, so the workflow does not need general cache-pin dispatch calls or recovery ownership epochs.
+GC 是一项显式维护操作，而不是并发的后台工作流。每个有状态工作流命令持有共享的全局制品使用锁；GC 获取相应的独占维护锁、重新检查 SQLite 引用、通过私有回收站目录移动字节并记录结果。因此普通 run 绝不会与未协调的后台 GC 竞争，工作流也就不需要通用的缓存 pin 派发调用或恢复所有权纪元。
 
-Cache hits still preserve source-call and artifact provenance. They are budgeted as logical cache results and verified before the current stage commits them.
+缓存命中仍然保留来源调用与制品溯源。它们按逻辑缓存结果计入预算，并在当前阶段提交之前经过校验。
 
-## 13. CLI Behavior
+## 13. CLI 行为
 
-The existing CLI remains the only user interface:
+既有 CLI 仍是唯一的用户界面：
 
 ```text
 cpgen generate --request request.yaml
@@ -252,46 +252,55 @@ cpgen run cancel <run-id> --reason "..."
 cpgen review show|revise|retry|waive|reject ...
 ```
 
-There is no daemon start/stop command and no workflow-service endpoint. Stateful commands open/migrate the local store, acquire required locks, run narrow sandbox reconciliation, execute the command, and exit.
+没有守护进程 start/stop 命令，也没有工作流服务端点。有状态命令打开/迁移本地存储、获取所需的锁、运行窄范围沙箱对账、执行命令并退出。
 
-## 14. Testing Strategy
+## 14. 测试策略
 
-Slice 1 must prove the reduced design rather than the discarded general engine:
+Slice 1 必须证明这套精简设计，而不是被弃用的通用引擎：
 
-- transition tables for the seven Run states and fixed stage states;
-- typed pipeline compile-time tests and source-boundary tests;
-- two-process tests proving the OS run lock admits one executor and automatically releases on process death;
-- expected-version SQLite conflict and atomic projection+event tests;
-- stage restart at every durable boundary;
-- bounded retry, stable idempotency key, `UNKNOWN`, budget, and cancellation tests;
-- review decision lifecycle and resume tests;
-- Blob traversal/corruption/dedup/crash tests;
-- real Docker kill tests while target runs, after target stops before export, and during cleanup;
-- watchdog death/EOF and narrow startup reconciliation tests;
-- full `go test`, `go vet`, `go test -race`, Go 1.25.0 compatibility (after the 2026-09-08 library amendment), and Linux cross-build gates.
+- 七个 Run 状态与固定阶段状态的转移表；
+- 类型化流水线编译期测试与源边界测试；
+- 双进程测试，证明操作系统 run 锁只允许一个执行器并在进程死亡时自动释放；
+- 期望版本 SQLite 冲突与原子投影+事件测试；
+- 在每个持久边界处的阶段重启；
+- 有界重试、稳定幂等键、`UNKNOWN`、预算与取消测试；
+- 评审决策生命周期与恢复测试；
+- Blob 遍历/损坏/去重/崩溃测试；
+- 在目标运行期间、目标停止但尚未导出时，以及清理期间的真实 Docker kill 测试；
+- 看门狗死亡/EOF 与窄范围启动对账测试；
+- 完整的 `go test`、`go vet`、`go test -race`、Go 1.25.0 兼容性（在 2026-09-08 库修正案之后）与 Linux 交叉构建门禁。
 
-Tests for lease expiry, fencing epoch, observation floors, generic recovery intents, dynamic DAG scheduling, or workflow visibility are explicitly out of scope.
+针对租约过期、栅栏纪元、观察下限、通用恢复意图、动态 DAG 调度或工作流可见性的测试明确不在范围内。
 
-## 15. Future Temporal Migration Seam
+## 15. 未来 Temporal 迁移接缝
 
-The design avoids a premature Temporal dependency while preserving a clean migration seam:
+该设计避免过早依赖 Temporal，同时保留一条清晰的迁移接缝：
 
-- typed stage inputs/outputs are serializable versioned domain values;
-- external side effects are isolated behind idempotent application services;
-- stage logic does not depend on SQLite or process-lock APIs;
-- run/stage projections are read models, not control-flow APIs exposed to agents;
-- Docker and artifact ledgers remain valid even if a future Temporal Activity invokes them.
+- 类型化阶段输入/输出是可序列化的带版本领域值；
+- 外部副作用被隔离在幂等的应用服务之后；
+- 阶段逻辑不依赖 SQLite 或进程锁 API；
+- run/阶段投影是读模型，而不是暴露给 agent 的控制流 API；
+- 即使未来的 Temporal Activity 调用它们，Docker 与制品账本仍然有效。
 
-If the product later requires remote workers, many concurrent long-lived runs, automated timers while no CLI is active, cross-host recovery, or operational workflow search, create a new ADR and POC. Temporal would then own durable Workflow/Activity execution, retry/timers, signals/updates, worker tasks, history, and visibility. CPGen would still own Docker safety, Judge, budgets, artifacts, revisions, and package integrity.
+如果产品之后需要远程 worker、大量并发长时 run、在无 CLI 活动时的自动定时器、跨宿主恢复或运维工作流搜索，则创建新的 ADR 与 POC。届时 Temporal 将拥有持久的 Workflow/Activity 执行、重试/定时器、信号/更新、worker 任务、历史与可见性。CPGen 仍将拥有 Docker 安全、评测、预算、制品、修订号与题包完整性。
 
-## 16. Required Documentation Changes
+## 16. 必需的文档变更
 
-After this written design is approved, the implementation plan must first update the existing architecture contract:
+本书面设计获批后，实施计划必须首先更新既有的架构契约：
 
-1. Rewrite ADR-0001 as typed CPGen pipeline/activity contracts.
-2. Simplify ADR-0002 by removing execution modes, leases, probing tickets, and recovery intents.
-3. Revise `ARCHITECTURE.md`, storage/workflow/testing/CLI designs, the Phase 1 MVP spec, implementation plan, README, and TODO to match this decision.
-4. Replace the discarded Slice 1 plan with a smaller plan covering local run/stage persistence, process locking, domain ledgers, sandbox reconciliation, Fake pipeline/CLI, and crash tests.
-5. Preserve all completed Slice 0 commits and evidence.
+1. 将 ADR-0001 重写为类型化 CPGen 流水线/活动契约。
+2. 通过移除执行模式、租约、探测票据与恢复意图来简化 ADR-0002。
+3. 修订 `ARCHITECTURE.md`、存储/工作流/测试/CLI 设计、阶段 1 MVP 规范、实施计划、README 与 TODO，使其与本决策一致。
+4. 用一份更小的计划替换被弃用的 Slice 1 计划，涵盖本地 run/阶段持久化、进程锁、领域账本、沙箱对账、Fake 流水线/CLI 与崩溃测试。
+5. 保留全部已完成的 Slice 0 提交与证据。
 
-No Slice 1 implementation begins until these documents agree on the lightweight boundary.
+在这些文档就轻量边界达成一致之前，不开始任何 Slice 1 实现。
+
+## 契约短语（canonical contract phrases）
+
+架构检查脚本以这些英文短语作为契约锚点：
+
+- one foreground executor per run
+- per-run process lock
+- fixed pipeline
+- no workflow-hosting service

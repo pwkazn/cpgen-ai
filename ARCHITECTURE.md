@@ -95,7 +95,7 @@ SQLite 保存短事务投影和 CPGen 专用的账本。私有制品存储通过
 - RunID、StageName、AttemptID、LogicalOperationID、CallID、SandboxExecutionID；
 - WorkflowRevision、SchemaVersion、ConfigDigest、InputDigest、OutputDigest；
 - RunView 与带类型的阶段输入/输出值；
-- BudgetAccount、reservation、MeteredOutcome 与 CallTrace；
+- BudgetAccount、预留、MeteredOutcome 与 CallTrace；
 - BlobRef、ArtifactDeclaration、WriterToken、ArtifactOccurrence 与 provenance；
 - SandboxPlan、资源身份、看门狗证据、ProcessOutcome 与评测裁决；
 - ReviewDecision、waiver 绑定、题包 occurrence、校验回执与质量报告。
