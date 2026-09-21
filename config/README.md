@@ -20,7 +20,10 @@ go run ./cmd/cpgen --config config/mvp.example.yaml run show RUN_ID
 go run ./cmd/cpgen --config config/mvp.example.yaml run export RUN_ID --output D:/output/problem.zip
 ```
 
-Replace `RUN_ID` with the returned identifier. Export requires READY, rechecks
+Replace `RUN_ID` with the returned identifier. The example commands use
+Windows path forms (`D:/...`, and `npipe://` for the Docker endpoint); on Linux
+and macOS use the native equivalents (`/home/you/...`, `unix:///var/run/docker.sock`).
+Export requires READY, rechecks
 the current committed proof, and refuses to replace an existing destination.
 The destination directory must exist and support hard links. Positive example
 budgets permit external calls only when you invoke generation; no example

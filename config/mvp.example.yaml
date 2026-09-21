@@ -3,6 +3,8 @@
 # per run within the original budgets; unresolved failures require review.
 # Replace paths, endpoints, identities and the all-zero toolchain lock digest.
 storage:
+  # Absolute path required. The Windows form is shown; on Linux and macOS use
+  # the native form instead, e.g. /home/you/cpgen-private/mvp.
   state_root: D:/cpgen-private/mvp
 workflow:
   revision: mvp.idea.statement.similarity.solution.data.judge.package.v2
@@ -32,6 +34,7 @@ similarity:
 sandbox:
   # Linux: unix:///var/run/docker.sock
   engine_endpoint: npipe:////./pipe/docker_engine
+  # Absolute path, with the same platform rule as state_root.
   toolchain_lock_path: D:/cpgen-private/toolchains/docker-v1.lock.json
   # Placeholder: replace with the canonical digest printed by cpgen-image-lock.
   toolchain_lock_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

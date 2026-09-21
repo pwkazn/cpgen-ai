@@ -3,6 +3,8 @@
 # for the separate explicit live preview selector and Similarity settings.
 # Replace state_root with a private absolute path on your machine.
 storage:
+  # Absolute path required. The Windows form is shown; on Linux and macOS use
+  # the native form instead, e.g. /home/you/cpgen-private/state.
   state_root: D:/cpgen-private/state
 fake_workflow:
   scenario: review

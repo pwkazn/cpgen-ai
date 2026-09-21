@@ -2,6 +2,8 @@
 # model, service identity and cost ceilings for your deployment before use.
 # API keys are read from the named environment variables only at dispatch.
 storage:
+  # Absolute path required. The Windows form is shown; on Linux and macOS use
+  # the native form instead, e.g. /home/you/cpgen-private/slice2.
   state_root: D:/cpgen-private/slice2
 workflow:
   revision: slice2.idea.statement.similarity.checkpoint.v1
