@@ -1,5 +1,9 @@
 # CP Problem Generator 文档索引
 
+当前普通 C++ MVP 已完成查重 ACCEPT 到 READY、CLI 导出和 ZIP 独立复验；最新真实模型入口证据见 [V2 CLI 验收](evidence/v2-cli-live-acceptance-2026-09-15.md)。真实查重仍未配置，SPJ、自动变异、Go 实际闭环与通用不可信包导入属于后续范围。下文按历史检查点列出的阶段限制，不代表当前完整 MVP 缺少相应阶段。
+
+[2026-09-22 迁移收尾](evidence/migration-closeout-2026-09-22.md)记录新目录检出时的迁移字节问题、CLI 文档对齐及仍待单独验收的事项。
+
 [2026-09-13 架构简化计划](superpowers/plans/2026-09-13-architecture-simplification.md)跟踪读/导出与执行服务的分离、显式的阶段依赖、本地固定调度，以及历史兼容的整合。其实现与验证记录区分已完成变更与尚未完成的环境检查。本地调度器取代了早先的 LangGraphGo 封装，同时保留持久化的修订与转换契约。
 
 [2026-09-14 架构后续](design/architecture-follow-up-2026-09-14.md)保留了首个提案，其实施因引入过多抽象而被否决。[返工记录](evidence/architecture-follow-up-2026-09-14.md)涵盖简化后的协调器、直接读取器、被移除的配置层以及当前验证。工具链快照后续沿用现有的生效配置；单独的发布账本仍是一项独立的设计决策。
@@ -35,7 +39,7 @@
 
 [提供方对账组件](evidence/slice2-provider-reconciliation.md)新增仅回执的终态清理，并阻止在提供方结算前释放阶段；完整门禁通过。
 
-[显式实时预览](evidence/slice2-live-preview.md)连接冻结配置、生产 Bootstrap、类型化图提交、同尝试进程恢复以及提供方取消/预算清理。常规 tests/vet、生产与补充竞态验证、Linux 构建以及架构/格式/补丁检查均通过。默认仍为 Fake，预览终止于不可豁免的评审。业务路由与后续质量/题包门禁仍未完成。
+[显式实时预览](evidence/slice2-live-preview.md)连接冻结配置、生产 Bootstrap、类型化图提交、同尝试进程恢复以及提供方取消/预算清理。常规 tests/vet、生产与补充竞态验证、Linux 构建以及架构/格式/补丁检查均通过。默认仍为 Fake，旧预览终止于不可豁免的评审；后续完整 MVP 已接通业务路由与质量/题包门禁。
 
 [已提交查重路由计划](evidence/slice2-similarity-route-plan.md)完成了只读的决策/配额检查，并修正了遗漏的逻辑/题包预算限制。完整门禁通过。其感知变异的路由与旧的[业务路由计划](superpowers/plans/2026-09-09-slice2-business-routing.md)作为推迟的研究保留；前向 MVP 直接使用已提交的决策，不需要变异配额或授权。
 

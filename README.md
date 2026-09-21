@@ -42,7 +42,7 @@ Request
 需要 Go 1.25.0 或更高版本，以及本地 Docker Engine。
 
 ~~~bash
-go build ./cmd/...
+go build -o cpgen ./cmd/cpgen
 
 # 1. Validate your configuration without touching the network.
 #    `validate` takes no flags; `effective` requires --redact.
@@ -66,14 +66,16 @@ go build ./cmd/...
 ./cpgen --config config/mvp.example.yaml run show   RUN_ID
 ./cpgen --config config/mvp.example.yaml run events RUN_ID
 ./cpgen --config config/mvp.example.yaml run resume RUN_ID
-./cpgen --config config/mvp.example.yaml run cancel RUN_ID
+./cpgen --config config/mvp.example.yaml run cancel RUN_ID --reason "手动取消"
 
-# 5. Export the verified package, then re-verify it independently.
+# 5. Export the verified package.
 ./cpgen --config config/mvp.example.yaml run export RUN_ID --output ./problem.zip
 ~~~
 
-从 `config/` 复制一个 `*.example.yaml`，替换其中的路径、endpoint，以及全零的
-toolchain lock 摘要。参见 [config/README.md](config/README.md)。
+执行上述配置校验与生成命令前，从 `config/` 复制一个 `*.example.yaml`，替换其中的路径、endpoint，以及全零的
+toolchain lock 摘要，并让命令指向该配置。doctor 的镜像 ID 应取自实际工具链锁；Windows 使用
+`go build -o cpgen.exe ./cmd/cpgen`，Docker endpoint 使用 `npipe:////./pipe/docker_engine`。
+参见 [config/README.md](config/README.md)。
 
 错误是带类型且机器可读的，配置问题会在任何网络或 Docker 工作开始之前被捕获：
 
@@ -128,8 +130,8 @@ problem.zip
   report/provenance.json
 ~~~
 
-该归档中的参考题解已针对每个测试编译并执行，暴力题解已做过差分比对，并且整个归档
-都可以通过一次独立的 CLI 调用重新校验。
+该归档中的参考题解已针对每个测试执行，暴力题解已做过小数据差分比对。验收测试会从
+导出的 ZIP 独立重编译并执行；当前 CLI 尚未提供通用的题包导入或独立复验命令。
 
 ### 查看进行中的 run
 
@@ -147,7 +149,7 @@ CLI 并不是唯一可能的客户端。`run show RUN_ID` 打印当前投影：
   "active_elapsed":68156221200}, "run_version":86}
 ~~~
 
-`run events RUN_ID` 流式输出只追加的审计轨迹，`review show RUN_ID` 报告待处理的
+`run events RUN_ID` 一次性输出只追加的审计事件，可用 `--after-version N` 增量读取；`review show RUN_ID` 报告待处理的
 人工决策。
 
 ## 架构
@@ -229,6 +231,10 @@ Slice 0（执行基础）、Slice 1（lightweight local workflow，轻量本地�
 生成循环——查重 ACCEPT → 题解 → 数据 → Docker/评测 → 质量 → 题包 → `READY`——均已
 完成，并通过了针对一道普通 C++ 题目的真实 Docker 验收与独立 CLI 验收，其中包括
 事务崩溃恢复和从导出的 ZIP 重新编译。
+
+当前示例选择 V2 工作流，在原预算内最多执行两次自动内容重生成；冻结的 V1 run
+保留原行为。参见 [V2 配置说明](config/README.md)与 [V2 CLI 真实模型验收](docs/evidence/v2-cli-live-acceptance-2026-09-15.md)。
+该次真实模型验收未触发内容重生成，不能替代失败重试路径的真实模型覆盖。
 
 已知限制，如实列出：
 
