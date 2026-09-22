@@ -12,7 +12,7 @@ import (
 )
 
 func (s *DraftExecution) draftCall(runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte) (domain.OpenCallRequest, port.GenerateRequest, error) {
-	prompt, schema, err := BuildLLMDraftPrompt(string(attempt.StageName))
+	prompt, schema, err := buildLLMDraftPrompt(string(attempt.StageName), s.config.Content.WorkflowRevision, s.config.Content.DataPromptVersion)
 	if err != nil {
 		return domain.OpenCallRequest{}, port.GenerateRequest{}, err
 	}

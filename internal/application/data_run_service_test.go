@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,194 @@ import (
 	"cpgen/internal/port"
 	"cpgen/internal/workflow"
 )
+
+func TestExecutedSamplesV3DataRunServiceFinalizesDockerSamples(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
+	defer cancel()
+	base := newDockerSandboxTestConfig(t, ctx)
+	f, _ := newSolutionExecutorFixtureForWorkflow(t, false, executedSamplesDockerOutputs(t, "pass"), workflow.ExecutedSamplesRevision)
+	generationConfig := f.executorConfig
+	generationConfig.Clock = clock.Real{}
+	generation, err := application.NewGenerationExecutor(generationConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	similarityConfig := f.config
+	similarityConfig.Generation = generation
+	evidence, err := application.NewSimilarityExecutor(similarityConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	solution, err := application.NewSolutionExecutor(evidence, generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := application.NewDataExecutor(solution, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quality, err := application.NewQualityExecutor(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, effective, err := f.store.RunViewDocuments(ctx, f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewSlice2RunService(application.Slice2RunServiceConfig{Generation: generation, Similarity: evidence, Reviews: f.store, ActiveTimeInterval: time.Second, EffectiveConfigJSON: effective, SolutionSandbox: &base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := domain.RunRequest(f.snapshot.Request)
+	seed := f.snapshot.EffectiveSeed
+	request.Seed = &seed
+	result, err := service.Generate(ctx, request)
+	if err != nil || result.State != domain.RunReady || result.WorkflowRevision != workflow.ExecutedSamplesRevision {
+		t.Fatalf("v3 run=%+v %v", result, err)
+	}
+	input, err := data.Reader().ReadInput(ctx, result.RunID)
+	if err != nil || input.Value == nil {
+		t.Fatalf("v3 input=%+v %v", input, err)
+	}
+	judgeInput, err := data.Reader().ReadJudgeInput(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judgeReport, err := data.Reader().ReadJudgeVerification(ctx, result.RunID)
+	if err != nil || !judgeReport.Passed || judgeReport.SchemaVersion != "cpgen.judge-verification/v2" || judgeReport.ValidateFor(judgeInput) != nil {
+		t.Fatalf("v3 Judge report=%+v %v", judgeReport, err)
+	}
+	if len(judgeReport.Cases) < len(input.Value.SolutionInput.Problem.Samples) {
+		t.Fatal("v3 Judge omitted sample cases")
+	}
+	packages, err := application.NewPackageExecutor(quality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := packages.Reader().ReadArchive(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := packageprobe.ReadArchive(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageFiles := make(map[domain.SafeRelPath][]byte)
+	for _, file := range verified.Files {
+		packageFiles[file.Entry.Path] = file.Bytes
+	}
+	var samples packageprobe.SamplesDocument
+	if err := json.Unmarshal(packageFiles["statement/samples.json"], &samples); err != nil {
+		t.Fatal(err)
+	}
+	if samples.Finalization == nil || strings.Join(strings.Fields(samples.Samples[0].Output), " ") != "0" || strings.Join(strings.Fields(samples.Samples[1].Output), " ") != "0 1 2 1 -1" {
+		t.Fatalf("v3 final samples=%+v", samples)
+	}
+	if strings.Contains(string(packageFiles["statement/statement.md"]), "STALE_MODEL") || samples.Finalization.StatementMarkdown != string(packageFiles["statement/statement.md"]) {
+		t.Fatal("v3 package retained model sample text")
+	}
+}
+
+func TestExecutedSamplesV3ResumesAfterFinalStatementPublicationGap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
+	defer cancel()
+	base := newDockerSandboxTestConfig(t, ctx)
+	f, _ := newSolutionExecutorFixtureForWorkflow(t, false, executedSamplesDockerOutputs(t, "pass"), workflow.ExecutedSamplesRevision)
+	gap := &dataReportGapStore{Store: f.store, judgePath: "judge/final-statement.json"}
+	gap.fired.Store(true)
+	gap.qualityFired.Store(true)
+	gap.packageFired.Store(true)
+	generationConfig := f.executorConfig
+	generationConfig.Clock = clock.Real{}
+	generationConfig.Store = gap
+	generation, err := application.NewGenerationExecutor(generationConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	similarityConfig := f.config
+	similarityConfig.Generation = generation
+	evidence, err := application.NewSimilarityExecutor(similarityConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	solution, err := application.NewSolutionExecutor(evidence, generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := application.NewDataExecutor(solution, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quality, err := application.NewQualityExecutor(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, effective, err := f.store.RunViewDocuments(ctx, f.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := application.NewSlice2RunService(application.Slice2RunServiceConfig{Generation: generation, Similarity: evidence, Reviews: gap, ActiveTimeInterval: time.Second, EffectiveConfigJSON: effective, SolutionSandbox: &base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := domain.RunRequest(f.snapshot.Request)
+	seed := f.snapshot.EffectiveSeed
+	request.Seed = &seed
+	result, err := service.Generate(ctx, request)
+	if !errors.Is(err, errJudgeReportGap) || !gap.judgeFired.Load() || result.CurrentStage != "judge" {
+		t.Fatalf("final statement publication gap was not reached: %+v %v", result, err)
+	}
+	before, err := f.store.BudgetSnapshot(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judgeAttempt, err := f.store.CurrentStageAttempt(ctx, result.RunID, "judge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	llmCalls, similarityCalls := f.httpCalls.Load(), f.sends.Load()
+	resumed, err := service.Resume(ctx, result.RunID)
+	if err != nil || resumed.State != domain.RunReady || resumed.WorkflowRevision != workflow.ExecutedSamplesRevision {
+		t.Fatalf("V3 resume did not reach READY: %+v %v", resumed, err)
+	}
+	after, err := f.store.BudgetSnapshot(ctx, resumed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judgeAfter, err := f.store.CurrentStageAttempt(ctx, resumed.RunID, "judge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gap.judgeBudgetReads.Load() < 2 || gap.judgeSandboxBefore.Load() != gap.judgeSandboxAfter.Load() {
+		t.Fatalf("Judge sandbox budget changed across final-statement recovery: reads=%d before=%d after=%d", gap.judgeBudgetReads.Load(), gap.judgeSandboxBefore.Load(), gap.judgeSandboxAfter.Load())
+	}
+	if before.Remaining[domain.BudgetLLMCalls] != after.Remaining[domain.BudgetLLMCalls] || before.Remaining[domain.BudgetSimilarityCalls] != after.Remaining[domain.BudgetSimilarityCalls] || judgeAttempt.AttemptID != judgeAfter.AttemptID || judgeAttempt.Ordinal != judgeAfter.Ordinal || f.httpCalls.Load() != llmCalls || f.sends.Load() != similarityCalls {
+		t.Fatalf("resume redispatched model/Judge work: before=%+v after=%+v judge=%+v/%+v llm=%d/%d similarity=%d/%d", before, after, judgeAttempt, judgeAfter, llmCalls, f.httpCalls.Load(), similarityCalls, f.sends.Load())
+	}
+	packages, err := application.NewPackageExecutor(quality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := packages.Reader().ReadArchive(ctx, resumed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := packageprobe.ReadArchive(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make(map[domain.SafeRelPath][]byte)
+	for _, file := range verified.Files {
+		files[file.Entry.Path] = file.Bytes
+	}
+	var samples packageprobe.SamplesDocument
+	if err := json.Unmarshal(files["statement/samples.json"], &samples); err != nil {
+		t.Fatal(err)
+	}
+	if samples.Finalization == nil || strings.Join(strings.Fields(samples.Samples[0].Output), " ") != "0" || strings.Join(strings.Fields(samples.Samples[1].Output), " ") != "0 1 2 1 -1" {
+		t.Fatalf("resumed package lost finalized samples: %+v", samples)
+	}
+}
 
 func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
@@ -260,10 +449,14 @@ var errPackageCommitGap = errors.New("injected package commit gap")
 
 type dataReportGapStore struct {
 	*sqlite.Store
-	fired        atomic.Bool
-	judgeFired   atomic.Bool
-	qualityFired atomic.Bool
-	packageFired atomic.Bool
+	fired              atomic.Bool
+	judgeFired         atomic.Bool
+	judgePath          domain.SafeRelPath
+	judgeBudgetReads   atomic.Int32
+	judgeSandboxBefore atomic.Int64
+	judgeSandboxAfter  atomic.Int64
+	qualityFired       atomic.Bool
+	packageFired       atomic.Bool
 }
 
 func (s *dataReportGapStore) FinalizeVerifiedPackage(ctx context.Context, command domain.FinalizeVerifiedPackageCommand) (domain.RunSnapshot, error) {
@@ -277,8 +470,23 @@ func (s *dataReportGapStore) CreateArtifactDeclaration(ctx context.Context, decl
 	if declaration.StageName == "data_verify" && declaration.LogicalPath == "data/verification.json" && s.fired.CompareAndSwap(false, true) {
 		return errDataReportGap
 	}
-	if declaration.StageName == "judge" && declaration.LogicalPath == "judge/verification.json" && s.judgeFired.CompareAndSwap(false, true) {
-		return errJudgeReportGap
+	judgePath := s.judgePath
+	if judgePath == "" {
+		judgePath = "judge/verification.json"
+	}
+	if declaration.StageName == "judge" && declaration.LogicalPath == judgePath {
+		if budget, err := s.Store.BudgetSnapshot(ctx, declaration.RunID); err == nil {
+			remaining := budget.Remaining[domain.BudgetDockerContainerCreates]
+			switch s.judgeBudgetReads.Add(1) {
+			case 1:
+				s.judgeSandboxBefore.Store(remaining)
+			case 2:
+				s.judgeSandboxAfter.Store(remaining)
+			}
+		}
+		if s.judgeFired.CompareAndSwap(false, true) {
+			return errJudgeReportGap
+		}
 	}
 	if declaration.StageName == "quality" && declaration.LogicalPath == "quality/report.json" && s.qualityFired.CompareAndSwap(false, true) {
 		return errQualityReportGap

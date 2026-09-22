@@ -14,7 +14,7 @@ const ContentRetryLimit = 2
 // must regenerate its source and invalidate the suffix before verification runs
 // again. The fixed checker and ambiguous similarity decisions require review.
 func ContentRetryTarget(revision string, stage domain.StageName, reason string) domain.StageName {
-	if revision != RetryingGenerationRevision {
+	if revision != RetryingGenerationRevision && revision != ExecutedSamplesRevision {
 		return ""
 	}
 	switch stage {
@@ -61,7 +61,7 @@ func hasSuffix(value string, suffixes ...string) bool {
 }
 
 func AllowsContentRetryTransition(revision string, from, to domain.StageName) bool {
-	if revision != RetryingGenerationRevision {
+	if revision != RetryingGenerationRevision && revision != ExecutedSamplesRevision {
 		return false
 	}
 	switch from {

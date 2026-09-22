@@ -13,6 +13,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/judge"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 type JudgeVerifierConfig struct {
@@ -20,15 +21,17 @@ type JudgeVerifierConfig struct {
 	Publisher           StageArtifactPublisher
 	Blobs               port.VerifiedBlobReader
 	ToolchainLockDigest domain.Digest
+	WorkflowRevision    string
 }
 
 type JudgeVerifier struct{ config JudgeVerifierConfig }
 
 type JudgeVerificationResult struct {
-	Report          JudgeVerificationReport
-	ReportArtifact  domain.PendingArtifact
-	DatasetArtifact *domain.PendingArtifact
-	Occurrences     []domain.PendingOccurrence
+	Report                 JudgeVerificationReport
+	ReportArtifact         domain.PendingArtifact
+	DatasetArtifact        *domain.PendingArtifact
+	FinalStatementArtifact *domain.PendingArtifact
+	Occurrences            []domain.PendingOccurrence
 }
 
 func NewJudgeVerifier(config JudgeVerifierConfig) (*JudgeVerifier, error) {
@@ -40,6 +43,9 @@ func NewJudgeVerifier(config JudgeVerifierConfig) (*JudgeVerifier, error) {
 
 func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVerificationResult, error) {
 	var empty JudgeVerificationResult
+	if input.WorkflowRevision == "" {
+		input.WorkflowRevision = s.config.WorkflowRevision
+	}
 	dataset, err := input.dataset()
 	if err != nil {
 		return empty, err
@@ -47,10 +53,15 @@ func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVeri
 	if s.config.ToolchainLockDigest != input.DataReport.ToolchainLockDigest {
 		return empty, errors.New("Judge changed the frozen toolchain")
 	}
-	report := JudgeVerificationReport{SchemaVersion: judgeVerificationSchema, InputDigest: dataset.VerificationReportDigest, SolutionVerificationDigest: input.DataInput.SolutionVerificationDigest, ToolchainLockDigest: s.config.ToolchainLockDigest, PolicyDigest: judgePolicyDigest(input), Comparison: solutionSampleComparison, Cases: []JudgeCaseEvidence{}}
+	executed := s.config.WorkflowRevision == workflow.ExecutedSamplesRevision
+	schema := judgeVerificationSchema
+	if executed {
+		schema = executedJudgeVerificationSchema
+	}
+	report := JudgeVerificationReport{SchemaVersion: schema, InputDigest: dataset.VerificationReportDigest, SolutionVerificationDigest: input.DataInput.SolutionVerificationDigest, ToolchainLockDigest: s.config.ToolchainLockDigest, PolicyDigest: judgePolicyDigest(input, schema), Comparison: solutionSampleComparison, Cases: []JudgeCaseEvidence{}}
 	var files []domain.PendingArtifact
 	publish := func(path domain.SafeRelPath, media string, raw []byte) (domain.PendingArtifact, error) {
-		pending, err := s.config.Publisher.Publish(ctx, port.ArtifactDeclaration{LogicalPath: path, Role: domain.ArtifactOutput, MediaType: media, MaxBytes: int64(max(1, len(raw))), Provenance: domain.ProvenanceCandidate{SchemaVersion: judgeVerificationSchema, Producer: "judge-verifier", InputDigest: &report.InputDigest}}, raw)
+		pending, err := s.config.Publisher.Publish(ctx, port.ArtifactDeclaration{LogicalPath: path, Role: domain.ArtifactOutput, MediaType: media, MaxBytes: int64(max(1, len(raw))), Provenance: domain.ProvenanceCandidate{SchemaVersion: domain.SchemaVersion(schema), Producer: "judge-verifier", InputDigest: &report.InputDigest}}, raw)
 		if err == nil {
 			files = append(files, pending)
 		}
@@ -86,6 +97,21 @@ func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVeri
 				return empty, err
 			}
 			result.DatasetArtifact = &pending
+			if executed {
+				final, err := FinalizeSamples(ctx, s.config.Blobs, input, report)
+				if err != nil {
+					return empty, err
+				}
+				raw, err = json.Marshal(final)
+				if err != nil || len(raw) > 1<<20 {
+					return empty, errors.New("final statement exceeds byte bound")
+				}
+				pending, err = publish("judge/final-statement.json", "application/vnd.cpgen.finalized-statement+json", raw)
+				if err != nil {
+					return empty, err
+				}
+				result.FinalStatementArtifact = &pending
+			}
 		}
 		all := append(files, s.config.Sandbox.Artifacts()...)
 		seen := make(map[domain.ArtifactWriterTokenID]bool)
@@ -137,7 +163,7 @@ func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVeri
 		if err != nil {
 			return empty, err
 		}
-		if failure == "" && item.Origin == "generated" && item.Kind == domain.DataCaseSmall {
+		if failure == "" && judgeNeedsBrute(input, item) {
 			brute, bruteToken, err := run(item, port.RoleBrute)
 			if err != nil {
 				return empty, err
@@ -169,17 +195,36 @@ func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVeri
 }
 
 const judgeVerificationSchema = "cpgen.judge-verification/v1"
+const executedJudgeVerificationSchema = "cpgen.judge-verification/v2"
+
+func judgeNeedsBrute(input JudgeInput, item DatasetInput) bool {
+	if input.SolutionReport.SchemaVersion == executedSolutionVerificationSchema {
+		return item.Origin == "sample" || (item.Origin == "generated" && item.Kind == domain.DataCaseSmall)
+	}
+	return item.Origin == "generated" && item.Kind == domain.DataCaseSmall
+}
 
 // JudgeInput must be reconstructed from committed upstream stages by the
 // application. Structural validation alone does not establish that provenance.
 type JudgeInput struct {
-	DataInput      domain.DataDraftInputV1
-	Data           domain.DataContent
-	DataReport     DataVerificationReport
-	SolutionReport SolutionVerificationReport
+	WorkflowRevision string
+	DataInput        domain.DataDraftInputV1
+	Data             domain.DataContent
+	DataReport       DataVerificationReport
+	SolutionReport   SolutionVerificationReport
 }
 
 func (v JudgeInput) dataset() (DatasetManifest, error) {
+	wantSolutionSchema := solutionVerificationSchema
+	if v.WorkflowRevision == workflow.ExecutedSamplesRevision {
+		wantSolutionSchema = executedSolutionVerificationSchema
+	}
+	if v.SolutionReport.SchemaVersion != wantSolutionSchema {
+		return DatasetManifest{}, errors.New("Judge solution report schema does not match workflow")
+	}
+	if v.WorkflowRevision != "" && v.WorkflowRevision != workflow.ExecutedSamplesRevision && v.SolutionReport.SchemaVersion != solutionVerificationSchema {
+		return DatasetManifest{}, errors.New("Judge solution report schema does not match frozen workflow")
+	}
 	if err := v.SolutionReport.ValidateFor(v.DataInput.SolutionInput, v.DataInput.Solution); err != nil {
 		return DatasetManifest{}, err
 	}
@@ -195,12 +240,20 @@ func judgeRunLimits(v JudgeInput) port.RunLimits {
 	return port.RunLimits{Time: time.Duration(p.TimeLimitMS) * time.Millisecond, MemoryBytes: p.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}
 }
 
-func judgePolicyDigest(v JudgeInput) domain.Digest {
+func judgePolicyDigest(v JudgeInput, schema ...string) domain.Digest {
+	version := judgeVerificationSchema
+	if len(schema) > 0 && schema[0] != "" {
+		version = schema[0]
+	}
+	bruteCases := "every-generated-small-v1"
+	if version == executedJudgeVerificationSchema {
+		bruteCases = "every-sample-and-generated-small-v2"
+	}
 	raw, _ := json.Marshal(struct {
 		Schema, Comparison, BruteCases string
 		Lock                           domain.Digest
 		Limits                         port.RunLimits
-	}{judgeVerificationSchema, solutionSampleComparison, "every-generated-small-v1", v.DataReport.ToolchainLockDigest, judgeRunLimits(v)})
+	}{version, solutionSampleComparison, bruteCases, v.DataReport.ToolchainLockDigest, judgeRunLimits(v)})
 	return domain.SumBytes(raw)
 }
 
@@ -261,10 +314,7 @@ func judgeCaseFailure(v JudgeInput, item JudgeCaseEvidence) (string, error) {
 	if failure != "" {
 		failure = "reference." + failure
 	}
-	if failure == "" && item.Input.Origin == "sample" && item.ReferenceTokenDigest != solutionTokenDigest([]byte(v.DataInput.SolutionInput.Problem.Samples[item.Input.Ordinal-1].Output)) {
-		failure = "reference.WA"
-	}
-	needsBrute := failure == "" && item.Input.Origin == "generated" && item.Input.Kind == domain.DataCaseSmall
+	needsBrute := failure == "" && judgeNeedsBrute(v, item.Input)
 	if needsBrute {
 		if item.Brute == nil || !independentDataRuns(item.Reference.CallTrace, item.Brute.CallTrace) {
 			return "", errors.New("Judge small case lacks an independent Brute execution")
@@ -281,6 +331,18 @@ func judgeCaseFailure(v JudgeInput, item JudgeCaseEvidence) (string, error) {
 	} else if item.Brute != nil || item.BruteTokenDigest != "" {
 		return "", errors.New("Judge has an unplanned Brute execution")
 	}
+	// v3 compares each sample to the independently executed Solution/Brute
+	// result. Frozen v1/v2 reports compare to the model-provided expected bytes.
+	if failure == "" && item.Input.Origin == "sample" && v.SolutionReport.SchemaVersion == executedSolutionVerificationSchema {
+		if item.ReferenceTokenDigest != v.SolutionReport.Samples[2*(item.Input.Ordinal-1)].ActualTokenDigest {
+			failure = "reference.sample_changed"
+		}
+	} else if failure == "" && item.Input.Origin == "sample" {
+		want := v.DataInput.SolutionInput.Problem.Samples[item.Input.Ordinal-1].Output
+		if item.ReferenceTokenDigest != solutionTokenDigest([]byte(want)) {
+			failure = "reference.WA"
+		}
+	}
 	return failure, nil
 }
 
@@ -289,7 +351,11 @@ func (r JudgeVerificationReport) ValidateFor(v JudgeInput) error {
 	if err != nil {
 		return err
 	}
-	if r.SchemaVersion != judgeVerificationSchema || r.InputDigest != dataset.VerificationReportDigest || r.SolutionVerificationDigest != v.DataInput.SolutionVerificationDigest || r.ToolchainLockDigest != v.DataReport.ToolchainLockDigest || r.PolicyDigest != judgePolicyDigest(v) || r.Comparison != solutionSampleComparison {
+	wantSchema := judgeVerificationSchema
+	if v.WorkflowRevision == workflow.ExecutedSamplesRevision {
+		wantSchema = executedJudgeVerificationSchema
+	}
+	if r.SchemaVersion != wantSchema || r.InputDigest != dataset.VerificationReportDigest || r.SolutionVerificationDigest != v.DataInput.SolutionVerificationDigest || r.ToolchainLockDigest != v.DataReport.ToolchainLockDigest || r.PolicyDigest != judgePolicyDigest(v, r.SchemaVersion) || r.Comparison != solutionSampleComparison {
 		return errors.New("Judge report changed its upstream evidence or policy")
 	}
 	if len(r.Cases) == 0 || len(r.Cases) > len(dataset.Inputs) {

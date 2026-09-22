@@ -17,10 +17,13 @@ import (
 )
 
 func TestSolutionVerifierCompilesBothProgramsAndChecksSamples(t *testing.T) {
-	for _, mode := range []string{"pass", "compile_error", "wrong_answer", "brute_wrong", "time_limit"} {
+	for _, mode := range []string{"pass", "draft_wrong", "compile_error", "wrong_answer", "brute_wrong", "time_limit"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			input, content := solutionVerifierContent(t)
+			if mode == "draft_wrong" {
+				input, content = solutionVerifierContentWithSample(t, &domain.ProblemSample{Input: connectivityRegressionInput, Output: "1101000\n", Explanation: "The fourth edge is accepted."})
+			}
 			f := newCoordinatorFixtureWithStages(t, "d8", domain.BudgetLimits{MaxArtifactBytes: 8 << 20, MaxActiveTimeMilliseconds: 100000}, []domain.StageName{"prepare", "exercise"})
 			blobs, err := blob.NewStore(filepath.Join(t.TempDir(), "blobs"))
 			if err != nil {
@@ -32,7 +35,11 @@ func TestSolutionVerifierCompilesBothProgramsAndChecksSamples(t *testing.T) {
 				t.Fatal(err)
 			}
 			lock := solutionTestLock(t)
-			sandbox := &solutionSandboxFixture{publisher: publisher, mode: mode, expected: input.Problem.Samples[0].Output, t: t}
+			expected := input.Problem.Samples[0].Output
+			if mode == "draft_wrong" {
+				expected = "1100100\n"
+			}
+			sandbox := &solutionSandboxFixture{publisher: publisher, mode: mode, expected: expected, t: t}
 			verifier, err := application.NewSolutionVerifier(application.SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: blobs, Lock: lock})
 			if err != nil {
 				t.Fatal(err)
@@ -59,7 +66,9 @@ func TestSolutionVerifierCompilesBothProgramsAndChecksSamples(t *testing.T) {
 			switch mode {
 			case "compile_error":
 				wantCompile, wantRun = 1, 0
-			case "wrong_answer", "time_limit":
+			case "time_limit":
+				wantRun = 1
+			case "draft_wrong", "wrong_answer":
 				wantRun = 1
 			case "brute_wrong":
 				wantRun = 2
@@ -82,9 +91,41 @@ func TestSolutionVerifierCompilesBothProgramsAndChecksSamples(t *testing.T) {
 	}
 }
 
+func TestExecutedSamplesSolutionReportRoundTripsWithoutExpectedBlob(t *testing.T) {
+	digest := domain.SumBytes([]byte("fixture"))
+	exitCode := 0
+	report := application.SolutionVerificationReport{
+		SchemaVersion:       "cpgen.solution-verification/v2",
+		InputDigest:         digest,
+		ContentDigest:       digest,
+		ProblemSpecDigest:   digest,
+		PolicyDigest:        digest,
+		ToolchainLockDigest: digest,
+		Samples: []application.SolutionSampleEvidence{{
+			Sample: 1, Role: port.RoleSolution,
+			Input:  domain.BlobRef{Digest: digest, Size: 1},
+			Result: port.RunResult{CallTrace: domain.CallTrace{LogicalOperationID: "fixture", DispatchKind: domain.DispatchNone}, Outcome: domain.ProcessExited, ExitCode: &exitCode},
+		}},
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip application.SolutionVerificationReport
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if len(roundTrip.Samples) != 1 || roundTrip.Samples[0].Expected != nil {
+		t.Fatalf("V3 report gained an expected blob: %+v", roundTrip)
+	}
+}
+
 func assertSolutionReportRejectsIncompleteEvidence(t *testing.T, input domain.SolutionDraftInputV1, content domain.SolutionContent, report application.SolutionVerificationReport) {
 	t.Helper()
 	for name, alter := range map[string]func(*application.SolutionVerificationReport){
+		"old policy": func(r *application.SolutionVerificationReport) {
+			r.PolicyDigest = domain.SumBytes([]byte("old policy"))
+		},
 		"missing brute":  func(r *application.SolutionVerificationReport) { r.Compiles = r.Compiles[:1] },
 		"missing sample": func(r *application.SolutionVerificationReport) { r.Samples = r.Samples[:len(r.Samples)-1] },
 		"wrong role":     func(r *application.SolutionVerificationReport) { r.Samples[0].Role = port.RoleBrute },
@@ -173,7 +214,7 @@ func (s *solutionSandboxFixture) Run(ctx context.Context, request port.RunReques
 		s.t.Fatal("sample run lost frozen input/resource constraints")
 	}
 	output := []byte(" \t" + s.expected + "\r\n")
-	if s.mode == "wrong_answer" || (s.mode == "brute_wrong" && request.Role == port.RoleBrute) {
+	if (s.mode == "wrong_answer" && request.Role == port.RoleSolution) || (s.mode == "brute_wrong" && request.Role == port.RoleBrute) {
 		output = []byte("incorrect answer")
 	}
 	stdout := s.artifact(ctx, domain.ArtifactStdout, fmt.Sprintf("fixture/run/%d.out", s.runs), output)
@@ -191,6 +232,10 @@ func solutionFixtureTrace(name string, call domain.AttemptCallID) domain.CallTra
 }
 
 func solutionVerifierContent(t *testing.T) (domain.SolutionDraftInputV1, domain.SolutionContent) {
+	return solutionVerifierContentWithSample(t, nil)
+}
+
+func solutionVerifierContentWithSample(t *testing.T, sample *domain.ProblemSample) (domain.SolutionDraftInputV1, domain.SolutionContent) {
 	t.Helper()
 	snapshot, err := domain.NewGenerationRequestSnapshotV1(domain.GenerationRequestV1{SchemaVersion: domain.RequestSchemaV1, Mode: "manual", Brief: "Graphs", Language: "en", Difficulty: "hard", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512, SolutionLanguage: "cpp", VerificationProfile: "default"}, 42)
 	if err != nil {
@@ -220,6 +265,9 @@ func solutionVerifierContent(t *testing.T) (domain.SolutionDraftInputV1, domain.
 	var statement domain.StatementDraftV1
 	if err := json.Unmarshal(outputs["statement.draft"], &statement); err != nil {
 		t.Fatal(err)
+	}
+	if sample != nil {
+		statement.Samples = []domain.ProblemSample{*sample}
 	}
 	problem, err := statement.Bind(statementInput, 1)
 	if err != nil {

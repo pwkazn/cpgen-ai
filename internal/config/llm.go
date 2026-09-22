@@ -27,40 +27,43 @@ const (
 // retaining the pre-provider snapshot bytes. Retry is deliberately not a YAML
 // option: durable physical dispatch owns retries, not the provider adapter.
 type LLMConfig struct {
-	BaseURL          string        `json:"base_url" yaml:"base_url"`
-	Model            string        `json:"model" yaml:"model"`
-	APIKeyEnv        string        `json:"api_key_env" yaml:"api_key_env"`
-	Timeout          time.Duration `json:"-" yaml:"-"`
-	MaxOutputTokens  int64         `json:"max_output_tokens" yaml:"max_output_tokens"`
-	MaxResponseBytes int64         `json:"max_response_bytes" yaml:"max_response_bytes"`
-	MaxFormatRepairs int64         `json:"max_format_repairs,omitempty" yaml:"max_format_repairs"`
+	BaseURL           string        `json:"base_url" yaml:"base_url"`
+	Model             string        `json:"model" yaml:"model"`
+	APIKeyEnv         string        `json:"api_key_env" yaml:"api_key_env"`
+	Timeout           time.Duration `json:"-" yaml:"-"`
+	MaxOutputTokens   int64         `json:"max_output_tokens" yaml:"max_output_tokens"`
+	MaxResponseBytes  int64         `json:"max_response_bytes" yaml:"max_response_bytes"`
+	MaxFormatRepairs  int64         `json:"max_format_repairs,omitempty" yaml:"max_format_repairs"`
+	DataPromptVersion string        `json:"data_prompt_version,omitempty" yaml:"data_prompt_version,omitempty"`
 }
 
 type EffectiveLLM struct {
-	BaseURL          string `json:"base_url"`
-	Model            string `json:"model"`
-	APIKeyEnv        string `json:"api_key_env"`
-	Timeout          string `json:"timeout"`
-	MaxOutputTokens  int64  `json:"max_output_tokens"`
-	MaxResponseBytes int64  `json:"max_response_bytes"`
-	MaxFormatRepairs int64  `json:"max_format_repairs,omitempty"`
+	BaseURL           string `json:"base_url"`
+	Model             string `json:"model"`
+	APIKeyEnv         string `json:"api_key_env"`
+	Timeout           string `json:"timeout"`
+	MaxOutputTokens   int64  `json:"max_output_tokens"`
+	MaxResponseBytes  int64  `json:"max_response_bytes"`
+	MaxFormatRepairs  int64  `json:"max_format_repairs,omitempty"`
+	DataPromptVersion string `json:"data_prompt_version,omitempty"`
 }
 
 type rawLLMConfig struct {
-	BaseURL          string  `yaml:"base_url"`
-	Model            string  `yaml:"model"`
-	APIKeyEnv        string  `yaml:"api_key_env"`
-	Timeout          *string `yaml:"timeout"`
-	MaxOutputTokens  *int64  `yaml:"max_output_tokens"`
-	MaxResponseBytes *int64  `yaml:"max_response_bytes"`
-	MaxFormatRepairs *int64  `yaml:"max_format_repairs"`
+	BaseURL           string  `yaml:"base_url"`
+	Model             string  `yaml:"model"`
+	APIKeyEnv         string  `yaml:"api_key_env"`
+	Timeout           *string `yaml:"timeout"`
+	MaxOutputTokens   *int64  `yaml:"max_output_tokens"`
+	MaxResponseBytes  *int64  `yaml:"max_response_bytes"`
+	MaxFormatRepairs  *int64  `yaml:"max_format_repairs"`
+	DataPromptVersion string  `yaml:"data_prompt_version"`
 }
 
 func decodeLLM(raw *rawLLMConfig) (*LLMConfig, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	c := &LLMConfig{BaseURL: raw.BaseURL, Model: raw.Model, APIKeyEnv: raw.APIKeyEnv,
+	c := &LLMConfig{BaseURL: raw.BaseURL, Model: raw.Model, APIKeyEnv: raw.APIKeyEnv, DataPromptVersion: raw.DataPromptVersion,
 		Timeout: DefaultLLMTimeout, MaxOutputTokens: DefaultLLMMaxOutputTokens, MaxResponseBytes: DefaultLLMMaxResponseBytes}
 	if raw.Timeout != nil {
 		parsed, err := time.ParseDuration(*raw.Timeout)
@@ -105,6 +108,9 @@ func (c LLMConfig) Validate() error {
 	}
 	if c.MaxFormatRepairs < 0 || c.MaxFormatRepairs > 1 {
 		return field("llm.max_format_repairs", errors.New("must be zero or one"))
+	}
+	if c.DataPromptVersion != "" && c.DataPromptVersion != "v3" {
+		return field("llm.data_prompt_version", errors.New("must be empty or v3"))
 	}
 	return nil
 }
@@ -183,5 +189,5 @@ func effectiveLLM(c *LLMConfig) *EffectiveLLM {
 		return nil
 	}
 	return &EffectiveLLM{BaseURL: c.BaseURL, Model: c.Model, APIKeyEnv: c.APIKeyEnv,
-		Timeout: c.Timeout.String(), MaxOutputTokens: c.MaxOutputTokens, MaxResponseBytes: c.MaxResponseBytes, MaxFormatRepairs: c.MaxFormatRepairs}
+		Timeout: c.Timeout.String(), MaxOutputTokens: c.MaxOutputTokens, MaxResponseBytes: c.MaxResponseBytes, MaxFormatRepairs: c.MaxFormatRepairs, DataPromptVersion: c.DataPromptVersion}
 }

@@ -76,7 +76,7 @@ func newGenerationRunService(config GenerationRunConfig) (*LocalRunService, erro
 	if err := config.validateResources(); err != nil {
 		return nil, err
 	}
-	if config.Similarity.Revision() == workflow.RetryingGenerationRevision {
+	if config.Similarity.Revision() == workflow.RetryingGenerationRevision || config.Similarity.Revision() == workflow.ExecutedSamplesRevision {
 		if _, ok := config.Store.(port.ContentRetryStore); !ok {
 			return nil, errors.New("content retry workflow requires atomic retry storage")
 		}

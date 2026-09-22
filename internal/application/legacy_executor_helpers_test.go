@@ -33,7 +33,7 @@ func NewSolutionExecutor(evidence *SimilarityExecutor, generation *GenerationExe
 }
 
 func NewDataExecutor(solution *SolutionExecutor, sandbox sandboxexec.Config) (*DataExecutor, error) {
-	if solution == nil || solution.reader.revision != workflow.GenerationRevision {
+	if solution == nil || !workflow.ProducesPackage(solution.reader.revision) {
 		return nil, errors.New("data executor requires the forward MVP workflow")
 	}
 	raw, err := sandbox.Lock.MarshalIndent()

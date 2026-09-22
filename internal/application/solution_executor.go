@@ -57,7 +57,7 @@ func (s *SolutionExecutor) VerifyDraft(ctx context.Context, view domain.RunView,
 	if err != nil {
 		return empty, err
 	}
-	verifier, err := NewSolutionVerifier(SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: s.blobs, Lock: lock})
+	verifier, err := NewSolutionVerifier(SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: s.blobs, Lock: lock, WorkflowRevision: view.WorkflowRevision()})
 	if err != nil {
 		return empty, err
 	}
@@ -92,7 +92,7 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 	if err != nil || expectedDigest != digest {
 		return result, errors.New("solution input differs from current committed acceptance")
 	}
-	variables, err := input.CanonicalJSON()
+	variables, err := solutionDraftVariables(view.WorkflowRevision(), input)
 	if err != nil {
 		return result, err
 	}
@@ -108,6 +108,10 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 	var draft domain.SolutionDraftV1
 	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
 		return result, err
+	}
+	if err := validateSolutionDraftForWorkflow(view.WorkflowRevision(), draft); err != nil {
+		result.Outcome = generationContentReview[domain.SolutionContent](s.drafts.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "solution_binding_rejected")
+		return result, nil
 	}
 	content, err := draft.Bind(input)
 	if err != nil {
@@ -146,7 +150,7 @@ func (s *SolutionExecutor) ReconcileDraft(ctx context.Context, runID domain.RunI
 	if digest != attempt.InputDigest {
 		return errors.New("Solution cleanup input differs")
 	}
-	variables, err := input.Value.CanonicalJSON()
+	variables, err := solutionDraftVariables(current.WorkflowRevision, *input.Value)
 	if err != nil {
 		return err
 	}

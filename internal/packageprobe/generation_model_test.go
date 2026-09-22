@@ -72,6 +72,21 @@ func generationProblem(t *testing.T, language string) Problem {
 			p.Files[i].Data = packageJSON(t, provenance)
 		}
 	}
+	var statement string
+	for _, file := range p.Files {
+		if file.Role == RoleStatement {
+			statement = string(file.Data) + "\n" + domain.FinalSampleExplanation("en", "3\n")
+		}
+	}
+	for i := range p.Files {
+		if p.Files[i].Role == RoleStatement {
+			p.Files[i].Data = []byte(statement)
+		}
+		if p.Files[i].Role == RoleSamples {
+			final := domain.FinalizedStatement{SchemaVersion: domain.FinalizedStatementSchema, DraftSpecDigest: digest, JudgeReportDigest: digest, Language: "en", StatementMarkdown: statement, Samples: []domain.ProblemSample{{Input: "1 2\n", Output: "3\n", Explanation: domain.FinalSampleExplanation("en", "3\n")}}}
+			p.Files[i].Data = packageJSON(t, SamplesDocument{SchemaVersion: SamplesSchemaVersion, Samples: []Sample{{Input: "1 2\n", Output: "3\n"}}, Finalization: &final})
+		}
+	}
 	return p
 }
 
@@ -108,7 +123,7 @@ func TestGenerationPackageBuildsAndReadsBothSourceLanguages(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, bad := range [][]byte{append([]byte(`{"schema_version":"cpgen.package/v2",`), encoded[1:]...), []byte(strings.Replace(string(encoded), `"run_id"`, `"Run_id"`, 1)), []byte(strings.Replace(string(encoded), `"title": "A+B"`, `"title": "\ud800"`, 1))} {
+				for _, bad := range [][]byte{append([]byte(`{"schema_version":"cpgen.package/v3",`), encoded[1:]...), []byte(strings.Replace(string(encoded), `"run_id"`, `"Run_id"`, 1)), []byte(strings.Replace(string(encoded), `"title": "A+B"`, `"title": "\ud800"`, 1))} {
 					if _, err := DecodeManifest(bad); err == nil {
 						t.Fatal("package accepted duplicate, aliased or malformed Unicode JSON")
 					}
@@ -168,5 +183,33 @@ func TestGenerationPackageRejectsSubstitutedBindings(t *testing.T) {
 		if p.Validate(240) == nil {
 			t.Fatal("generation package accepted a substituted language, checker, test or proof")
 		}
+	}
+}
+
+func TestGenerationPackageBindsFinalExplanationStatementAndSamples(t *testing.T) {
+	for name, change := range map[string]func(*SamplesDocument){
+		"missing finalization": func(s *SamplesDocument) { s.Finalization = nil },
+		"old explanation":      func(s *SamplesDocument) { s.Finalization.Samples[0].Explanation = "The old answer is 4." },
+		"other input":          func(s *SamplesDocument) { s.Finalization.Samples[0].Input = "9 9\n" },
+		"other output":         func(s *SamplesDocument) { s.Samples[0].Output = "4\n" },
+		"other statement":      func(s *SamplesDocument) { s.Finalization.StatementMarkdown += "changed" },
+		"other Judge":          func(s *SamplesDocument) { s.Finalization.JudgeReportDigest = domain.SumBytes([]byte("other Judge")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := generationProblem(t, "cpp")
+			for i := range p.Files {
+				if p.Files[i].Role == RoleSamples {
+					var samples SamplesDocument
+					if err := json.Unmarshal(p.Files[i].Data, &samples); err != nil {
+						t.Fatal(err)
+					}
+					change(&samples)
+					p.Files[i].Data = packageJSON(t, samples)
+				}
+			}
+			if _, _, err := BuildArchive(context.Background(), p); err == nil {
+				t.Fatal("inconsistent finalized sample entered archive")
+			}
+		})
 	}
 }

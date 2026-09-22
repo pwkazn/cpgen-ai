@@ -57,7 +57,7 @@ type GenerationTestsDocument struct {
 	Tests             []GenerationTest     `json:"tests"`
 }
 
-func validateGenerationDocuments(files map[domain.SafeRelPath][]byte, runID domain.RunID, revision int64, profile string, similarity SimilarityReport, toolchain domain.Digest) error {
+func validateGenerationDocuments(schema domain.SchemaVersion, files map[domain.SafeRelPath][]byte, runID domain.RunID, revision int64, profile string, similarity SimilarityReport, toolchain domain.Digest) error {
 	var quality GenerationQualityDocument
 	if err := decodeStrict(files["reports/prepackage-quality.json"], &quality); err != nil {
 		return err
@@ -102,6 +102,17 @@ func validateGenerationDocuments(files map[domain.SafeRelPath][]byte, runID doma
 	if err := decodeStrict(files["statement/samples.json"], &samples); err != nil {
 		return err
 	}
+	if schema == GenerationPackageSchemaVersion {
+		final := samples.Finalization
+		if final == nil || final.Validate() != nil || final.DraftSpecDigest != quality.ProblemSpecDigest || final.JudgeReportDigest != quality.JudgeReportDigest || final.StatementMarkdown != string(files["statement/statement.md"]) || len(final.Samples) != len(samples.Samples) {
+			return fmt.Errorf("package lost finalized statement binding")
+		}
+		for i, sample := range final.Samples {
+			if sample.Input != samples.Samples[i].Input || sample.Output != samples.Samples[i].Output || sample.Explanation == "" {
+				return fmt.Errorf("final statement samples differ from published samples")
+			}
+		}
+	}
 	if len(tests.Tests) != len(samples.Samples)+len(tests.Plan.Cases) {
 		return fmt.Errorf("generation test index omitted required cases")
 	}
@@ -131,7 +142,11 @@ func validateGenerationDocuments(files map[domain.SafeRelPath][]byte, runID doma
 		}
 		if test.Origin == "sample" {
 			sample := samples.Samples[test.Ordinal-1]
-			if string(files[inputPath]) != sample.Input || judge.ExactTokenDigest(files[answerPath]) != judge.ExactTokenDigest([]byte(sample.Output)) {
+			answerMatches := string(files[answerPath]) == sample.Output
+			if schema == GenerationPackageSchemaVersionV2 {
+				answerMatches = judge.ExactTokenDigest(files[answerPath]) == judge.ExactTokenDigest([]byte(sample.Output))
+			}
+			if string(files[inputPath]) != sample.Input || !answerMatches {
 				return fmt.Errorf("package samples differ from indexed test bytes")
 			}
 		}

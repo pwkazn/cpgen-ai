@@ -13,9 +13,11 @@ import (
 	"cpgen/internal/judge"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
+	"cpgen/internal/workflow"
 )
 
 const solutionVerificationSchema = "cpgen.solution-verification/v1"
+const executedSolutionVerificationSchema = "cpgen.solution-verification/v2"
 const solutionSampleComparison = judge.ExactTokenComparisonV1
 
 type SolutionSandbox interface {
@@ -24,10 +26,11 @@ type SolutionSandbox interface {
 }
 
 type SolutionVerifierConfig struct {
-	Sandbox   SolutionSandbox
-	Publisher StageArtifactPublisher
-	Blobs     port.VerifiedBlobReader
-	Lock      toolchain.Lock
+	Sandbox          SolutionSandbox
+	Publisher        StageArtifactPublisher
+	Blobs            port.VerifiedBlobReader
+	Lock             toolchain.Lock
+	WorkflowRevision string
 }
 
 type SolutionVerifier struct {
@@ -46,7 +49,7 @@ type SolutionSampleEvidence struct {
 	Sample            int              `json:"sample"`
 	Role              port.ProgramRole `json:"role"`
 	Input             domain.BlobRef   `json:"input"`
-	Expected          domain.BlobRef   `json:"expected"`
+	Expected          *domain.BlobRef  `json:"expected,omitempty"`
 	Result            port.RunResult   `json:"result"`
 	ActualTokenDigest domain.Digest    `json:"actual_token_digest,omitempty"`
 	Matches           bool             `json:"matches"`
@@ -94,14 +97,24 @@ func NewSolutionVerifier(config SolutionVerifierConfig) (*SolutionVerifier, erro
 	return &SolutionVerifier{config: config, lockDigest: lockDigest, policyDigest: solutionVerificationPolicyDigest(lockDigest)}, nil
 }
 
-func solutionVerificationPolicyDigest(lockDigest domain.Digest) domain.Digest {
+func solutionVerificationPolicyDigest(lockDigest domain.Digest, schema ...string) domain.Digest {
+	version := solutionVerificationSchema
+	if len(schema) > 0 && schema[0] != "" {
+		version = schema[0]
+	}
 	policy, _ := json.Marshal(struct {
 		Schema, Comparison   string
 		Lock                 domain.Digest
 		Compile              port.CompileLimits
 		RunPIDs, StreamBytes int64
-	}{solutionVerificationSchema, solutionSampleComparison, lockDigest, solutionCompileLimits(), 64, 1 << 20})
+	}{version, solutionSampleComparison, lockDigest, solutionCompileLimits(), 64, 1 << 20})
 	return domain.SumBytes(policy)
+}
+
+// SolutionVerificationPolicyDigest returns the canonical policy binding for
+// an offline report reader.
+func SolutionVerificationPolicyDigest(lockDigest domain.Digest, schema string) domain.Digest {
+	return solutionVerificationPolicyDigest(lockDigest, schema)
 }
 
 func solutionCompileLimits() port.CompileLimits {
@@ -138,10 +151,16 @@ func (s *SolutionVerifier) Verify(ctx context.Context, input domain.SolutionDraf
 	if err != nil {
 		return empty, err
 	}
-	report := SolutionVerificationReport{SchemaVersion: solutionVerificationSchema, InputDigest: inputDigest, ContentDigest: content.ContentDigest, ProblemSpecDigest: input.Problem.SpecDigest, PolicyDigest: s.policyDigest, ToolchainLockDigest: s.lockDigest, Comparison: solutionSampleComparison, Compiles: []SolutionCompileEvidence{}, Samples: []SolutionSampleEvidence{}}
+	executed := s.config.WorkflowRevision == workflow.ExecutedSamplesRevision
+	schema := solutionVerificationSchema
+	if executed {
+		schema = executedSolutionVerificationSchema
+	}
+	policyDigest := solutionVerificationPolicyDigest(s.lockDigest, schema)
+	report := SolutionVerificationReport{SchemaVersion: schema, InputDigest: inputDigest, ContentDigest: content.ContentDigest, ProblemSpecDigest: input.Problem.SpecDigest, PolicyDigest: policyDigest, ToolchainLockDigest: s.lockDigest, Comparison: solutionSampleComparison, Compiles: []SolutionCompileEvidence{}, Samples: []SolutionSampleEvidence{}}
 	var files []domain.PendingArtifact
 	publish := func(path string, role domain.ArtifactRole, media string, data []byte) (domain.PendingArtifact, error) {
-		pending, err := s.config.Publisher.Publish(ctx, port.ArtifactDeclaration{MediaType: media, Role: role, LogicalPath: domain.SafeRelPath(path), MaxBytes: int64(max(len(data), 1)), Provenance: domain.ProvenanceCandidate{SchemaVersion: solutionVerificationSchema, Producer: "solution-verifier", InputDigest: &content.ContentDigest}}, data)
+		pending, err := s.config.Publisher.Publish(ctx, port.ArtifactDeclaration{MediaType: media, Role: role, LogicalPath: domain.SafeRelPath(path), MaxBytes: int64(max(len(data), 1)), Provenance: domain.ProvenanceCandidate{SchemaVersion: domain.SchemaVersion(schema), Producer: "solution-verifier", InputDigest: &content.ContentDigest}}, data)
 		if err == nil {
 			files = append(files, pending)
 		}
@@ -221,9 +240,13 @@ func (s *SolutionVerifier) Verify(ctx context.Context, input domain.SolutionDraf
 		if err != nil {
 			return empty, err
 		}
-		expected, err := publish(fmt.Sprintf("solution/samples/%03d.out", index+1), domain.ArtifactOutput, "text/plain", []byte(sample.Output))
-		if err != nil {
-			return empty, err
+		var expected *domain.BlobRef
+		if !executed {
+			published, err := publish(fmt.Sprintf("solution/samples/%03d.out", index+1), domain.ArtifactOutput, "text/plain", []byte(sample.Output))
+			if err != nil {
+				return empty, err
+			}
+			expected = &published.Blob
 		}
 		for _, role := range roles {
 			run, err := s.config.Sandbox.Run(ctx, port.RunRequest{Role: role, Program: programs[role], Stdin: &stdin.Blob, Limits: port.RunLimits{Time: time.Duration(input.Problem.TimeLimitMS) * time.Millisecond, MemoryBytes: input.Problem.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}})
@@ -246,7 +269,7 @@ func (s *SolutionVerifier) Verify(ctx context.Context, input domain.SolutionDraf
 			if adapted.InfrastructureFailure || adapted.Outcome == nil {
 				return empty, errors.New("solution sample infrastructure failure")
 			}
-			check := SolutionSampleEvidence{Sample: index + 1, Role: role, Input: stdin.Blob, Expected: expected.Blob, Result: *run.Value}
+			check := SolutionSampleEvidence{Sample: index + 1, Role: role, Input: stdin.Blob, Expected: expected, Result: *run.Value}
 			verdict := string(*adapted.Outcome)
 			if *adapted.Outcome == domain.SolutionOK {
 				if run.Value.Stdout == nil || run.Value.Stdout.Blob.Size > 1<<20 {
@@ -264,14 +287,27 @@ func (s *SolutionVerifier) Verify(ctx context.Context, input domain.SolutionDraf
 					return empty, errors.New("sample stdout exceeds policy")
 				}
 				check.ActualTokenDigest = solutionTokenDigest(actual)
-				check.Matches = check.ActualTokenDigest == solutionTokenDigest([]byte(sample.Output))
+				if !executed {
+					check.Matches = check.ActualTokenDigest == solutionTokenDigest([]byte(sample.Output))
+				} else {
+					// The reference entry records process success only. A passing
+					// report additionally requires the independent brute entry.
+					check.Matches = true
+				}
+				if executed && role == port.RoleBrute {
+					reference := report.Samples[len(report.Samples)-1]
+					if !independentDataRuns(reference.Result.CallTrace, check.Result.CallTrace) {
+						return empty, errors.New("sample requires independent reference and brute executions")
+					}
+					check.Matches = check.ActualTokenDigest == reference.ActualTokenDigest
+				}
 				if !check.Matches {
 					verdict = "WA"
 				}
 			}
 			report.Samples = append(report.Samples, check)
 			if !check.Matches {
-				report.Reason = fmt.Sprintf("sample.%d.%s.%s", index+1, role, verdict)
+				report.Reason = solutionSampleReason(index+1, role, verdict, executed)
 				return finish()
 			}
 		}
@@ -284,6 +320,13 @@ func solutionTokenDigest(raw []byte) domain.Digest {
 	return judge.ExactTokenDigest(raw)
 }
 
+func solutionSampleReason(sample int, role port.ProgramRole, verdict string, executed ...bool) string {
+	if len(executed) > 0 && executed[0] && verdict == "WA" {
+		return fmt.Sprintf("sample.%d.differential.WA", sample)
+	}
+	return fmt.Sprintf("sample.%d.%s.%s", sample, role, verdict)
+}
+
 func (r SolutionVerificationReport) ValidateFor(input domain.SolutionDraftInputV1, content domain.SolutionContent) error {
 	if err := content.ValidateInput(input); err != nil {
 		return err
@@ -292,7 +335,8 @@ func (r SolutionVerificationReport) ValidateFor(input domain.SolutionDraftInputV
 	if err != nil {
 		return err
 	}
-	if r.SchemaVersion != solutionVerificationSchema || r.Comparison != solutionSampleComparison || r.InputDigest != digest || r.ContentDigest != content.ContentDigest || r.ProblemSpecDigest != input.Problem.SpecDigest || r.PolicyDigest.Validate() != nil || r.ToolchainLockDigest.Validate() != nil {
+	executed := r.SchemaVersion == executedSolutionVerificationSchema
+	if r.SchemaVersion != solutionVerificationSchema && !executed || r.Comparison != solutionSampleComparison || r.InputDigest != digest || r.ContentDigest != content.ContentDigest || r.ProblemSpecDigest != input.Problem.SpecDigest || r.PolicyDigest != solutionVerificationPolicyDigest(r.ToolchainLockDigest, r.SchemaVersion) || r.ToolchainLockDigest.Validate() != nil {
 		return errors.New("solution verification report binding differs")
 	}
 	if len(r.Compiles) < 1 || len(r.Compiles) > 2 {
@@ -331,7 +375,14 @@ func (r SolutionVerificationReport) ValidateFor(input domain.SolutionDraftInputV
 			return errors.New("sample evidence is incomplete or out of order")
 		}
 		problemSample := input.Problem.Samples[index/2]
-		if sample.Input != (domain.BlobRef{Digest: domain.SumBytes([]byte(problemSample.Input)), Size: int64(len(problemSample.Input))}) || sample.Expected != (domain.BlobRef{Digest: domain.SumBytes([]byte(problemSample.Output)), Size: int64(len(problemSample.Output))}) {
+		if sample.Input != (domain.BlobRef{Digest: domain.SumBytes([]byte(problemSample.Input)), Size: int64(len(problemSample.Input))}) {
+			return errors.New("sample evidence differs from the problem")
+		}
+		if executed {
+			if sample.Expected != nil {
+				return errors.New("executed sample evidence retains a model answer")
+			}
+		} else if sample.Expected == nil || *sample.Expected != (domain.BlobRef{Digest: domain.SumBytes([]byte(problemSample.Output)), Size: int64(len(problemSample.Output))}) {
 			return errors.New("sample evidence differs from the problem")
 		}
 		adapted, err := judge.AdaptSolution(sample.Result)
@@ -343,7 +394,18 @@ func (r SolutionVerificationReport) ValidateFor(input domain.SolutionDraftInputV
 		}
 		verdict := string(*adapted.Outcome)
 		if *adapted.Outcome == domain.SolutionOK {
-			if sample.Result.Stdout == nil || sample.Result.Stdout.Blob.Size > 1<<20 || sample.ActualTokenDigest.Validate() != nil || sample.Matches != (sample.ActualTokenDigest == solutionTokenDigest([]byte(problemSample.Output))) {
+			matches := sample.ActualTokenDigest == solutionTokenDigest([]byte(problemSample.Output))
+			if executed {
+				matches = true
+			}
+			if executed && sample.Role == port.RoleBrute {
+				reference := r.Samples[index-1]
+				if !independentDataRuns(reference.Result.CallTrace, sample.Result.CallTrace) {
+					return errors.New("sample requires independent reference and brute executions")
+				}
+				matches = sample.ActualTokenDigest == reference.ActualTokenDigest
+			}
+			if sample.Result.Stdout == nil || sample.Result.Stdout.Blob.Size > 1<<20 || sample.ActualTokenDigest.Validate() != nil || sample.Matches != matches {
 				return errors.New("sample token comparison is inconsistent")
 			}
 			if !sample.Matches {
@@ -353,7 +415,7 @@ func (r SolutionVerificationReport) ValidateFor(input domain.SolutionDraftInputV
 			return errors.New("failed process claimed matching output")
 		}
 		if !sample.Matches {
-			failure = fmt.Sprintf("sample.%d.%s.%s", sample.Sample, sample.Role, verdict)
+			failure = solutionSampleReason(sample.Sample, sample.Role, verdict, executed)
 		}
 	}
 	if r.Passed {

@@ -10,6 +10,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/packageprobe"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 const generationPackageProducer = "mvp-package"
@@ -52,7 +53,11 @@ func (s *PackageExecutor) Run(ctx context.Context, view domain.RunView) (Package
 	if err != nil {
 		return empty, err
 	}
-	pending, err := publisher.Publish(ctx, port.ArtifactDeclaration{LogicalPath: "package/problem.zip", Role: domain.ArtifactOutput, MediaType: "application/zip", MaxBytes: int64(len(raw)), Provenance: domain.ProvenanceCandidate{SchemaVersion: "cpgen.package/v2", Producer: generationPackageProducer, InputDigest: &digest}}, raw)
+	packageSchema := packageprobe.GenerationPackageSchemaVersionV2
+	if view.WorkflowRevision() == workflow.ExecutedSamplesRevision {
+		packageSchema = packageprobe.GenerationPackageSchemaVersion
+	}
+	pending, err := publisher.Publish(ctx, port.ArtifactDeclaration{LogicalPath: "package/problem.zip", Role: domain.ArtifactOutput, MediaType: "application/zip", MaxBytes: int64(len(raw)), Provenance: domain.ProvenanceCandidate{SchemaVersion: packageSchema, Producer: generationPackageProducer, InputDigest: &digest}}, raw)
 	if err != nil {
 		return empty, err
 	}

@@ -44,7 +44,7 @@ func (s *DataExecutor) RunJudge(ctx context.Context, view domain.RunView, factor
 	if err != nil {
 		return empty, err
 	}
-	verifier, err := NewJudgeVerifier(JudgeVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: s.blobs, ToolchainLockDigest: lockDigest})
+	verifier, err := NewJudgeVerifier(JudgeVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: s.blobs, ToolchainLockDigest: lockDigest, WorkflowRevision: view.WorkflowRevision()})
 	if err != nil {
 		return empty, err
 	}

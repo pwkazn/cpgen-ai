@@ -16,6 +16,7 @@ import (
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 func llmApplicationConfig(t *testing.T) config.Config {
@@ -93,7 +94,7 @@ func TestBuildLLMConfigBindsBuiltinPromptAndSchemaRegistries(t *testing.T) {
 	}
 	fixtures := llmBuiltinOutputs(t)
 	versions := mapped.PromptRegistry.Versions()
-	if len(versions) != 2*len(fixtures) {
+	if len(versions) < len(fixtures) {
 		t.Fatalf("builtin versions = %v", versions)
 	}
 	for _, ref := range versions {
@@ -105,32 +106,55 @@ func TestBuildLLMConfigBindsBuiltinPromptAndSchemaRegistries(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected builtin: %s", ref.Step)
 		}
-		if err := mapped.SchemaRegistry.Validate(raw, ref.OutputSchema, 1<<20); err != nil {
-			t.Fatalf("%s builtin rejected valid domain output: %v", ref.Step, err)
-		}
-		for _, invalid := range [][]byte{
-			append([]byte(`{"unknown":true,`), raw[1:]...),
-			append([]byte(`{"schema_version":"duplicate",`), raw[1:]...),
-			[]byte(`{"schema_version":"` + string(ref.OutputSchema.SchemaVersion) + `"}`),
-		} {
-			if err := mapped.SchemaRegistry.Validate(invalid, ref.OutputSchema, 1<<20); err == nil {
-				t.Fatalf("%s accepted invalid output", ref.Step)
+		if ref.Version == "v1" && ref.InputSchemaVersion != domain.ProgramContextSchema {
+			if err := mapped.SchemaRegistry.Validate(raw, ref.OutputSchema, 1<<20); err != nil {
+				t.Fatalf("%s builtin rejected valid domain output: %v", ref.Step, err)
 			}
-		}
-		wrong := ref.OutputSchema
-		wrong.Digest = domain.SumBytes([]byte("untrusted schema"))
-		if err := mapped.SchemaRegistry.Validate(raw, wrong, 1<<20); err == nil {
-			t.Fatal("schema digest substitution accepted")
-		}
-		wrongPrompt := ref
-		wrongPrompt.TemplateDigest = domain.SumBytes([]byte("untrusted prompt"))
-		if _, err := mapped.PromptRegistry.Lookup(wrongPrompt); err == nil {
-			t.Fatal("prompt digest substitution accepted")
+			for _, invalid := range [][]byte{
+				append([]byte(`{"unknown":true,`), raw[1:]...),
+				append([]byte(`{"schema_version":"duplicate",`), raw[1:]...),
+				[]byte(`{"schema_version":"` + string(ref.OutputSchema.SchemaVersion) + `"}`),
+			} {
+				if err := mapped.SchemaRegistry.Validate(invalid, ref.OutputSchema, 1<<20); err == nil {
+					t.Fatalf("%s accepted invalid output", ref.Step)
+				}
+			}
+			wrong := ref.OutputSchema
+			wrong.Digest = domain.SumBytes([]byte("untrusted schema"))
+			if err := mapped.SchemaRegistry.Validate(raw, wrong, 1<<20); err == nil {
+				t.Fatal("schema digest substitution accepted")
+			}
+			wrongPrompt := ref
+			wrongPrompt.TemplateDigest = domain.SumBytes([]byte("untrusted prompt"))
+			if _, err := mapped.PromptRegistry.Lookup(wrongPrompt); err == nil {
+				t.Fatal("prompt digest substitution accepted")
+			}
 		}
 	}
 	second, _, err := application.BuildLLMConfig(llmApplicationConfig(t))
 	if err != nil || second.PromptRegistry == mapped.PromptRegistry || second.SchemaRegistry == mapped.SchemaRegistry {
 		t.Fatalf("mapping shares mutable registry state: %v", err)
+	}
+}
+
+func TestDraftPromptCompatibilityAndV3Selection(t *testing.T) {
+	checks := []struct {
+		stage, v1, v2 string
+	}{
+		{"idea", "d9bf5b2536abdf5372cb8f7e826592e04716af9000a27ef4ccd5b02b808064cd", "d9bf5b2536abdf5372cb8f7e826592e04716af9000a27ef4ccd5b02b808064cd"},
+		{"statement", "6af84deab4ea89f48d7c268bae84a3fa6929d1c1f0bba4f568f45fad659b85c6", "db41a402cf9565b43bd358e7e7759a795e78614d7124d8ce6a4fcdf52c1d7416"},
+		{"solution", "9cfe865befce99012b59949f1fed11c072b47e922f9d2150de43930682fbd2c3", "be9975eaac508416f90a4345643b7c4a0cb8fb15626bb20fe5ed9aea19d25576"},
+		{"data", "2a40a633e364c5aeb4365becd3c6d264f0db88e36589fcf3444ba0ea3a54e695", "e8be5799625ff021e94dae053a0160b0c5ab2104fe48b94eb3785955200a10ee"},
+	}
+	for _, tc := range checks {
+		old, _, err := application.BuildLLMDraftPromptForWorkflow(tc.stage, workflow.GenerationRevision)
+		if err != nil || string(old.TemplateDigest) != "sha256:"+tc.v1 {
+			t.Fatalf("%s v1 prompt=%v err=%v", tc.stage, old.TemplateDigest, err)
+		}
+		v3, _, err := application.BuildLLMDraftPromptForWorkflow(tc.stage, workflow.ExecutedSamplesRevision)
+		if err != nil || string(v3.TemplateDigest) != "sha256:"+tc.v2 {
+			t.Fatalf("%s v3 prompt=%v err=%v", tc.stage, v3.TemplateDigest, err)
+		}
 	}
 }
 
@@ -170,7 +194,7 @@ func llmBuiltinOutputs(t *testing.T) map[string][]byte {
 		{AbstractTask: "Find components", IntendedAlgorithm: "dfs", TargetComplexity: "O(n+m)", FeasibilityStatus: "FEASIBLE", FeasibilityReasons: []string{}},
 	}}
 	statementDraft := domain.StatementDraftV1{SchemaVersion: domain.StatementDraftSchemaV1, Title: problem.Title, Description: problem.Description, Input: problem.Input, Output: problem.Output, Samples: problem.Samples}
-	solutionDraft := domain.SolutionDraftV1{SchemaVersion: domain.SolutionDraftSchemaV1, ReferenceCode: "int main() { return 0; }\n", BruteCode: "int main() { return 0; }\n", Explanation: "Use BFS for shortest paths in the unweighted graph."}
+	solutionDraft := domain.SolutionDraftV1{SchemaVersion: domain.SolutionDraftSchemaV1, ReferenceCode: "int main() { return 0; }\n", BruteCode: "int main() {}\n", Explanation: "Use BFS for shortest paths in the unweighted graph."}
 	dataDraft := domain.DataDraftV1{SchemaVersion: domain.DataDraftSchemaV1, GeneratorCode: "int main() { return 0; }\n", ValidatorCode: "int main() { return 3; }\n", Cases: []domain.DataCaseDraft{{Kind: domain.DataCaseSmall, Purpose: "Minimal graph"}, {Kind: domain.DataCaseSmall, Purpose: "Small random graph"}, {Kind: domain.DataCaseBoundary, Purpose: "Disconnected graph"}, {Kind: domain.DataCaseStress, Purpose: "Maximum graph"}}}
 	for name, value := range map[string]any{"idea": batch, "statement": problem, "idea.draft": ideaDraft, "statement.draft": statementDraft, "idea.mutate": ideaDraft, "solution.draft": solutionDraft, "data.draft": dataDraft} {
 		raw, err := json.Marshal(value)

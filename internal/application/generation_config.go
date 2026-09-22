@@ -49,7 +49,7 @@ func BuildGenerationExecutionSettings(cfg config.Config) (GenerationReaderOption
 	if err := digest.Validate(); err != nil {
 		return content, retry, err
 	}
-	content = GenerationReaderOptions{IdeaCount: cfg.Workflow.IdeaCount, SelectionPolicy: domain.SelectionOrdinalPolicyV1, StatementRevision: 1, ProviderPolicyDigest: digest, Sampling: port.SamplingPolicy{TopP: 1}, MaxOutput: output}
+	content = GenerationReaderOptions{WorkflowRevision: cfg.Workflow.Revision, DataPromptVersion: cfg.LLM.DataPromptVersion, IdeaCount: cfg.Workflow.IdeaCount, SelectionPolicy: domain.SelectionOrdinalPolicyV1, StatementRevision: 1, ProviderPolicyDigest: digest, Sampling: port.SamplingPolicy{TopP: 1}, MaxOutput: output}
 	retry = domain.RetryPolicy{MaxAttempts: 2, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 2 * time.Second, JitterSeedDigest: domain.SumBytes([]byte("cpgen.slice2-transport/v1\x00" + string(digest)))}
 	return content, retry, retry.Validate()
 }

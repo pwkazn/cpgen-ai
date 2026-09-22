@@ -1,13 +1,16 @@
 # Ordinary problem workflow: accepted Similarity -> Solution -> Data -> Judge
-# -> Quality -> verified Package/READY. V2 permits two content regenerations
-# per run within the original budgets; unresolved failures require review.
+# -> independently executed samples -> Quality -> verified Package/READY.
+# V3 keeps V2's two bounded content regenerations and finalizes sample answers
+# from independent std/brute execution; model answers remain draft evidence.
+# Each run retains V2's bounded retries within the original budgets; unresolved
+# failures require review.
 # Replace paths, endpoints, identities and the all-zero toolchain lock digest.
 storage:
   # Absolute path required. The Windows form is shown; on Linux and macOS use
   # the native form instead, e.g. /home/you/cpgen-private/mvp.
   state_root: D:/cpgen-private/mvp
 workflow:
-  revision: mvp.idea.statement.similarity.solution.data.judge.package.v2
+  revision: mvp.idea.statement.similarity.solution.data.judge.package.v3
   idea_count: 2
   llm_cost_upper_bound_micro_usd: 100000
   similarity_cost_upper_bound_micro_usd: 100000
@@ -19,6 +22,7 @@ llm:
   max_output_tokens: 8192
   max_response_bytes: 1048576
   max_format_repairs: 0
+  data_prompt_version: v3
 similarity:
   endpoint: https://similarity.example.com/search
   api_key_env: CPGEN_SIMILARITY_API_KEY

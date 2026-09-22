@@ -103,15 +103,23 @@ go run ./cmd/cpgen --config config/slice2.example.yaml generate --request config
 | `max_output_tokens` | `4096` | 1 到 1048576 的整数；应用策略界限，而非提供方能力声明 |
 | `max_response_bytes` | `1048576` | 1 到 67108864 的整数 |
 | `max_format_repairs` | `0` | 整数 0 或 1；一次可选的 JSON 格式重新生成，单独计量 |
+| `data_prompt_version` | 空值，沿用历史选择 | 空字符串或 `v3`；显式 `v3` 仅允许工作流 V3，选择包含完整 generator 参数解析示例的内置 Data 提示 |
 
 未知和重复的键、别名/合并键、null、错误的标量类型、
 空的必需字符串以及无效或越界的值都会被拒绝，并给出限定
 字段的错误。默认值仅适用于被省略的限额字段。没有
-可配置的 prompt、schema、原始 API key、HTTP 测试旁路或适配器重试
+可配置的 prompt 文本、schema、原始 API key、HTTP 测试旁路或适配器重试
 字段。超时在有效输出中被规范化为 duration 字符串；所有
 提供方字段（包括凭据引用）都参与摘要。
 被禁用的修复默认值会从有效 JSON 中省略，以保留较旧的
 提供方快照；启用它会改变有效策略摘要。
+
+`mvp.example.yaml` 显式选择 `llm.data_prompt_version: v3`。此版本明确
+generator 收到的是 `--seed=42`、`--case=1`、`--kind=small` 三个完整参数，
+应分别剥离七字符前缀，并用无符号 64 位整数解析 seed。
+省略或设置为空字符串时，有效 JSON 不增加此字段：旧 V1/V2 工作流仍使用
+Data 提示 v1，旧 V3 工作流仍使用 Data 提示 v2。显式选择 v3 会改变配置摘要，
+仅用于新 run；恢复、读取和格式修复都遵循 run 的冻结选择，不升级历史提示。
 
 `application.BuildLLMConfig(config.Config)` 返回 `(agent.Config,
 port.OutputLimit, error)`。它拒绝缺失的提供方，将 `MaxAttempts` 固定为
@@ -187,12 +195,19 @@ Docker；只有查重被替换为本地 TLS fixture。它要求以下所有
 提供方 fixture 测试和成功的认证并不能确立一次
 成功的实时生成 run；请查阅保留的验收结果。
 
-MVP 示例现在选择工作流 `mvp.idea.statement.similarity.solution.data.judge.package.v2`。
-V2 每次 run 最多允许两次自动内容重新生成，使用现有的
+MVP 示例现在选择工作流 `mvp.idea.statement.similarity.solution.data.judge.package.v3`。
+工作流版本保持向后兼容：V1 是原始的固定流程，V2 增加每个 run
+最多两次有界内容重新生成，V3 在此基础上加入独立执行样例定稿。
+V2/V3 每次 run 最多允许两次自动内容重新生成，使用现有的
 调用/token/成本/时间预算。它在绑定/JSON 格式
 失败后重新生成草稿，在编译/评测失败后重新生成题解，在样例失败后重新生成
 题面及其下游阶段，在 generator/validator 失败后重新生成数据。
 每次验证都会重新运行；失败的尝试仍可在 SQLite 的
 `content_retries` 和普通调用/阶段记录中审计。耗尽后返回 NEEDS_REVIEW。
 这是从原始输入重新生成，而非诊断引导的修复。
-冻结的 V1 run 保持其原有行为；创建新 run 时选择 V2。
+冻结的 V1/V2 run 保持其原有行为；创建新 run 时选择 V3。
+
+
+## 执行样例工作流
+
+`mvp.example.yaml` 选择 workflow v3 和 `cpgen.package/v3` manifest；V1 保留历史固定流程，V2 增加有界内容重生成，V3 在相同预算边界内加入独立执行样例定稿。V1/V2 旧 run 由兼容路径按持久化 workflow identity 读取，新 run 使用 V3 配置；详见[样例策略与恢复](../docs/design/executed-samples.md)。

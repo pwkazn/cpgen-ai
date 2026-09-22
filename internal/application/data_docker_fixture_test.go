@@ -72,3 +72,22 @@ std::cin>>std::ws;return std::cin.peek()==std::char_traits<char>::eof()?0:3;}
 	outputs["data.draft"] = raw
 	return outputs
 }
+
+func executedSamplesDockerOutputs(t *testing.T, mode string) map[string][]byte {
+	t.Helper()
+	outputs := dataDockerOutputs(t, mode)
+	var statement domain.StatementDraftV1
+	if err := json.Unmarshal(outputs["statement.draft"], &statement); err != nil {
+		t.Fatal(err)
+	}
+	for i := range statement.Samples {
+		statement.Samples[i].Output = "STALE_MODEL_ANSWER"
+		statement.Samples[i].Explanation = "STALE_MODEL_EXPLANATION"
+	}
+	var err error
+	outputs["statement.draft"], err = json.Marshal(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return outputs
+}

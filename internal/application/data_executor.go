@@ -43,7 +43,7 @@ func (s *DataExecutor) CollectDraft(ctx context.Context, view domain.RunView, in
 	if err != nil || expectedDigest != digest {
 		return result, errors.New("data input differs from current verified Solution")
 	}
-	variables, err := input.CanonicalJSON()
+	variables, err := dataDraftVariables(view.WorkflowRevision(), input)
 	if err != nil {
 		return result, err
 	}
@@ -89,7 +89,7 @@ func (s *DataExecutor) ReconcileDraft(ctx context.Context, runID domain.RunID) e
 	if err != nil || digest != attempt.InputDigest {
 		return errors.New("data cleanup input differs")
 	}
-	variables, err := input.Value.CanonicalJSON()
+	variables, err := dataDraftVariables(current.WorkflowRevision, *input.Value)
 	if err != nil {
 		return err
 	}

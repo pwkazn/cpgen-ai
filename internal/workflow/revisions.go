@@ -7,6 +7,8 @@ import "cpgen/internal/domain"
 const (
 	GenerationRevision         = "mvp.idea.statement.similarity.solution.data.judge.package.v1"
 	RetryingGenerationRevision = "mvp.idea.statement.similarity.solution.data.judge.package.v2"
+	ExecutedSamplesRevision    = "mvp.idea.statement.similarity.solution.data.judge.package.v3"
+	LegacyGenerationRevision   = GenerationRevision
 	FakeRevision               = "slice1.fake.v1"
 
 	LegacySimilarityRevision           = "slice2.idea.statement.similarity.v1"
@@ -15,7 +17,7 @@ const (
 )
 
 func ProducesPackage(revision string) bool {
-	return revision == GenerationRevision || revision == RetryingGenerationRevision
+	return revision == GenerationRevision || revision == RetryingGenerationRevision || revision == ExecutedSamplesRevision
 }
 
 // Historical runs use the same application scheduler and executors. Only their

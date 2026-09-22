@@ -16,6 +16,7 @@ import (
 	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
 	"cpgen/internal/similarity"
+	"cpgen/internal/workflow"
 )
 
 type CommittedSimilarityReader interface {
@@ -66,7 +67,7 @@ func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (dom
 	if input.Value == nil {
 		return empty, errors.New("solution draft has no accepted current source")
 	}
-	variables, err := input.Value.CanonicalJSON()
+	variables, err := solutionDraftVariables(s.revision, *input.Value)
 	if err != nil {
 		return empty, err
 	}
@@ -83,6 +84,9 @@ func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (dom
 	if err := json.Unmarshal(raw, &draft); err != nil {
 		return empty, err
 	}
+	if err := validateSolutionDraftForWorkflow(s.revision, draft); err != nil {
+		return empty, err
+	}
 	content, err := draft.Bind(*input.Value)
 	if err != nil {
 		return empty, err
@@ -91,6 +95,20 @@ func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (dom
 		return empty, errors.New("committed solution digest differs from reconstructed content")
 	}
 	return content, nil
+}
+
+func solutionDraftVariables(revision string, input domain.SolutionDraftInputV1) ([]byte, error) {
+	if revision == workflow.ExecutedSamplesRevision {
+		return input.ProgramContextJSON()
+	}
+	return input.CanonicalJSON()
+}
+
+func validateSolutionDraftForWorkflow(revision string, draft domain.SolutionDraftV1) error {
+	if revision == workflow.ExecutedSamplesRevision {
+		return draft.ValidateDistinctSources()
+	}
+	return draft.Validate()
 }
 
 type solutionVerificationReadStore interface {
@@ -147,7 +165,11 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		return artifact.ReadVerified(ctx, blobs, expected, limit)
 	}
 	item, found := items["solution/verification.json"]
-	if !found || item.Blob.Blob.Digest != *attempt.OutputDigest || item.Blob.MediaType != "application/vnd.cpgen.solution-verification+json" || item.Blob.Provenance.SchemaVersion != solutionVerificationSchema || item.Blob.Provenance.Producer != "solution-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != content.ContentDigest {
+	wantSchema := domain.SchemaVersion(solutionVerificationSchema)
+	if s.revision == workflow.ExecutedSamplesRevision {
+		wantSchema = domain.SchemaVersion(executedSolutionVerificationSchema)
+	}
+	if !found || item.Blob.Blob.Digest != *attempt.OutputDigest || item.Blob.MediaType != "application/vnd.cpgen.solution-verification+json" || item.Blob.Provenance.SchemaVersion != wantSchema || item.Blob.Provenance.Producer != "solution-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != content.ContentDigest {
 		return empty, errors.New("verification output lacks its committed report binding")
 	}
 	raw, err := read(item.Blob.LogicalPath, item.Blob.Blob, domain.ArtifactOutput, 1<<20)
@@ -158,6 +180,9 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return empty, err
 	}
+	if report.SchemaVersion != string(wantSchema) {
+		return empty, errors.New("verification report schema differs from the frozen workflow")
+	}
 	canonical, err := json.Marshal(report)
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return empty, errors.New("verification report is not canonical")
@@ -165,7 +190,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 	if err := report.ValidateFor(*input.Value, content); err != nil {
 		return empty, err
 	}
-	if report.ToolchainLockDigest != lockDigest || report.PolicyDigest != solutionVerificationPolicyDigest(lockDigest) {
+	if report.ToolchainLockDigest != lockDigest || report.PolicyDigest != solutionVerificationPolicyDigest(lockDigest, report.SchemaVersion) {
 		return empty, errors.New("verification policy differs from the frozen toolchain")
 	}
 	verifyPending := func(p *domain.PendingArtifact) error {
@@ -257,8 +282,13 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 		if _, err := read(domain.SafeRelPath(fmt.Sprintf("solution/samples/%03d.in", sample.Sample)), sample.Input, domain.ArtifactInput, 1<<20); err != nil {
 			return empty, err
 		}
-		if _, err := read(domain.SafeRelPath(fmt.Sprintf("solution/samples/%03d.out", sample.Sample)), sample.Expected, domain.ArtifactOutput, 1<<20); err != nil {
-			return empty, err
+		if report.SchemaVersion == solutionVerificationSchema {
+			if sample.Expected == nil {
+				return empty, errors.New("legacy verification sample lacks its expected output")
+			}
+			if _, err := read(domain.SafeRelPath(fmt.Sprintf("solution/samples/%03d.out", sample.Sample)), *sample.Expected, domain.ArtifactOutput, 1<<20); err != nil {
+				return empty, err
+			}
 		}
 		request := port.RunRequest{Role: sample.Role, Program: programs[sample.Role], Stdin: &sample.Input, Limits: port.RunLimits{Time: time.Duration(input.Value.Problem.TimeLimitMS) * time.Millisecond, MemoryBytes: input.Value.Problem.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}}
 		if err := verifyResult(domain.CallSandboxRun, request, sample.Result, func(i docker.PlanIdentity) (port.ContainerPlan, error) {

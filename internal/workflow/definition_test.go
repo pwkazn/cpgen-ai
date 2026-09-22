@@ -16,6 +16,8 @@ func TestDefinitionPreservesPersistedContracts(t *testing.T) {
 		generation, solution, pkg bool
 	}{
 		{"generation", GenerationRevision, "mvp.idea.statement.similarity.solution.data.judge.package.v1", []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}, true, true, true},
+		{"retrying generation", RetryingGenerationRevision, "mvp.idea.statement.similarity.solution.data.judge.package.v2", []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}, true, true, true},
+		{"executed samples", ExecutedSamplesRevision, "mvp.idea.statement.similarity.solution.data.judge.package.v3", []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}, true, true, true},
 		{"fake", FakeRevision, "slice1.fake.v1", []domain.StageName{"prepare", "exercise", "checkpoint"}, false, false, false},
 		{"legacy similarity", LegacySimilarityRevision, "slice2.idea.statement.similarity.v1", []domain.StageName{"idea", "statement", "similarity"}, true, false, false},
 		{"legacy similarity checkpoint", LegacySimilarityCheckpointRevision, "slice2.idea.statement.similarity.checkpoint.v1", []domain.StageName{"idea", "statement", "similarity", "slice2_checkpoint"}, true, false, false},

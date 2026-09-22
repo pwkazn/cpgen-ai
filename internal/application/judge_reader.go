@@ -9,6 +9,7 @@ import (
 	artifact "cpgen/internal/artifact"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 // ReadJudgeVerification proves the retained programs, validated inputs, exact
@@ -38,7 +39,11 @@ func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.Run
 	}
 	metadata := func(path domain.SafeRelPath, media string) (port.CommittedPrivateStageArtifact, error) {
 		item, found := reader.items[path]
-		if !found || item.Blob.MediaType != media || item.Blob.Provenance.SchemaVersion != judgeVerificationSchema || item.Blob.Provenance.Producer != "judge-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != digest {
+		wantSchema := domain.SchemaVersion(judgeVerificationSchema)
+		if s.solution.revision == workflow.ExecutedSamplesRevision {
+			wantSchema = domain.SchemaVersion(executedJudgeVerificationSchema)
+		}
+		if !found || item.Blob.MediaType != media || item.Blob.Provenance.SchemaVersion != wantSchema || item.Blob.Provenance.Producer != "judge-verifier" || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != digest {
 			return item, errors.New("Judge artifact lost its committed data binding")
 		}
 		return item, nil
@@ -61,6 +66,13 @@ func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.Run
 	var report JudgeVerificationReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return empty, err
+	}
+	wantReportSchema := judgeVerificationSchema
+	if s.solution.revision == workflow.ExecutedSamplesRevision {
+		wantReportSchema = executedJudgeVerificationSchema
+	}
+	if report.SchemaVersion != wantReportSchema {
+		return empty, errors.New("Judge report schema differs from the frozen workflow")
 	}
 	canonical, err := json.Marshal(report)
 	if err != nil || !bytes.Equal(raw, canonical) {
@@ -116,6 +128,19 @@ func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.Run
 		}
 		if err := local("judge/dataset.json", raw, "application/vnd.cpgen.judged-dataset+json"); err != nil {
 			return empty, err
+		}
+		if report.SchemaVersion == executedJudgeVerificationSchema {
+			final, err := FinalizeSamples(ctx, s.blobs, input, report)
+			if err != nil {
+				return empty, err
+			}
+			raw, err = json.Marshal(final)
+			if err != nil {
+				return empty, err
+			}
+			if err := local("judge/final-statement.json", raw, "application/vnd.cpgen.finalized-statement+json"); err != nil {
+				return empty, err
+			}
 		}
 	}
 	return report, reader.complete()
