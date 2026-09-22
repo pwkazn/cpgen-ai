@@ -24,7 +24,12 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw = []byte(strings.Replace(string(raw), "D:/cpgen-private/mvp", filepath.ToSlash(filepath.Join(t.TempDir(), "state")), 1))
+	// The example ships Windows absolute paths, but the loader requires both
+	// state_root and toolchain_lock_path to be absolute, and D:/ is not
+	// absolute on Linux or macOS. Move every path onto this host, not just the
+	// first one, or config.Decode rejects the example off Windows.
+	root := filepath.ToSlash(t.TempDir())
+	raw = []byte(strings.ReplaceAll(string(raw), "D:/cpgen-private", root))
 	for _, tc := range []struct{ name, revision, selected, want string }{
 		{"legacy-v1", workflow.GenerationRevision, "", "v1"},
 		{"legacy-v2", workflow.RetryingGenerationRevision, "", "v1"},
