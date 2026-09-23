@@ -698,6 +698,10 @@ type ProblemSample struct {
 	Output      string `json:"output"`
 	Explanation string `json:"explanation,omitempty"`
 }
+
+// In the executed-samples workflow this is the immutable Statement proposal. Sample
+// output and explanation fields are unverified; FinalizedStatement is the
+// separate publication derived from independently checked execution.
 type ProblemSpec struct {
 	SchemaVersion          string          `json:"schema_version"`
 	Revision               int64           `json:"revision"`

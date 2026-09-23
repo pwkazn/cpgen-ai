@@ -192,7 +192,7 @@ func Decode(data []byte) (Config, error) {
 		"sqlite":        {"busy_timeout": {}, "max_readers": {}},
 		"runtime":       {"lock_poll_interval": {}, "control_poll_interval": {}, "accounting_heartbeat": {}, "cleanup_wait": {}},
 		"fake_workflow": {"scenario": {}},
-		"llm":           {"base_url": {}, "model": {}, "api_key_env": {}, "timeout": {}, "max_output_tokens": {}, "max_response_bytes": {}, "max_format_repairs": {}},
+		"llm":           {"base_url": {}, "model": {}, "api_key_env": {}, "timeout": {}, "max_output_tokens": {}, "max_response_bytes": {}, "max_format_repairs": {}, "data_prompt_version": {}},
 		"workflow":      {"revision": {}, "idea_count": {}, "llm_cost_upper_bound_micro_usd": {}, "similarity_cost_upper_bound_micro_usd": {}},
 		"similarity":    {"endpoint": {}, "api_key_env": {}, "provider_identity": {}, "service_identity": {}, "timeout": {}, "max_response_bytes": {}, "limit": {}, "policy_ref": {}, "acceptance_threshold": {}, "rejection_threshold": {}, "minimum_hits": {}},
 		"sandbox":       {"engine_endpoint": {}, "toolchain_lock_path": {}, "toolchain_lock_digest": {}},

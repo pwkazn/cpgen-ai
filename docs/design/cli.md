@@ -6,34 +6,31 @@
 
 CLI 是 Phase 1 唯一的接口。命令打开本地资源，执行有界的前台工作，打印稳定输出，然后退出。不存在后台工作流进程或远程控制端点。
 
-人类可读输出中，进度写入 stderr，结果写入 stdout。JSON 模式输出一个带版本的信封，不含任何装饰性文本。密钥以及原始私有 prompt 或源码内容永不记入日志。
+状态命令默认将 JSON 信封写入 stdout，进度写入 stderr。help、version 与 doctor 是独立入口；version 可选 `--json`，doctor 要求 `--json`。密钥以及原始私有 prompt 或源码内容永不记入日志。
 
 ## 2. 全局选项
 
 ~~~text
 --config PATH
---workspace PATH
---json
---quiet
---log-level LEVEL
 ~~~
 
-路径在使用前会先规范化。运行时目录、数据库、锁、制品、staging 与看门狗控制必须保持私有。
+状态命令使用 `cpgen --config PATH <command>`，下文省略此前缀。help、version 和 doctor 不接受 `--config`。当前没有全局 `--workspace`、`--json`、`--quiet` 或 `--log-level`。路径在使用前会先规范化。运行时目录、数据库、锁、制品、staging 与看门狗控制必须保持私有。
 
 ## 3. 配置与诊断
 
 ~~~text
-cpgen config check [--request request.yaml]
-cpgen doctor [--docker] [--providers]
+cpgen --config PATH config validate
+cpgen --config PATH config effective --redact
+cpgen doctor --json --engine-endpoint ENDPOINT --api-version VERSION --builder-image SHA256 --runtime-image SHA256 --transfer-image SHA256 --execution-protocol docker-direct-v2
 ~~~
 
-config check 解析、合并、规范化、脱敏并校验配置，且不改变 run 状态。doctor 报告类型化的能力结果，不持久化工作流进度。
+config validate 校验配置，不读取工具链锁或联系外部服务；effective 要求显式 `--redact`。doctor 检查 Docker 与工具链能力，不检查模型或查重提供方，也不持久化工作流进度。
 
 ## 4. generate 与 run 命令
 
 ~~~text
 cpgen generate --request request.yaml
-cpgen run list [--state STATE]
+cpgen run list [--state STATE] [--limit N]
 cpgen run show <run-id>
 cpgen run events <run-id> [--after-version N]
 cpgen run resume <run-id>
@@ -56,25 +53,23 @@ run cancel 插入一个幂等的取消请求。当执行器活跃时，它会观
 
 ~~~text
 cpgen review show <run-id>
-cpgen review revise <run-id> --patch FILE --reason TEXT
-cpgen review retry <run-id> --reason TEXT
-cpgen review waive <run-id> --policy RULE --reason TEXT
-cpgen review reject <run-id> --reason TEXT
+cpgen review revise <run-id> --reviewer NAME --step STEP --patch FILE --reason TEXT
+cpgen review retry <run-id> --reviewer NAME [--budget-patch FILE] [--evidence DIGEST] --reason TEXT
+cpgen review waive <run-id> --reviewer NAME --gate DIGEST --evidence DIGEST --reason TEXT
+cpgen review reject <run-id> --reviewer NAME --reason TEXT
 ~~~
 
 会改变状态的复核命令仅对 NEEDS_REVIEW 有效，它创建一个不可变的 PENDING ReviewDecision，绑定到期望的 run 版本、工作流 revision、当前阶段输入、证据与策略。它不会直接继续 run。用户随后执行 run resume。
 
-show 呈现当前复核 checkpoint、待决决定、预算与所引用的证据。
+retry 至少需要 `--budget-patch` 或 `--evidence` 之一。waive 仍受阶段可豁免策略限制，不能越过不可豁免的查重或质量门禁。show 呈现当前复核状态与决定。
 
 ## 6. 题包命令
 
 ~~~text
-cpgen package verify PATH
-cpgen package export <run-id> --format internal|polygon --output PATH
-cpgen gc
+cpgen --config PATH run export <run-id> --output PATH
 ~~~
 
-verify 将输入视为不可信，执行结构与语义检查，且不修改 run。export 要求存在已校验的题包 occurrence，并通过私有 staging 目录写入，最后原子发布。gc 是显式的维护操作，会获取独占的制品锁。
+export 要求 READY 和当前已校验的题包 occurrence，重新核验已提交证明后原子发布，拒绝覆盖目标；目标父目录必须存在并支持硬链接。新 run 的工具链快照允许原锁文件丢失后的离线导出。独立 ZIP 编译执行由验收测试提供；`package verify`、`package export`、Polygon 导出和 `gc` 尚不是公开 CLI 命令。制品维护仅提供 application API。
 
 ## 7. 重启语义
 
@@ -82,7 +77,7 @@ verify 将输入视为不可信，执行结构与语义检查，且不修改 run
 - RUNNING 表示先前的命令可能已退出；resume 依据持久化证据核对当前尝试。
 - BLOCKED 启动同一阶段的新尝试，并重新校验其精确依赖。
 - NEEDS_REVIEW 需要一个适用的待决决定。
-- READY、FAILED 与 CANCELLED 拒绝 resume。
+- READY、FAILED 与 CANCELLED 的 resume 不重启生成；CLI 返回现有投影及对应状态退出码。
 - 未来的 retry-after 时间会返回类型化的阻塞结果；不会有后台计时器等待它。
 - 未知的外部发送边界绝不会以新的幂等键重发。
 
@@ -91,39 +86,32 @@ verify 将输入视为不可信，执行结构与语义检查，且不修改 run
 | 代码 | 含义 |
 |---:|---|
 | 0 | 成功，包括 READY 或成功的只读命令 |
-| 2 | 参数、请求、配置或输入题包非法 |
-| 3 | BLOCKED |
-| 4 | 状态、版本、复核或进程锁冲突 |
-| 5 | NEEDS_REVIEW |
-| 6 | FAILED |
-| 7 | CANCELLED |
-| 8 | 预算耗尽 |
-| 9 | 沙箱或主机能力不兼容 |
+| 2 | 参数、请求或配置非法 |
+| 3 | run 或对象不存在（`not_found`） |
+| 4 | run 进程锁冲突（`lock_busy`） |
+| 5 | BLOCKED，或操作的 `invalid_state` |
+| 6 | NEEDS_REVIEW |
+| 7 | FAILED，或操作的 `version_conflict` |
+| 8 | CANCELLED |
+| 9 | 其他操作失败（通常为 `operation_failed`） |
 | 10 | 安全清理仍待完成；run 未进入终态 |
-| 70 | 意外的内部错误 |
 
-退出码 10 表示后续 resume 必须重复精确资源清理。CLI 会打印 run ID 与当前持久化状态，而不会声称已完成。
+状态退出码用于 generate/resume 的结果；成功的读取、复核提交和 cancel 返回 0，具体状态从 JSON 读取。结合 `status` 与 `error.code` 区分业务结果和操作失败。退出码 10 表示后续 resume 必须重复精确资源清理。doctor 使用独立输出和能力结果，不套用本表中的业务状态。
 
 ## 9. JSON 信封
 
 ~~~json
 {
-  "schema_version": 1,
-  "command": "run.resume",
-  "ok": false,
-  "run_id": "run_...",
-  "state": "BLOCKED",
-  "run_version": 12,
-  "result": {},
+  "schema_version": "cpgen.cli/v1",
+  "status": "ERROR",
   "error": {
-    "code": "dependency_unavailable",
-    "message": "sanitized message",
-    "retryable": true
+    "code": "not_found",
+    "message": "run not found"
   }
 }
 ~~~
 
-在同一版本内，schema 是向后追加的。ID、状态、事件版本、决定 ID、预算摘要与题包 occurrence ID 都是稳定的机器字段。
+成功结果位于 `data`，run 状态结果另含 `run_version`；错误位于 `error`，配置错误可含 `field`。当前信封不提供 `command`、`ok`、`result` 或 `retryable` 字段。实现与参数解析见 `internal/cli/command.go`、`internal/cli/run.go`。
 
 ## 10. 验收
 

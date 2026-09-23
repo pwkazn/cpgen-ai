@@ -47,8 +47,13 @@ func (s *PackageReader) Assemble(ctx context.Context, view domain.RunView) (pack
 	if err != nil {
 		return empty, quality, err
 	}
+	executed := view.WorkflowRevision() == workflow.ExecutedSamplesRevision
+	packageSchema := packageprobe.GenerationPackageSchemaVersionV2
+	if executed {
+		packageSchema = packageprobe.GenerationPackageSchemaVersion
+	}
 	p := packageprobe.Problem{
-		SchemaVersion: packageprobe.GenerationPackageSchemaVersion, RunID: view.RunID(),
+		SchemaVersion: packageSchema, RunID: view.RunID(),
 		Problem:                 packageprobe.ProblemInfo{Slug: "problem-" + strings.TrimPrefix(string(spec.SpecDigest), "sha256:")[:16], Title: spec.Title, Language: spec.Language, ProblemSpecRevision: spec.Revision, SolutionLanguage: solution.Language},
 		Limits:                  packageprobe.ProblemLimits{TimeMS: spec.TimeLimitMS, MemoryMB: spec.MemoryLimitMB, OutputBytes: 1 << 20},
 		Checker:                 packageprobe.CheckerConfig{Kind: "token", Protocol: "testlib_v1", ArtifactPath: "judge/checker.cpp", Comparison: judge.ExactTokenComparisonV1},
@@ -66,10 +71,22 @@ func (s *PackageReader) Assemble(ctx context.Context, view domain.RunView) (pack
 		}
 		return err
 	}
-	add("statement/statement.md", packageprobe.RoleStatement, []byte(renderPackageStatement(spec)))
 	samples := packageprobe.SamplesDocument{SchemaVersion: packageprobe.SamplesSchemaVersion, Samples: []packageprobe.Sample{}}
-	for _, sample := range spec.Samples {
-		samples.Samples = append(samples.Samples, packageprobe.Sample{Input: sample.Input, Output: sample.Output})
+	if executed {
+		final, err := FinalizeSamples(ctx, s.blobs, i, input.JudgeReport)
+		if err != nil {
+			return empty, quality, err
+		}
+		add("statement/statement.md", packageprobe.RoleStatement, []byte(final.StatementMarkdown))
+		samples.Finalization = &final
+		for _, sample := range final.Samples {
+			samples.Samples = append(samples.Samples, packageprobe.Sample{Input: sample.Input, Output: sample.Output})
+		}
+	} else {
+		add("statement/statement.md", packageprobe.RoleStatement, []byte(renderPackageStatement(spec)))
+		for _, sample := range spec.Samples {
+			samples.Samples = append(samples.Samples, packageprobe.Sample{Input: sample.Input, Output: sample.Output})
+		}
 	}
 	if err := addJSON("statement/samples.json", packageprobe.RoleSamples, samples); err != nil {
 		return empty, quality, err
@@ -185,7 +202,11 @@ func (s *PackageReader) ReadArchive(ctx context.Context, runID domain.RunID) ([]
 		return nil, empty, errors.New("package stage differs from verified record")
 	}
 	item := stage.Artifacts[0]
-	if item.OccurrenceID != record.OccurrenceID || item.Blob.Blob != record.Binding.Archive || item.Blob.LogicalPath != "package/problem.zip" || item.Blob.Role != domain.ArtifactOutput || item.Blob.MediaType != "application/zip" || item.Blob.Provenance.SchemaVersion != "cpgen.package/v2" || item.Blob.Provenance.Producer != generationPackageProducer || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != qualityDigest {
+	wantSchema := packageprobe.GenerationPackageSchemaVersionV2
+	if run.WorkflowRevision == workflow.ExecutedSamplesRevision {
+		wantSchema = packageprobe.GenerationPackageSchemaVersion
+	}
+	if item.OccurrenceID != record.OccurrenceID || item.Blob.Blob != record.Binding.Archive || item.Blob.LogicalPath != "package/problem.zip" || item.Blob.Role != domain.ArtifactOutput || item.Blob.MediaType != "application/zip" || item.Blob.Provenance.SchemaVersion != wantSchema || item.Blob.Provenance.Producer != generationPackageProducer || item.Blob.Provenance.InputDigest == nil || *item.Blob.Provenance.InputDigest != qualityDigest {
 		return nil, empty, errors.New("package archive provenance differs")
 	}
 	raw, err := artifact.ReadVerified(ctx, s.blobs, record.Binding.Archive, 65<<20)

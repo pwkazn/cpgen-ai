@@ -53,6 +53,17 @@ func TestSolutionDraftBindsExactInputAndPreservesSourceBytes(t *testing.T) {
 	}
 }
 
+func TestSolutionDraftRejectsReferenceAsItsOwnOracle(t *testing.T) {
+	draft := validSolutionDraft()
+	draft.BruteCode = "\n" + draft.ReferenceCode + "\n"
+	if err := draft.Validate(); err != nil {
+		t.Fatalf("historical draft validation changed: %v", err)
+	}
+	if err := draft.ValidateDistinctSources(); err == nil {
+		t.Fatal("executed-samples policy accepted reference reused as brute")
+	}
+}
+
 func TestSolutionDraftInputRejectsCrossedRequestAndClonesSamples(t *testing.T) {
 	input := solutionDraftInputFixture(t)
 	cloned, err := NewSolutionDraftInput(input.Snapshot, input.Problem, input.SimilarityInputDigest, input.SimilarityEvidenceDigest, input.SimilarityDecisionDigest)

@@ -101,6 +101,19 @@ func (v SolutionDraftV1) Validate() error {
 	return validateText(32768, false, v.Explanation)
 }
 
+// ValidateDistinctSources is the stricter executed-samples policy. Historical
+// V1/V2 runs retain SolutionDraftV1.Validate semantics; only the V3 model
+// admission path applies this additional source independence check.
+func (v SolutionDraftV1) ValidateDistinctSources() error {
+	if err := v.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(v.ReferenceCode) == strings.TrimSpace(v.BruteCode) {
+		return errors.New("brute must be independently implemented, not the reference source")
+	}
+	return nil
+}
+
 func (v SolutionDraftV1) Bind(input SolutionDraftInputV1) (SolutionContent, error) {
 	if err := v.Validate(); err != nil {
 		return SolutionContent{}, err

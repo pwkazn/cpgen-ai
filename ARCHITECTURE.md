@@ -3,6 +3,8 @@
 状态：当前
 
 ## 1. 产品边界
+样例发布遵循版本化的[执行样例策略](docs/design/executed-samples.md)：不可变 Statement 草稿保留样例输入，Judge 独立核验后由单独的最终题面绑定执行答案。
+当前 MVP 使用 workflow v3：v1 是历史固定流程，v2 增加有界内容重生成，v3 在同一预算与重试边界内加入独立执行样例定稿。报告 schema 为 `cpgen.solution-verification/v2` 与 `cpgen.judge-verification/v2`，题包 manifest 为 `cpgen.package/v3`；迁移 000028 只接纳新的版本身份，不改写旧 run。
 
 CPGen 把结构化的竞赛编程请求转化为可审计的题包。生成模型负责提议候选；确定性代码、编译、执行、评测、查重策略与题包门禁决定这些候选是否可接受。
 

@@ -64,7 +64,7 @@ func (v FinalizeVerifiedPackageCommand) Validate() error {
 		return errors.New("package requires its owned archive publication")
 	}
 	p := item.NewWrite
-	if p.Blob != v.Package.Archive || p.Role != ArtifactOutput || p.LogicalPath != "package/problem.zip" || p.MediaType != "application/zip" || p.Provenance.SchemaVersion != "cpgen.package/v2" || p.Provenance.Producer != "mvp-package" || p.Provenance.InputDigest == nil || *p.Provenance.InputDigest != v.Package.QualityDigest {
+	if p.Blob != v.Package.Archive || p.Role != ArtifactOutput || p.LogicalPath != "package/problem.zip" || p.MediaType != "application/zip" || (p.Provenance.SchemaVersion != "cpgen.package/v2" && p.Provenance.SchemaVersion != "cpgen.package/v3") || p.Provenance.Producer != "mvp-package" || p.Provenance.InputDigest == nil || *p.Provenance.InputDigest != v.Package.QualityDigest {
 		return errors.New("package publication differs from verified binding")
 	}
 	return nil

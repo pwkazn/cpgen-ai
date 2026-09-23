@@ -25,3 +25,13 @@ func TestExactTokenDigestRetainsExistingComparisonBytes(t *testing.T) {
 		t.Fatal("caller mutated compiled checker source")
 	}
 }
+
+func TestExactTokenCheckerSourcePreservesHistoricalPolicyBytes(t *testing.T) {
+	// Quality policy and exported packages bind these embedded bytes. A Windows
+	// CRLF checkout must not change the fixed checker's historical identity.
+	source := judge.ExactTokenCheckerSource()
+	const want = domain.Digest("sha256:a9408e8d000f85718717d8ff2690395c93c8403fd73bf3a0fca962ccf8d63fb9")
+	if got := domain.SumBytes(source); got != want || bytes.Contains(source, []byte("\r")) {
+		t.Fatalf("embedded checker identity changed: got %s, want %s", got, want)
+	}
+}

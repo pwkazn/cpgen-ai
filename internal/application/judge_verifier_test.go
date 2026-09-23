@@ -12,6 +12,7 @@ import (
 	"cpgen/internal/application"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *sandboxexec.ArtifactSink) {
@@ -29,13 +30,17 @@ func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *s
 	return f, publisher
 }
 
-func judgeVerifierInput(t *testing.T, blobs *blob.Store) application.JudgeInput {
+func judgeVerifierInput(t *testing.T, blobs *blob.Store, revisions ...string) application.JudgeInput {
 	t.Helper()
 	ctx := context.Background()
 	input, solution := solutionVerifierContent(t)
 	_, publisher := judgeTestPublisher(t, blobs)
 	sandbox := &solutionSandboxFixture{publisher: publisher, mode: "pass", expected: input.Problem.Samples[0].Output, t: t}
-	verifier, err := application.NewSolutionVerifier(application.SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: blobs, Lock: solutionTestLock(t)})
+	workflowRevision := ""
+	if len(revisions) > 0 {
+		workflowRevision = revisions[0]
+	}
+	verifier, err := application.NewSolutionVerifier(application.SolutionVerifierConfig{Sandbox: sandbox, Publisher: publisher, Blobs: blobs, Lock: solutionTestLock(t), WorkflowRevision: workflowRevision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +75,7 @@ func judgeVerifierInput(t *testing.T, blobs *blob.Store) application.JudgeInput 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return application.JudgeInput{DataInput: bound, Data: content, DataReport: data.Report, SolutionReport: solved.Report}
+	return application.JudgeInput{WorkflowRevision: workflowRevision, DataInput: bound, Data: content, DataReport: data.Report, SolutionReport: solved.Report}
 }
 
 func TestJudgeVerifierRequiresAllAnswersAndIndependentSmallChecks(t *testing.T) {
@@ -79,7 +84,7 @@ func TestJudgeVerifierRequiresAllAnswersAndIndependentSmallChecks(t *testing.T) 
 		t.Fatal(err)
 	}
 	input := judgeVerifierInput(t, blobs)
-	for _, mode := range []string{"pass", "sample_wa", "differential_wa", "reference_tle", "brute_mle", "reference_ole", "shared_execution"} {
+	for _, mode := range []string{"pass", "sample_wa", "sample_changed", "differential_wa", "reference_tle", "brute_mle", "reference_ole", "shared_execution"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			// Each independent SQLite fixture owns its own physical blob store.
@@ -101,11 +106,11 @@ func TestJudgeVerifierRequiresAllAnswersAndIndependentSmallChecks(t *testing.T) 
 				}
 				return
 			}
-			if err != nil || result.Report.ValidateFor(input) != nil || result.Report.Passed != (mode == "pass") {
+			if err != nil || result.Report.ValidateFor(input) != nil || result.Report.Passed != (mode == "pass" || mode == "sample_wa") {
 				t.Fatalf("Judge verification: %+v %v", result.Report, err)
 			}
-			if (result.DatasetArtifact != nil) != result.Report.Passed {
-				t.Fatal("failed Judge produced a judged dataset")
+			if (result.DatasetArtifact != nil) != result.Report.Passed || result.FinalStatementArtifact != nil {
+				t.Fatal("failed Judge produced a publication artifact")
 			}
 			if mode == "pass" {
 				if sandbox.compiles != 0 || sandbox.runs != len(input.DataReport.Samples)+len(input.Data.Plan.Cases)+2 {
@@ -120,6 +125,56 @@ func TestJudgeVerifierRequiresAllAnswersAndIndependentSmallChecks(t *testing.T) 
 			out := result.ReportArtifact.Blob.Digest
 			if _, err := f.store.FinishStage(ctx, domain.FinishStageCommand{RunID: f.runID, ExpectedRunVersion: current.Version, StageName: "prepare", AttemptID: f.attemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &out, NextStage: "exercise", NextInputDigest: &out, Occurrences: result.Occurrences, IdempotencyKey: coordinatorID("finish", "Judge"), At: f.clock.Now()}); err != nil {
 				t.Fatalf("Judge evidence attachment: %v", err)
+			}
+		})
+	}
+}
+
+func TestJudgeVerifierExecutedSamplesPublishesFinalizationOnlyOnCompleteProof(t *testing.T) {
+	for _, mode := range []string{"pass", "sample_wa", "sample_changed", "shared_execution"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			blobs, err := blob.NewStore(filepath.Join(t.TempDir(), "blobs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := judgeVerifierInput(t, blobs, workflow.ExecutedSamplesRevision)
+			_, publisher := judgeTestPublisher(t, blobs)
+			sandbox := &judgeSandboxFixture{solutionSandboxFixture: solutionSandboxFixture{publisher: publisher, mode: mode, t: t}, input: input}
+			verifier, err := application.NewJudgeVerifier(application.JudgeVerifierConfig{
+				Sandbox: sandbox, Publisher: publisher, Blobs: blobs,
+				ToolchainLockDigest: input.DataReport.ToolchainLockDigest,
+				WorkflowRevision:    workflow.ExecutedSamplesRevision,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := verifier.Verify(ctx, input)
+			if mode == "shared_execution" {
+				if err == nil {
+					t.Fatal("V3 accepted shared reference/brute execution")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			passed := mode == "pass"
+			if result.Report.Passed != passed {
+				t.Fatalf("V3 report Passed=%v, want %v: %+v", result.Report.Passed, passed, result.Report)
+			}
+			if result.Report.SchemaVersion != "cpgen.judge-verification/v2" {
+				t.Fatalf("V3 report schema=%q", result.Report.SchemaVersion)
+			}
+			if passed {
+				if result.DatasetArtifact == nil || result.FinalStatementArtifact == nil {
+					t.Fatal("successful V3 Judge did not publish dataset and finalized statement")
+				}
+				if sandbox.compiles != 0 || sandbox.runs < len(input.DataReport.Samples)+2 {
+					t.Fatalf("V3 dispatch count: compiles=%d runs=%d", sandbox.compiles, sandbox.runs)
+				}
+			} else if result.FinalStatementArtifact != nil {
+				t.Fatal("failed V3 Judge published finalized statement")
 			}
 		})
 	}
@@ -144,7 +199,7 @@ func (s *judgeSandboxFixture) Run(ctx context.Context, request port.RunRequest) 
 			sample = true
 		}
 	}
-	if s.mode == "sample_wa" && sample || s.mode == "differential_wa" && request.Role == port.RoleBrute {
+	if s.mode == "sample_changed" && sample || s.mode == "sample_wa" && sample && request.Role == port.RoleBrute || s.mode == "differential_wa" && request.Role == port.RoleBrute {
 		output = []byte("wrong\n")
 	}
 	stdout := s.artifact(ctx, domain.ArtifactStdout, fmt.Sprintf("fixture/judge/%d.out", s.runs), output)

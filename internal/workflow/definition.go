@@ -19,7 +19,7 @@ type Definition struct {
 func DefinitionFor(revision string) (Definition, error) {
 	d := Definition{revision: revision, generation: true, preserveAttempt: true}
 	switch revision {
-	case GenerationRevision, RetryingGenerationRevision:
+	case GenerationRevision, RetryingGenerationRevision, ExecutedSamplesRevision:
 		d.stages = []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}
 	case FakeRevision:
 		d.stages = []domain.StageName{"prepare", "exercise", "checkpoint"}

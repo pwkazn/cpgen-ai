@@ -57,7 +57,7 @@ func packageCommitFixture(t *testing.T, revisions ...string) (*Store, domain.Fin
 		t.Fatal(err)
 	}
 	physical, reservation := prepared.PhysicalCalls[0], prepared.Reservations[0]
-	declaration := domain.ArtifactDeclarationRecord{ID: "decl_00000000000000000000000000000071", RunID: r.RunID, StageName: "package", AttemptID: attempt.AttemptID, CallRecordID: call.ID, AttemptCallID: physical.ID, ReservationID: reservation.ID, ReservationSubkey: reservation.Subkey, MediaType: "application/zip", Role: domain.ArtifactOutput, LogicalPath: "package/problem.zip", MaxBytes: 64, Provenance: domain.ProvenanceCandidate{SchemaVersion: "cpgen.package/v2", Producer: "mvp-package", InputDigest: &digest}, CreatedAt: testNow}
+	declaration := domain.ArtifactDeclarationRecord{ID: "decl_00000000000000000000000000000071", RunID: r.RunID, StageName: "package", AttemptID: attempt.AttemptID, CallRecordID: call.ID, AttemptCallID: physical.ID, ReservationID: reservation.ID, ReservationSubkey: reservation.Subkey, MediaType: "application/zip", Role: domain.ArtifactOutput, LogicalPath: "package/problem.zip", MaxBytes: 64, Provenance: domain.ProvenanceCandidate{SchemaVersion: "cpgen.package/v3", Producer: "mvp-package", InputDigest: &digest}, CreatedAt: testNow}
 	if err := s.CreateArtifactDeclaration(ctx, declaration); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,8 @@ type GenerationReadStore interface {
 // These are frozen stage policy values, shared with the composing executor.
 // Changing them cannot reinterpret already committed model output.
 type GenerationReaderOptions struct {
+	WorkflowRevision     string
+	DataPromptVersion    string
 	IdeaCount            int
 	SelectionPolicy      string
 	StatementRevision    int64
@@ -57,6 +59,9 @@ func NewGenerationReader(store GenerationReadStore, idea, statement durable.Comm
 	}
 	if options.IdeaCount < 2 || options.IdeaCount > 8 || options.StatementRevision <= 0 || (options.SelectionPolicy != domain.SelectionOrdinalPolicyV1 && options.SelectionPolicy != domain.SelectionIdeaIDPolicyV1) || options.MaxOutput.Bytes > 64<<20 {
 		return nil, errors.New("generation reader has an unsupported content policy")
+	}
+	if _, err := draftPromptVersion("data.draft", options.WorkflowRevision, options.DataPromptVersion); err != nil {
+		return nil, err
 	}
 	for _, err := range []error{options.ProviderPolicyDigest.Validate(), options.Sampling.Validate(), options.MaxOutput.Validate()} {
 		if err != nil {
@@ -221,7 +226,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 	if len(candidates) > 64 {
 		return nil, "", errors.New("committed draft call history exceeds bound")
 	}
-	prompt, schema, err := BuildLLMDraftPrompt(string(stage))
+	prompt, schema, err := buildLLMDraftPrompt(string(stage), r.options.WorkflowRevision, r.options.DataPromptVersion)
 	if err != nil {
 		return nil, "", err
 	}

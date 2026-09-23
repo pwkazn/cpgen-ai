@@ -1,5 +1,7 @@
 # TestPlan、Generator 与数据流水线设计
 
+> Current sample policy: [executed samples](executed-samples.md). Statement outputs are draft placeholders; official answers and explanations are finalized only after independent execution and Judge checks.
+
 ## 1. 边界
 
 Data Step 产生结构化 `TestPlan`、Generator 源码、Validator 源码和定向非法输入计划。DockerSandbox 只运行程序并返回 `PendingArtifact`；Judge Harness 解释 Validator 结果；Orchestrator 决定哪些 Blob 成为 current 测试集。任何 Agent、Generator 或 Validator 都不能直接写 `tests/`、题包或 ArtifactOccurrence。

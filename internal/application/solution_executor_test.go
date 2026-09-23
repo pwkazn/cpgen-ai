@@ -35,7 +35,7 @@ func newSolutionExecutorFixtureForWorkflow(t *testing.T, repair bool, outputs ma
 			step = "idea.draft"
 		} else if ordinal == 2 {
 			step = "statement.draft"
-		} else if ordinal >= 4 && revision == workflow.GenerationRevision {
+		} else if ordinal >= 4 && (revision == workflow.GenerationRevision || revision == workflow.ExecutedSamplesRevision) {
 			step = "data.draft"
 		}
 		content := string(outputs[step])

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -12,12 +13,15 @@ import (
 	"time"
 
 	sandboxexec "cpgen/internal/adapter/sandbox"
+	"cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/application"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
+	"cpgen/internal/judge"
 	"cpgen/internal/port"
 	"cpgen/internal/toolchain"
+	"cpgen/internal/workflow"
 )
 
 func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
@@ -112,6 +116,163 @@ func TestSolutionExecutorRealDockerVerificationAndReplay(t *testing.T) {
 				assertCommittedSolutionRejectsAlteredStage(t, ctx, f, base)
 			}
 			t.Logf("committed real solution verification: passed=%v reason=%s compiles=%d samples=%d containers=%d artifacts=%d", replay.Report.Passed, replay.Report.Reason, len(replay.Report.Compiles), len(replay.Report.Samples), wantContainers, len(replay.Occurrences))
+		})
+	}
+}
+
+func TestExecutedSamplesV3SolutionVerificationUsesExecutionEvidence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	base := newDockerSandboxTestConfig(t, ctx)
+	outputs := solutionDockerOutputs(t, "pass")
+	var statement domain.StatementDraftV1
+	if err := json.Unmarshal(outputs["statement.draft"], &statement); err != nil {
+		t.Fatal(err)
+	}
+	for i := range statement.Samples {
+		statement.Samples[i].Output = ""
+		statement.Samples[i].Explanation = ""
+	}
+	outputs["statement.draft"], _ = json.Marshal(statement)
+	f, service := newSolutionExecutorFixtureForWorkflow(t, false, outputs, workflow.ExecutedSamplesRevision)
+	input, content, view := beginCommittedSolutionVerification(t, f, service)
+	factory := func(_ context.Context, identity port.SandboxAuthorizationIdentity) (application.SolutionSandbox, toolchain.Lock, error) {
+		config := base
+		config.Store, config.Blobs, config.Clock, config.Identity = f.store, f.executorConfig.Blobs, clock.Real{}, identity
+		worker, err := sandboxexec.NewSession(config)
+		return worker, config.Lock, err
+	}
+	result, err := service.VerifyDraft(ctx, view, factory)
+	if err != nil || !result.Report.Passed || result.Report.SchemaVersion != "cpgen.solution-verification/v2" || result.Report.ValidateFor(input, content) != nil {
+		t.Fatalf("v3 verification=%+v %v", result.Report, err)
+	}
+	for _, sample := range result.Report.Samples {
+		if sample.Expected != nil {
+			t.Fatal("v3 solution evidence retained a model expected-output blob")
+		}
+	}
+}
+
+func TestExecutedSamplesV3RealDockerConnectivityAndBruteBoundaries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	base := newDockerSandboxTestConfig(t, ctx)
+	for _, test := range []struct {
+		name        string
+		outputs     func(*testing.T) map[string][]byte
+		sampleInput string
+		wantPass    bool
+		wantReason  string
+		wantOutputs [2]string
+		wantExits   [2]int
+	}{
+		{name: "corrects_model_connectivity_answer", outputs: connectivityDockerOutputs, wantPass: true, wantOutputs: [2]string{"1100100", "1100100"}},
+		{name: "rejects_input_beyond_brute_capacity", outputs: connectivityDockerOutputs, sampleInput: strings.Replace(connectivityRegressionInput, "5 7\n", "201 7\n", 1), wantReason: "sample.1.BRUTE.RE", wantOutputs: [2]string{"1100100", ""}, wantExits: [2]int{0, 3}},
+		{name: "rejects_reference_brute_disagreement", outputs: func(t *testing.T) map[string][]byte { return solutionDockerOutputs(t, "wrong_answer") }, wantReason: "sample.1.differential.WA", wantOutputs: [2]string{"42", "0"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outputs := test.outputs(t)
+			var statement domain.StatementDraftV1
+			if err := json.Unmarshal(outputs["statement.draft"], &statement); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantPass && strings.TrimSpace(statement.Samples[0].Output) != "1101000" {
+				t.Fatal("connectivity regression lost the incorrect model answer")
+			}
+			if test.sampleInput != "" {
+				statement.Samples[0].Input = test.sampleInput
+				var err error
+				outputs["statement.draft"], err = json.Marshal(statement)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			f, service := newSolutionExecutorFixtureForWorkflow(t, false, outputs, workflow.ExecutedSamplesRevision)
+			input, content, view := beginCommittedSolutionVerification(t, f, service)
+			factory := func(_ context.Context, identity port.SandboxAuthorizationIdentity) (application.SolutionSandbox, toolchain.Lock, error) {
+				config := base
+				config.Store, config.Blobs, config.Clock, config.Identity = f.store, f.executorConfig.Blobs, clock.Real{}, identity
+				worker, err := sandboxexec.NewSession(config)
+				return worker, config.Lock, err
+			}
+			result, err := service.VerifyDraft(ctx, view, factory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := result.Report
+			if report.SchemaVersion != "cpgen.solution-verification/v2" || report.Passed != test.wantPass || report.Reason != test.wantReason || len(report.Compiles) != 2 || len(report.Samples) != 2 {
+				t.Fatalf("unexpected V3 verification: %+v", report)
+			}
+			if err := report.ValidateFor(input, content); err != nil {
+				t.Fatal(err)
+			}
+			readBlob := func(ref domain.BlobRef) []byte {
+				t.Helper()
+				reader, err := f.executorConfig.Blobs.OpenVerified(ctx, ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, readErr := io.ReadAll(reader)
+				if err := errors.Join(readErr, reader.Close()); err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			}
+			physicalCalls := make(map[domain.AttemptCallID]bool)
+			assertExecution := func(trace domain.CallTrace, artifact *domain.PendingArtifact, source domain.Digest, exitCode int) {
+				t.Helper()
+				if trace.Validate() != nil || trace.DispatchKind != domain.DispatchDispatched || artifact == nil || artifact.Provenance.InputDigest == nil || *artifact.Provenance.InputDigest != source {
+					t.Fatal("execution lacks a dispatched trace or source binding")
+				}
+				for _, callID := range trace.PhysicalAttemptCallIDs {
+					if physicalCalls[callID] {
+						t.Fatal("compiler/reference/brute shared a physical execution")
+					}
+					physicalCalls[callID] = true
+				}
+				var record docker.ExecutionRecord
+				if err := json.Unmarshal(readBlob(artifact.Blob), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Validate() != nil || !record.EvidenceComplete || record.EngineIdentityDigest != base.EngineIdentity || record.TargetCallID != *trace.ResultAttemptCallID || record.Outcome != domain.ProcessExited || record.ExitCode == nil || *record.ExitCode != exitCode {
+					t.Fatalf("Docker process evidence differs from verdict: %+v", record)
+				}
+			}
+			for i, compiled := range report.Compiles {
+				if compiled.Result.Outcome != domain.CompileOK || compiled.Result.Program == nil {
+					t.Fatalf("missing compiled program: %+v", compiled)
+				}
+				assertExecution(compiled.Result.CallTrace, compiled.Result.Execution, compiled.SourceBundleDigest, 0)
+				if len(readBlob(compiled.Result.Program.Blob)) == 0 {
+					t.Fatal("compiled program is empty")
+				}
+				sample := report.Samples[i]
+				if sample.Expected != nil || sample.Result.Stdout == nil || sample.Role != compiled.Role || sample.Result.Outcome != domain.ProcessExited || sample.Result.ExitCode == nil || *sample.Result.ExitCode != test.wantExits[i] {
+					t.Fatalf("sample lacks V3 process evidence: %+v", sample)
+				}
+				assertExecution(sample.Result.CallTrace, sample.Result.Execution, compiled.Result.Program.Blob.Digest, test.wantExits[i])
+				actual := readBlob(sample.Result.Stdout.Blob)
+				if strings.TrimSpace(string(actual)) != test.wantOutputs[i] {
+					t.Fatalf("%s stdout=%q, want %q", sample.Role, actual, test.wantOutputs[i])
+				}
+				if test.wantExits[i] == 0 && sample.ActualTokenDigest != judge.ExactTokenDigest(actual) {
+					t.Fatal("sample token digest is not bound to real stdout")
+				}
+				t.Logf("role=%s source=%s program=%s execution=%s exit=%d stdout=%q", sample.Role, compiled.Source.Digest, compiled.Result.Program.Blob.Digest, sample.Result.Execution.Blob.Digest, *sample.Result.ExitCode, strings.TrimSpace(string(actual)))
+			}
+			if report.Compiles[0].Result.Program.Blob.Digest == report.Compiles[1].Result.Program.Blob.Digest {
+				t.Fatal("reference and brute did not produce independent programs")
+			}
+			f.finish(t, view, result.ReportArtifact.Blob.Digest, "solution_decision", result.ReportArtifact.Blob.Digest, result.Occurrences)
+			committed, err := service.Reader().ReadVerification(ctx, f.runID, base.ReadPolicy())
+			if err != nil {
+				t.Fatal(err)
+			}
+			committedJSON, err := json.Marshal(committed)
+			if err != nil || !bytes.Equal(committedJSON, readBlob(result.ReportArtifact.Blob)) {
+				t.Fatalf("committed V3 execution evidence changed: %v", err)
+			}
+			t.Logf("committed V3 verification passed=%v reason=%s physical_calls=%d", report.Passed, report.Reason, len(physicalCalls))
 		})
 	}
 }

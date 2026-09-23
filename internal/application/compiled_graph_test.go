@@ -233,7 +233,7 @@ func TestCompiledGraphConcurrentInvocationsHaveSeparateProgress(t *testing.T) {
 }
 
 func graphTestStages(revision string) []domain.StageName {
-	if revision == workflow.GenerationRevision {
+	if workflow.ProducesPackage(revision) {
 		return []domain.StageName{"idea", "statement", "similarity", "similarity_decision", "solution", "solution_verify", "solution_decision", "data", "data_verify", "judge", "quality", "package"}
 	}
 	if revision == workflow.LegacySolutionCheckpointRevision {

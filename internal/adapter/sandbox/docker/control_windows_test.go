@@ -18,6 +18,17 @@ func TestOwnerOnlyACLDoesNotRequireChangingExistingOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	current, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := current.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.Equals(user) {
+		t.Fatal("test directory is not owned by the current user")
+	}
 	// Reproduce a data-drive directory: current user owns it, but its DACL
 	// grants Modify (no WRITE_OWNER). Ownership still permits WRITE_DAC.
 	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;0x1301bf;;;" + user.String() + ")")
@@ -29,8 +40,8 @@ func TestOwnerOnlyACLDoesNotRequireChangingExistingOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		user, nil, dacl, nil); err != nil {
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyOwnerOnlyACL(path); err != nil {

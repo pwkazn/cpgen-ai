@@ -291,7 +291,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	// A regenerated producer must make a fresh proposal instead of reusing the
 	// committed draft whose downstream verification just failed. Retain replay
 	// of an existing cache call if the process stopped during its first attempt.
-	bypassCache := view.WorkflowRevision() == workflow.RetryingGenerationRevision && attempt.Ordinal > 1
+	bypassCache := (view.WorkflowRevision() == workflow.RetryingGenerationRevision || view.WorkflowRevision() == workflow.ExecutedSamplesRevision) && attempt.Ordinal > 1
 	if checkpoint == nil && (!bypassCache || existing.Kind == domain.CallCacheReuse) && (errors.Is(readErr, sqlite.ErrNotFound) || existing.Kind == domain.CallCacheReuse) {
 		hit, err := cache.Reuse(ctx, open, request)
 		if err != nil {
@@ -329,7 +329,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 }
 
 func draftFailure[T any](view domain.RunView, attempt domain.StageAttempt, policy domain.Digest, draft generatedDraft, now time.Time) domain.AgentResult[T] {
-	if view.WorkflowRevision() == workflow.RetryingGenerationRevision && draft.formatRejected {
+	if (view.WorkflowRevision() == workflow.RetryingGenerationRevision || view.WorkflowRevision() == workflow.ExecutedSamplesRevision) && draft.formatRejected {
 		return generationContentReview[T](policy, draft.outcome.CallTrace, "llm_format_rejected")
 	}
 	return generationFailure[T](view, attempt, policy, draft.outcome, now)

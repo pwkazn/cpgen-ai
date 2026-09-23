@@ -11,12 +11,13 @@ import (
 )
 
 const (
-	PackageSchemaVersion           domain.SchemaVersion = "cpgen.package/v1"
-	GenerationPackageSchemaVersion domain.SchemaVersion = "cpgen.package/v2"
-	SamplesSchemaVersion           domain.SchemaVersion = "cpgen.samples/v1"
-	SimilarityReportSchemaVersion  domain.SchemaVersion = "cpgen.similarity-report/v1"
-	PrePackageReportSchemaVersion  domain.SchemaVersion = "cpgen.prepackage-report/v1"
-	ProvenanceSchemaVersion        domain.SchemaVersion = "cpgen.provenance/v1"
+	PackageSchemaVersion             domain.SchemaVersion = "cpgen.package/v1"
+	GenerationPackageSchemaVersionV2 domain.SchemaVersion = "cpgen.package/v2"
+	GenerationPackageSchemaVersion   domain.SchemaVersion = "cpgen.package/v3"
+	SamplesSchemaVersion             domain.SchemaVersion = "cpgen.samples/v1"
+	SimilarityReportSchemaVersion    domain.SchemaVersion = "cpgen.similarity-report/v1"
+	PrePackageReportSchemaVersion    domain.SchemaVersion = "cpgen.prepackage-report/v1"
+	ProvenanceSchemaVersion          domain.SchemaVersion = "cpgen.provenance/v1"
 )
 
 type FileRole string
@@ -179,7 +180,7 @@ func (p Problem) schemaVersion() domain.SchemaVersion {
 }
 
 func (m Manifest) Validate(maxPathBytes int) error {
-	if m.SchemaVersion != PackageSchemaVersion && m.SchemaVersion != GenerationPackageSchemaVersion {
+	if m.SchemaVersion != PackageSchemaVersion && m.SchemaVersion != GenerationPackageSchemaVersionV2 && m.SchemaVersion != GenerationPackageSchemaVersion {
 		return fmt.Errorf("package schema must be %q", PackageSchemaVersion)
 	}
 	if err := m.PackageID.Validate(); err != nil {
@@ -240,7 +241,7 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var testPathPattern = regexp.MustCompile(`^tests/([A-Za-z0-9_-]+)\.(in|ans)$`)
 
 func validateManifestMetadata(schema domain.SchemaVersion, runID domain.RunID, problem ProblemInfo, limits ProblemLimits, checker CheckerConfig, toolchain domain.Digest, groups []TestGroup, verification Verification, provenance domain.SafeRelPath) error {
-	if schema != PackageSchemaVersion && schema != GenerationPackageSchemaVersion {
+	if schema != PackageSchemaVersion && schema != GenerationPackageSchemaVersionV2 && schema != GenerationPackageSchemaVersion {
 		return fmt.Errorf("unsupported package schema %q", schema)
 	}
 	if err := runID.Validate(); err != nil {
@@ -287,7 +288,7 @@ func validateFileEntries(schema domain.SchemaVersion, problem ProblemInfo, entri
 		"judge/validator.cpp": RoleValidator, checker.ArtifactPath: RoleChecker, "judge/generator.cpp": RoleGenerator,
 		"reports/similarity.json": RoleSimilarityReport, verification.PrePackageReportPath: RolePrePackageReport, provenance: RoleProvenance,
 	}
-	if schema == GenerationPackageSchemaVersion {
+	if schema == GenerationPackageSchemaVersionV2 || schema == GenerationPackageSchemaVersion {
 		delete(required, "statement/zh-CN.md")
 		required["statement/statement.md"] = RoleStatement
 		required["data/tests.json"] = RoleTestPlan
@@ -359,8 +360,9 @@ func validateFileEntries(schema domain.SchemaVersion, problem ProblemInfo, entri
 }
 
 type SamplesDocument struct {
-	SchemaVersion domain.SchemaVersion `json:"schema_version"`
-	Samples       []Sample             `json:"samples"`
+	SchemaVersion domain.SchemaVersion       `json:"schema_version"`
+	Samples       []Sample                   `json:"samples"`
+	Finalization  *domain.FinalizedStatement `json:"finalization,omitempty"`
 }
 
 type Sample struct {
@@ -420,8 +422,8 @@ func validateEmbeddedDTOs(schema domain.SchemaVersion, files map[domain.SafeRelP
 			return fmt.Errorf("similarity report contains unsafe match metadata")
 		}
 	}
-	if schema == GenerationPackageSchemaVersion {
-		return validateGenerationDocuments(files, runID, revision, profile, similarity, toolchain)
+	if schema == GenerationPackageSchemaVersionV2 || schema == GenerationPackageSchemaVersion {
+		return validateGenerationDocuments(schema, files, runID, revision, profile, similarity, toolchain)
 	}
 	var prepackage PrePackageQualityReport
 	if err := decodeStrict(files["reports/prepackage-quality.json"], &prepackage); err != nil || prepackage.SchemaVersion != PrePackageReportSchemaVersion || prepackage.RunID != runID || prepackage.Profile != profile || prepackage.ProblemSpecRevision != revision || prepackage.Status != "PASSED" {

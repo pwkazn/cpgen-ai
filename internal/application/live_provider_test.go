@@ -1,6 +1,7 @@
 package application_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -77,7 +79,9 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 		"https://provider.example.com/v1", os.Getenv("CPGEN_LIVE_BASE_URL"),
 		"replace-with-supported-model", modelName,
 		"CPGEN_LLM_API_KEY", "CPGEN_LIVE_API_KEY",
-		"timeout: 60s", "timeout: 180s",
+		// Real code-generation responses have exceeded the former 180s limit.
+		// This remains bounded by the run's original active-time budget.
+		"timeout: 60s", "timeout: 300s",
 		"max_output_tokens: 8192", "max_output_tokens: 32768",
 		"max_format_repairs: 0", "max_format_repairs: 1",
 		"https://similarity.example.com/search", "https://93.184.216.34/search",
@@ -145,7 +149,9 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	service, err := application.NewSlice2RunService(application.Slice2RunServiceConfig{Generation: generation, Similarity: evidence, Reviews: store, ActiveTimeInterval: cfg.Runtime.AccountingHeartbeat, EffectiveConfigJSON: effective, SolutionSandbox: &base})
 	must(err)
 	seed := int64(202609101831)
-	request := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: domain.RequestModeManual, Brief: "Create a small ordinary programming contest problem about an undirected unweighted graph. Prefer a clear tractable specification and an independent brute-force oracle. Keep generated formal cases modest for this integration test; do not require special judging.", Language: "en", Difficulty: "medium", SolutionLanguage: "cpp", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512, Seed: &seed, VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: domain.BudgetLimits{MaxLLMCalls: 8, MaxSimilarityCalls: 2, MaxLLMInputTokens: 1000000, MaxLLMOutputTokens: 262144, MaxLLMCostMicroUSD: 800000, MaxSimilarityCostMicroUSD: 200000, MaxSandboxCreates: 256, MaxArtifactBytes: 256 << 20, MaxPackageBytes: 64 << 20, MaxActiveTimeMilliseconds: 1200000}}
+	// The acceptance configuration reserves room for the two-call similarity
+	// regeneration path. Historical runs keep their persisted budgets.
+	request := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: domain.RequestModeManual, Brief: "Create a small ordinary programming contest problem about an undirected unweighted graph. Prefer a clear tractable specification and an independent brute-force oracle. Keep generated formal cases modest for this integration test; do not require special judging.", Language: "en", Difficulty: "medium", SolutionLanguage: "cpp", TimeLimitMilliseconds: 2000, MemoryLimitMegabytes: 512, Seed: &seed, VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: domain.BudgetLimits{MaxLLMCalls: 8, MaxSimilarityCalls: 4, MaxLLMInputTokens: 1000000, MaxLLMOutputTokens: 262144, MaxLLMCostMicroUSD: 800000, MaxSimilarityCostMicroUSD: 400000, MaxSandboxCreates: 256, MaxArtifactBytes: 256 << 20, MaxPackageBytes: 64 << 20, MaxActiveTimeMilliseconds: 1200000}}
 	if requestPath := os.Getenv("CPGEN_LIVE_REQUEST"); requestPath != "" {
 		if !filepath.IsAbs(requestPath) {
 			t.Fatal("CPGEN_LIVE_REQUEST must be an absolute private path")
@@ -208,15 +214,47 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	archive, record, err := service.ReadPackageArchive(ctx, result.RunID)
 	must(err)
 	writeJSON("package-record.json", record)
+	readyBudget, err := store.BudgetSnapshot(ctx, result.RunID)
+	must(err)
+	readyJSON, err := json.Marshal(result)
+	must(err)
+	var offlineEnv []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		// Windows preserves the original casing but looks up names case-insensitively.
+		if !strings.EqualFold(name, cfg.LLM.APIKeyEnv) && !strings.EqualFold(name, cfg.Similarity.APIKeyEnv) {
+			offlineEnv = append(offlineEnv, entry)
+		}
+	}
+	// A fresh CLI process must preserve a terminal run without provider credentials.
+	// Check the complete snapshot and every budget dimension after each replay.
+	for _, name := range []string{"resume-1.json", "resume-2.json"} {
+		resume := exec.CommandContext(ctx, binary, "--config", configPath, "run", "resume", string(result.RunID))
+		resume.Env = offlineEnv
+		output, err := resume.CombinedOutput()
+		must(os.WriteFile(filepath.Join(root, name), output, 0600))
+		must(err)
+		var envelope struct {
+			Status string             `json:"status"`
+			Data   domain.RunSnapshot `json:"data"`
+		}
+		must(json.Unmarshal(output, &envelope))
+		resumedJSON, err := json.Marshal(envelope.Data)
+		must(err)
+		if envelope.Status != string(domain.RunReady) || !bytes.Equal(resumedJSON, readyJSON) {
+			t.Fatal("CLI resume changed the READY snapshot")
+		}
+		budget, err := store.BudgetSnapshot(ctx, result.RunID)
+		must(err)
+		if !reflect.DeepEqual(budget, readyBudget) {
+			t.Fatal("CLI resume changed the READY budget")
+		}
+	}
 	must(app.Close())
 	destination := filepath.Join(root, "problem.zip")
 	command := exec.CommandContext(ctx, binary, "--config", configPath, "run", "export", string(result.RunID), "--output", destination)
 	// Export must reconstruct proof without either provider credential.
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, cfg.LLM.APIKeyEnv+"=") && !strings.HasPrefix(entry, cfg.Similarity.APIKeyEnv+"=") {
-			command.Env = append(command.Env, entry)
-		}
-	}
+	command.Env = offlineEnv
 	output, err := command.CombinedOutput()
 	must(os.WriteFile(filepath.Join(root, "export.json"), output, 0600))
 	must(err)
@@ -228,5 +266,5 @@ func TestLiveProviderMVPWithFixtureSimilarity(t *testing.T) {
 	_, err = packageprobe.ReadArchive(ctx, exported)
 	must(err)
 	revalidateExportedPackageInDocker(t, ctx, base, exported)
-	writeJSON("acceptance.json", map[string]any{"passed": true, "model": modelName, "similarity": "local TLS fixture", "docker": true, "export_recompiled": true, "run_id": result.RunID})
+	writeJSON("acceptance.json", map[string]any{"passed": true, "model": modelName, "similarity": "local TLS fixture", "docker": true, "export_recompiled": true, "ready_resume_idempotent": true, "workflow_revision": result.WorkflowRevision, "run_id": result.RunID})
 }

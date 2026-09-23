@@ -3,4 +3,7 @@ build/docker/builder/Dockerfile text eol=lf
 build/docker/runtime/Dockerfile text eol=lf
 build/docker/transfer/Dockerfile text eol=lf
 config/toolchains/docker-v1.lock.json text eol=lf
+internal/adapter/storage/sqlite/migrations/*.sql -text
+internal/adapter/storage/sqlite/testdata/*.sql -text
 internal/fixture/ab/*.cpp text eol=lf
+internal/judge/checker/*.cpp text eol=lf

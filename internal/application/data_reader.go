@@ -12,6 +12,7 @@ import (
 	"cpgen/internal/domain"
 	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 type DataReader struct {
@@ -64,7 +65,7 @@ func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.
 	if input.Value == nil {
 		return empty, errors.New("data draft has no passing current Solution")
 	}
-	variables, err := input.Value.CanonicalJSON()
+	variables, err := dataDraftVariables(s.solution.revision, *input.Value)
 	if err != nil {
 		return empty, err
 	}
@@ -91,6 +92,13 @@ func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.
 	return content, nil
 }
 
+func dataDraftVariables(revision string, input domain.DataDraftInputV1) ([]byte, error) {
+	if revision == workflow.ExecutedSamplesRevision {
+		return input.ProgramContextJSON()
+	}
+	return input.CanonicalJSON()
+}
+
 func (s *DataReader) ReadJudgeInput(ctx context.Context, runID domain.RunID) (JudgeInput, error) {
 	var empty JudgeInput
 	input, err := s.ReadInput(ctx, runID)
@@ -112,7 +120,7 @@ func (s *DataReader) ReadJudgeInput(ctx context.Context, runID domain.RunID) (Ju
 	if err != nil {
 		return empty, err
 	}
-	value := JudgeInput{DataInput: *input.Value, Data: content, DataReport: report, SolutionReport: solution}
+	value := JudgeInput{WorkflowRevision: s.solution.revision, DataInput: *input.Value, Data: content, DataReport: report, SolutionReport: solution}
 	if _, err := value.dataset(); err != nil {
 		return empty, err
 	}
