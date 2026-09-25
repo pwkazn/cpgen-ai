@@ -2,7 +2,7 @@
 
 状态：ADR-0006 下为当前
 
-当前交付：普通 C++ MVP 的 LOOP-01/SOL-01、DATA-01、JUDGE-01、PKG-01 已完成，证据见 [题包闭环](evidence/mvp-package-commit-foundation.md)。示例配置已选择 V2，在原预算内最多允许两次内容重生成，冻结的 V1 保持原行为；[V2 CLI 验收](evidence/v2-cli-live-acceptance-2026-09-15.md)验证了真实模型正常通路，未触发自动重生成。下文保留各切片的交付顺序与历史边界，不能将旧预览的未实现阶段视为当前 MVP 待办。真实查重、SPJ、自动变异、Go 实际闭环与通用不可信包导入仍为后续范围。
+当前交付：普通 C++ MVP 的 LOOP-01/SOL-01、DATA-01、JUDGE-01、PKG-01 已完成，初始证据见[题包闭环](evidence/mvp-package-commit-foundation.md)。示例配置已选择 V3，加入[执行样例定稿](design/executed-samples.md)，沿用 V2 每个 run 最多两次的有界内容重生成；冻结的 V1/V2 保持原行为。[V3 稳定性复验](evidence/ready-stability-2026-09-22.md)记录三个真实模型任务通过，第三轮曾因输出超限触发一次 Data 重生成。[V2 CLI 验收](evidence/v2-cli-live-acceptance-2026-09-15.md)保留为未触发重生成的历史正常通路证据。下文保留各切片的交付顺序与历史边界，不能将旧预览的未实现阶段视为当前 MVP 待办。真实查重、SPJ、自动变异、Go 实际闭环与通用不可信包导入仍为后续范围。
 
 ## 1. 交付契约
 

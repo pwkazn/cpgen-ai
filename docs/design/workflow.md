@@ -8,6 +8,8 @@
 
 前向 MVP 从已提交的 Similarity ACCEPT 继续，依次经过 Solution/Data/Docker/Judge/Quality/Package。2026-09-15 的范围在 `mvp.idea.statement.similarity.solution.data.judge.package.v2` 中增加有界的内容重生成；V1 与历史 checkpoint 保留其原有的停止行为。传输重试、JSON 格式修复、依赖恢复与显式人工复核保持独立。通用 idea 变更仍暂缓。
 
+当前示例选择 `ExecutedSamplesRevision`（V3），在 V2 的重生成配额与固定阶段顺序上增加执行样例定稿；报告、题包及恢复兼容矩阵见[执行样例设计](executed-samples.md)。`GenerationRevision` 是 MVP V1 的持久化身份，不代表当前默认示例。
+
 ## 2. 身份与 revision
 
 run 持久化：
@@ -38,7 +40,7 @@ run 持久化：
 
 当前 `GenerationRevision` 装配完整的普通题流水线，包括独立的验证边界与决策边界。`revisions.go` 隔离未变的持久化 revision 字符串与历史停止点。所有 revision 都使用应用调度器；不存在单独的历史流水线执行器。默认的确定性 Fake 流水线及其能力配置位于 `internal/adapter/fake`。
 
-`internal/application` 中的本地固定循环一次推进一个阶段边界。它在选择下一阶段之前校验身份、阶段顺序与已提交版本，在调用前检查取消，并在暂停或终态结果时返回。对 V2，它还接受显式编译的内容重试路由；持久化边界拥有资格判定与持久化重试上限。调度器不执行独立的 checkpoint 写入。当 BeginStage 或核算已经提交时，失败的边界可以返回更新后的同阶段投影；外来或回退的投影会被拒绝。
+`internal/application` 中的本地固定循环一次推进一个阶段边界。它在选择下一阶段之前校验身份、阶段顺序与已提交版本，在调用前检查取消，并在暂停或终态结果时返回。对 V2/V3，它还接受显式编译的内容重试路由；持久化边界拥有资格判定与持久化重试上限。调度器不执行独立的 checkpoint 写入。当 BeginStage 或核算已经提交时，失败的边界可以返回更新后的同阶段投影；外来或回退的投影会被拒绝。
 
 进度由兼容的编译工作流 revision、阶段/输入/配置/schema 绑定与经验证的已存储输出重建。SQLite 仍是权威来源；不使用 graph.json 存储，也不使用未经检查的自动 checkpoint 回调。调度器不在 run 之间共享调用状态。`LocalRunService` 在 run 锁下直接管理 attempt、结果提交、复核与恢复；其 stageControl 辅助函数负责 join poller。`fixedStages` 适配类型化业务输入/结果，并通过显式 switch 选择恢复。其恢复 switch 执行阶段准入并验证清理证明，然后把保留的物理调用结算委托给 `internal/adapter/sandbox`。模型与 Similarity 的重试/收据/缓存协议位于 `internal/execution`；它们不导入 application，也不推进工作流阶段。不存在恢复注册表或独立的生命周期/终止对象。Bootstrap/Application 在存储之前拥有并关闭执行资源。移除图库之后，现有的阶段序列、错误、取消、并发 run 与子进程恢复测试仍是行为契约。
 

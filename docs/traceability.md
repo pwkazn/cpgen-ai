@@ -6,6 +6,8 @@ Slice 1 与普通 C++ MVP 闭环：**完成**。完整 MVP 将 ACCEPT 路由到 
 
 ## MVP 功能需求
 
+当前新任务采用 V3；[执行样例设计](design/executed-samples.md)与 [2026-09-22 稳定性复验](evidence/ready-stability-2026-09-22.md)补充下表历史 V1/V2 检查点。验收覆盖三个真实模型任务和真实 Docker，Similarity 为本地 TLS fixture。
+
 | 需求 | 决策/设计 | 验证 |
 |---|---|---|
 | 从结构化请求到已验证题包 | ARCHITECTURE 第 1、6、12 节；阶段 1 设计 | 固定流水线 E2E 与题包门禁测试 |
@@ -26,6 +28,8 @@ Slice 1 与普通 C++ MVP 闭环：**完成**。完整 MVP 将 ACCEPT 路由到 
 | CLI 丢失时的目标安全 | ADR-0005；沙箱设计 | 看门狗超期/EOF 与 kill 测试 |
 | 不可变制品与来源 | 存储设计 | Blob/写入器/pin 与损坏测试；声明与缓存元数据绑定、已结算写入挂载且不重复计费；[制品证据](evidence/slice2-artifact-mutation-records.md) |
 | 确定性题包与 READY | 题包设计 | 结构/语义门禁与同 run 约束 |
+| V3 执行样例定稿与草稿答案隔离 | [执行样例设计](design/executed-samples.md)；program-context 与 finalized-statement 契约 | [V3 验收](evidence/ready-stability-2026-09-22.md)：错误草稿答案隔离、独立执行与差分失败拒绝、brute 超范围拒绝、定稿发布间隙恢复；三个真实模型 run 的 27 组答案独立核对 |
+| 历史版本与恢复身份保持 | [执行样例版本边界](design/executed-samples.md#版本恢复与预算)；冻结配置与工具链快照 | [稳定性复验](evidence/ready-stability-2026-09-22.md)：固定提示/schema 摘要回归、历史包离线导出、新任务两次无凭据恢复及预算快照核对 |
 
 ## 非功能需求
 

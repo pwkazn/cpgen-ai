@@ -3,6 +3,22 @@
 本说明是当前 MVP v3 的样例策略，取代早期文档中「Statement 生成答案，Solution 与模型答案比较」的描述。
 工作流版本边界如下：V1 保留原始固定流程；V2 增加每个 run 最多两次的有界内容重生成；V3（当前）在 V2 基础上生成执行样例，并由独立的 std/brute 结果定稿答案。
 
+## 证据流速览
+
+```mermaid
+flowchart TD
+    A[Statement 不可变草稿：样例输入] --> B[program-context：剔除答案与解释]
+    B --> C[Solution：生成 std 与 brute]
+    C --> D[solution_verify：独立执行与 token 一致]
+    D --> E[Data：Validator 检查输入与 Generator 可重现性]
+    E --> F[Judge：样例及 generated-small 差分与跨阶段一致性]
+    F --> G[final-statement：绑定 Reference stdout 与确定性解释]
+    G --> H[Quality / Package：重建并绑定题面、数据、报告和 ZIP]
+    H --> I[原子提交 VERIFIED 题包与 READY]
+```
+
+图中箭头表示通过门禁后证据的流向。失败不沿箭头发布：内容问题按有界重生成或审核规则处理，基础设施错误保留恢复证据。草稿中的模型答案不会进入 oracle；正式答案只有在全套门禁与题包提交完成后才可导出。
+
 ## 阶段与权威
 
 1. **Statement** 设计小规模合法输入，提示词要求 `samples[].output` 为 `""`，解释留空。`ProblemSpec` 是不可变草稿；为兼容供应商输出形状，非空模型答案仍可保留为草稿证据，绝不作为 oracle。
@@ -28,6 +44,17 @@
 - 目前 brute 能力边界由其程序显式拒绝和真实资源限制落实，不尝试把自然语言复杂度声明推断为通用输入解析器。
 
 ## 版本、恢复与预算
+
+| 身份 | V1 工作流 | V2 工作流 | V3 工作流（当前） |
+|---|---|---|---|
+| 样例策略 | 历史声明样例 | 保留历史样例策略 | 独立执行定稿，模型答案不作为 oracle |
+| 内容重生成 | 原固定流程 | 每个 run 最多两次 | 沿用 V2 配额与预算 |
+| Solution / Judge 报告 | 历史 v1 | 历史 v1 | v2 |
+| Data / Quality 报告 | v1 | v1 | 仍为 v1 |
+| 生成题包 manifest | 历史 `cpgen.package/v2` | `cpgen.package/v2` | `cpgen.package/v3` |
+| 旧 run 恢复与导出 | 按原持久化身份 | 按原持久化身份 | 按冻结的 V3 身份 |
+
+工作流修订、报告 schema、提示版本和题包 manifest 是不同的版本轴；不能仅凭一个 `v2` 或 `v3` 推断其它身份。此表中的 V1 指 MVP 工作流 V1，不是更早的探测题包格式 v1。
 
 新工作流为 `mvp.idea.statement.similarity.solution.data.judge.package.v3`，新 Solution/Judge 报告为 v2，Statement/Solution 提示词为 v2，导出 manifest 为 `cpgen.package/v3`。Data 默认保留已持久化的 v2 提示；新示例配置显式选择 `llm.data_prompt_version: v3`，补充 generator 的完整 `argv` 示例。该选择进入冻结配置，生成、格式修复、已提交读取及恢复采用同一版本；省略字段的旧配置摘要和提示身份不变。草稿 DTO 仍是 v1 形状；新增 program-context/finalized-statement 为各自 v1。V3 继续使用 V2 的 `content_retries` 有界配额与原有调用、token、成本和时间预算。
 

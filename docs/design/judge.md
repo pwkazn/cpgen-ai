@@ -1,5 +1,7 @@
 # Judge Harness 与 testlib 详细设计
 
+当前 MVP 使用固定 exact-token checker，以及 `internal/application` 中的 Solution/Data/Judge/Quality 验证器。下文同时保留早期角色协议与扩展门禁设计；SPJ、反例最小化、通用 coverage 分析和系统化 Validator 非法负例尚不属于已验收能力。`SampleExecutionSmokeCheck` 为早期设计名称，不能据此推断当前存在同名实现。当前 V3 样例流程见第 5.1 节；数据计划的实际字段与能力边界见[数据流水线实现分界](data-pipeline.md#当前-mvp-与后续设计的分界)。
+
 ## 1. 职责
 
 Judge Harness 位于沙箱之上，负责：
@@ -94,6 +96,10 @@ manifest 摘要进入编译缓存、运行来源和 Package manifest。
 ## 5. 门禁流程
 
 ### 5.1 Sample Gate
+
+当前 V3 的样例权威来源以[执行样例设计](executed-samples.md)为准：`solution_verify` 对草稿样例执行 std/brute 并核对独立物理调用与 token 一致；Data 验证输入合法；Judge 再对样例和 generated-small 做差分，并核对样例跨阶段输出一致，全部通过后才定稿。Quality 继续检查固定 checker 与每个 case。模型草稿答案不参与 V3 的比较。
+
+下述 smoke 检查与“比较题面样例输出”的流程保留为历史切片/声明样例策略说明，不代表当前 V3 的 oracle 来源；历史 run 仍按自己的工作流修订读取证据。
 
 正式 Sample Gate 的调度前置条件是当前 reference solution、当前 Validator 和 checker 均已编译，并且三者与同一个 ProblemSpec revision/输入摘要绑定。Slice 3 的 `SampleExecutionSmokeCheck` 只验证程序可启动和固定 checker 路径，不生成正式 Gate 证据；正式 Sample Gate 位于 Slice 4。
 

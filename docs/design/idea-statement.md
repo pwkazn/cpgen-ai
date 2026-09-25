@@ -1,9 +1,9 @@
 # Idea 与 Statement 契约
 
 2026-09-09 用户调整：首个 MVP 先完成查重通过后的 Solution/数据/Judge/打包闭环，查重未通过或无可行 Idea 先人工复核。变异谱系及其已实现契约保留为暂停研究，待重新设计；不再作为正向闭环的前置要求。当前顺序见 [闭环计划](../superpowers/plans/2026-09-09-mvp-generation-loop.md)。
-> Current sample policy: [executed samples](executed-samples.md). Statement outputs are draft placeholders; official answers and explanations are finalized only after independent execution and Judge checks.
+> 当前样例策略见[执行样例设计](executed-samples.md)。Statement 答案是草稿占位或原始模型证据；正式答案与解释只在独立执行及 Judge 门禁通过后定稿。
 
-当前 V3 workflow 的样例答案不来自 Statement 或模型草稿：Statement 只提交样例输入，Solution/Judge 以 `cpgen.solution-verification/v2` 与 `cpgen.judge-verification/v2` 记录独立执行证据，Package 使用 `cpgen.package/v3` manifest。V1 保持历史语义，V2 的有界 `content_retries` 规则在 V3 中继续有效。
+当前 V3 workflow 的正式样例答案不来自 Statement 或模型草稿：Statement 提供样例输入，非空模型答案可保留为草稿证据但不作为 oracle。Solution/Judge 以 `cpgen.solution-verification/v2` 与 `cpgen.judge-verification/v2` 记录独立执行证据，Package 使用 `cpgen.package/v3` manifest。V1 保持历史语义，V2 的有界 `content_retries` 规则在 V3 中继续有效。
 
 
 ## 1. 输入与输出

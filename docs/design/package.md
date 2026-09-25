@@ -2,7 +2,11 @@
 
 状态：ADR-0006 下为当前设计
 
-实现说明（2026-09-09）：`cpgen.package/v2` 现通过既有的 `packageprobe` 构建器/读取器提供下述生成题包模型。其布局使用 `statement/statement.md`、`solution/{reference,brute}.{cpp,go}`、`judge/{generator,validator}.{cpp,go}`、固定的 `judge/checker.cpp`、`data/tests.json`、成对的 `tests/*.in` / `tests/*.ans`，以及题包安全报告。V1 保留其历史探测布局。专用 M26 题包账本、当前证据组装、规范 ZIP 导出和原子 READY 事务均已实现，并通过真实 Docker 以及独立 CLI 崩溃/导出/再验证验收。格式校验由同一 run 内已提交的 Quality 证明补充。见 [题包验收证据](../evidence/mvp-package-commit-foundation.md)。
+范围说明：当前产品提供本地规范 ZIP 导出与已有题包的只读证据重建。下文关于通用导入后执行、Polygon 格式转换/损失报告和远程上传对账属于后续设计，不是现有 CLI 能力；第 12 节含这些扩展的测试目标，不代表它们已完成验收。
+
+当前实现：MVP 工作流 V3 使用 `cpgen.package/v3`，历史 MVP V1/V2 run 保留 `cpgen.package/v2`；更早的探测格式 v1 保留自己的布局。这些版本由既有 `packageprobe` 构建器/读取器按持久化身份处理，不自动升级旧包。生成题包包含 `statement/statement.md`、`solution/{reference,brute}.{cpp,go}`、`judge/{generator,validator}.{cpp,go}`、固定的 `judge/checker.cpp`、`data/tests.json`、成对的 `tests/*.in` / `tests/*.ans` 以及报告。V3 的 `statement/samples.json` 绑定执行定稿，题面与样例输出从只读证据链重建；见[执行样例设计](executed-samples.md)与 [V3 验收](../evidence/ready-stability-2026-09-22.md)。
+
+专用 M26 题包账本、规范 ZIP 导出和原子 READY 事务的初始实现记录见 [2026-09-09 题包验收](../evidence/mvp-package-commit-foundation.md)。格式校验由同一 run 内已提交的 Quality 证明补充。
 
 ## 1. 原则
 
@@ -12,25 +16,34 @@ READY 意味着同一 run 原子地引用一个 VERIFIED 题包实例和最终�
 
 ## 2. 内部目录
 
+当前普通 C++ 生成 ZIP 使用以下布局。完整路径与角色以对应版本 manifest、`internal/application/package_reader.go` 组装器及 `internal/packageprobe` 校验器为准；测试 ID 按来源与序号生成。
+
 ~~~text
-problem/
+problem.zip（归档根目录）
   manifest.json
   statement/
     statement.md
-  solutions/
-    reference.*
+    samples.json
+  solution/
+    editorial.md
+    reference.cpp
+    brute.cpp
+  judge/
+    generator.cpp
+    validator.cpp
+    checker.cpp
   data/
     tests.json
-    input/
-    output/
-  checker/
-    checker.*
+  tests/
+    sample-001.in
+    sample-001.ans
+    generated-001.in
+    generated-001.ans
+    ...
   reports/
-    quality.json
     similarity.json
-    verification.json
-  provenance/
-    artifacts.json
+    prepackage-quality.json
+    provenance.json
 ~~~
 
 可选条目由 manifest schema 控制。未声明的文件、符号链接、设备文件、绝对路径、遍历分量、重复规范化路径和大小写折叠冲突都会被拒绝。
@@ -124,9 +137,9 @@ PackageStructuralGate 验证：
 
 ## 10. 导出器
 
-导出器只通过已验证读取消费 VERIFIED 的内部题包。Polygon 导出器将规范模型映射为平台文件，记录确定性映射和损失报告，校验导出的树并原子发布。
+当前 `run export` 只通过已验证读取消费 VERIFIED 题包，重建预期 ZIP 并验证已存归档。Polygon 导出器尚未实现；未来若接入，需要将规范模型映射为平台文件，记录确定性映射和损失报告，并校验导出的树。
 
-导出器重试在 Package 阶段内有界。未知的远程上传边界会核对原始提供方身份，或保守暂停；它绝不会以新身份创建第二次发布。
+当前导出只写本地文件，不执行远程上传。远程发布重试与未知上传边界的对账属于后续设计，不能复用“本地导出通过”作为验收证明。
 
 ## 11. 修复与复核
 

@@ -1,6 +1,6 @@
 # CP Problem Generator 文档索引
 
-当前普通 C++ MVP 已完成查重 ACCEPT 到 READY、CLI 导出和 ZIP 独立复验；最新真实模型入口证据见 [V2 CLI 验收](evidence/v2-cli-live-acceptance-2026-09-15.md)。真实查重仍未配置，SPJ、自动变异、Go 实际闭环与通用不可信包导入属于后续范围。下文按历史检查点列出的阶段限制，不代表当前完整 MVP 缺少相应阶段。
+当前普通 C++ MVP 使用 V3 工作流，已完成查重 ACCEPT 到 READY、执行样例定稿、CLI 导出和 ZIP 独立复验；最新真实模型证据见 [V3 READY 稳定性复验](evidence/ready-stability-2026-09-22.md)，版本与证据流见[执行样例设计](design/executed-samples.md)。[V2 CLI 验收](evidence/v2-cli-live-acceptance-2026-09-15.md)保留为历史证据。真实查重仍未配置，SPJ、自动变异、Go 实际闭环与通用不可信包导入属于后续范围。下文按历史检查点列出的阶段限制，不代表当前完整 MVP 缺少相应阶段。
 
 [2026-09-22 迁移收尾](evidence/migration-closeout-2026-09-22.md)记录新目录检出时的迁移字节问题、CLI 文档对齐及仍待单独验收的事项。
 
@@ -74,6 +74,7 @@
 | package.md | 内部题包、门禁、验证、导出 |
 | data-pipeline.md | 数据生成与差分验证 |
 | idea-statement.md | 请求、idea 与题面模型 |
+| [executed-samples.md](design/executed-samples.md) | V3 执行样例定稿、证据流、版本兼容与能力边界 |
 
 ## 当前基线
 
