@@ -24,6 +24,7 @@ import (
 type Application struct {
 	Runs        RunService
 	Packages    PackageArchiveReader
+	WebReads    *WorkbenchReader
 	Runtime     port.RuntimeStore
 	Reviews     port.ReviewStore
 	Maintenance *artifact.Maintenance
@@ -112,8 +113,12 @@ func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Applica
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap package reader: %w", err)
 	}
+	webReads, err := NewWorkbenchReader(store, blobs)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap workbench reader: %w", err)
+	}
 	app := &Application{Runtime: store, Reviews: store, Maintenance: maintenance, Locks: locks, closeStorage: store.Close,
-		Packages: &lockedPackageReader{locks: locks, reader: reader}}
+		Packages: &lockedPackageReader{locks: locks, reader: reader}, WebReads: webReads}
 	if !execution {
 		closeStore, closeLocks = false, false
 		return app, nil

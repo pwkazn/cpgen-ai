@@ -1,10 +1,10 @@
 # CLI 契约
 
-状态：ADR-0006 下的现行设计
+状态：CLI 契约；ADR-0006 的 2026-09-26 修订另增本地 Web 入口
 
 ## 1. 原则
 
-CLI 是 Phase 1 唯一的接口。命令打开本地资源，执行有界的前台工作，打印稳定输出，然后退出。不存在后台工作流进程或远程控制端点。
+CLI 保持本地有界命令接口。`serve` 是同一二进制的前台本地 Web 工作台入口；它绑定 loopback 并在进程内承载任务 goroutine，不启动每任务 CLI 子进程。不存在远程控制端点。
 
 状态命令默认将 JSON 信封写入 stdout，进度写入 stderr。help、version 与 doctor 是独立入口；version 可选 `--json`，doctor 要求 `--json`。密钥以及原始私有 prompt 或源码内容永不记入日志。
 
@@ -21,10 +21,13 @@ CLI 是 Phase 1 唯一的接口。命令打开本地资源，执行有界的前�
 ~~~text
 cpgen --config PATH config validate
 cpgen --config PATH config effective --redact
+cpgen --config PATH serve [--listen 127.0.0.1:8080]
 cpgen doctor --json --engine-endpoint ENDPOINT --api-version VERSION --builder-image SHA256 --runtime-image SHA256 --transfer-image SHA256 --execution-protocol docker-direct-v2
 ~~~
 
 config validate 校验配置，不读取工具链锁或联系外部服务；effective 要求显式 `--redact`。doctor 检查 Docker 与工具链能力，不检查模型或查重提供方，也不持久化工作流进度。
+
+serve 在启动时校验配置并只绑定 loopback。静态页面随二进制嵌入；浏览器会话为本地随机值，配置摘要只读。Web 不提供 config validate、doctor 或诊断执行端点。实际生成与恢复仍由 application 按 run 冻结策略检查执行依赖。
 
 ## 4. generate 与 run 命令
 

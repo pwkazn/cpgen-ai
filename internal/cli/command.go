@@ -17,6 +17,8 @@ import (
 type preparedCommand struct {
 	runID                                 domain.RunID
 	local, restore, configOnly, effective bool
+	serveListen                           string
+	serveCapacity                         int
 	execute                               func(*application.Application, io.Writer, io.Writer) int
 }
 
@@ -125,6 +127,9 @@ func parseStatefulCommand(args []string) (*preparedCommand, *commandError) {
 	}
 	if args[0] == "generate" {
 		return prepareGenerate(args[1:])
+	}
+	if args[0] == "serve" {
+		return prepareServe(args[1:])
 	}
 	if len(args) >= 2 {
 		switch args[0] + " " + args[1] {

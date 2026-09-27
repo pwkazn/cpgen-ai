@@ -191,10 +191,38 @@ func (s *LocalRunService) Generate(ctx context.Context, request domain.RunReques
 }
 
 func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
+	return s.resume(ctx, runID, false, nil)
+}
+
+// ResumeImmediate checks the cross-process run lock once and returns a conflict
+// when another executor owns it. Web admission uses this to avoid hidden queues.
+func (s *LocalRunService) ResumeImmediate(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
+	return s.resume(ctx, runID, true, nil)
+}
+
+var ErrRunVersionConflict = errors.New("run version conflicts with expected version")
+
+func (s *LocalRunService) ResumeExpectedImmediate(ctx context.Context, runID domain.RunID, expectedVersion int64) (domain.RunSnapshot, error) {
+	return s.resume(ctx, runID, true, &expectedVersion)
+}
+
+func (s *LocalRunService) resume(ctx context.Context, runID domain.RunID, immediate bool, expectedVersion *int64) (domain.RunSnapshot, error) {
+	if ctx == nil {
+		return domain.RunSnapshot{}, errors.New("resume context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return domain.RunSnapshot{}, err
+	}
 	if err := runID.Validate(); err != nil {
 		return domain.RunSnapshot{}, err
 	}
-	runGuard, err := s.locks.AcquireRun(ctx, runID, runlock.Exclusive)
+	var err error
+	var runGuard *runlock.Guard
+	if immediate {
+		runGuard, err = s.locks.TryAcquireRun(runID, runlock.Exclusive)
+	} else {
+		runGuard, err = s.locks.AcquireRun(ctx, runID, runlock.Exclusive)
+	}
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
@@ -208,6 +236,9 @@ func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domai
 	if err != nil {
 		return domain.RunSnapshot{}, err
 	}
+	if expectedVersion != nil && snapshot.Version != *expectedVersion {
+		return snapshot, ErrRunVersionConflict
+	}
 	// Reject incompatible selectors before recovery, review application or any
 	// other durable mutation. Old runs are never silently assigned a new graph.
 	if err := s.validateGraphPersistence(ctx, snapshot); err != nil {
@@ -215,6 +246,15 @@ func (s *LocalRunService) Resume(ctx context.Context, runID domain.RunID) (domai
 	}
 	if snapshot.State == domain.RunCancelled || snapshot.State == domain.RunFailed || snapshot.State == domain.RunReady {
 		return snapshot, nil
+	}
+	if snapshot.State == domain.RunNeedsReview || snapshot.State == domain.RunBlocked {
+		pending, err := s.runtime.PendingCancel(ctx, runID)
+		if err != nil {
+			return snapshot, err
+		}
+		if pending != nil {
+			return s.finishCancellation(ctx, runID)
+		}
 	}
 	if snapshot.State == domain.RunNeedsReview {
 		snapshot, err = s.applyPendingReview(ctx, snapshot)

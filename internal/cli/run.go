@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	dockersandbox "cpgen/internal/adapter/sandbox/docker"
@@ -24,6 +26,7 @@ import (
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
 	"cpgen/internal/runlock"
+	"cpgen/internal/web"
 	"cpgen/internal/workflow"
 	"go.yaml.in/yaml/v3"
 )
@@ -115,6 +118,19 @@ func runStateful(command *preparedCommand, configPath string, stdout, stderr io.
 	if command.configOnly {
 		return runConfigCommand(command.effective, cfg, stdout, stderr)
 	}
+	if command.serveListen != "" {
+		server, err := web.NewWithCapacity(context.Background(), cfg, command.serveCapacity)
+		if err != nil {
+			return writeStateError(stdout, stderr, 9, "bootstrap_failed", err)
+		}
+		defer server.Close()
+		serveCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := server.Serve(serveCtx, command.serveListen, func(addr string) { fmt.Fprintf(stderr, "CPGen 本地工作台：%s\n", server.BootstrapURL(addr)) }); err != nil {
+			return writeStateError(stdout, stderr, 9, "serve_failed", err)
+		}
+		return 0
+	}
 	if command.restore && cfg.Sandbox != nil && cfg.Workflow != nil && workflow.HasSolutionStages(cfg.Workflow.Revision) {
 		cfg, err = restoreToolchainSnapshot(context.Background(), cfg, command.runID, dependencies)
 		if err != nil {
@@ -131,6 +147,19 @@ func runStateful(command *preparedCommand, configPath string, stdout, stderr io.
 	}
 	defer app.Close()
 	return command.execute(app, stdout, stderr)
+}
+
+func prepareServe(args []string) (*preparedCommand, *commandError) {
+	flags := commandFlags("serve")
+	listen := flags.String("listen", "127.0.0.1:8080", "loopback address")
+	capacity := flags.Int("capacity", 1, "maximum concurrent generation tasks (1-64)")
+	if err := parseFlags(flags, args); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(*listen) == "" || flags.NArg() != 0 || *capacity < 1 || *capacity > 64 {
+		return nil, usageError("serve requires a non-empty loopback address")
+	}
+	return &preparedCommand{serveListen: *listen, serveCapacity: *capacity}, nil
 }
 
 type runDocumentsReader interface {

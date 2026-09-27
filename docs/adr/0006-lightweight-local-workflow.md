@@ -8,6 +8,8 @@ Amended: 2026-09-08（进程内库集成）
 
 Amended: 2026-09-13（本地固定调度）
 
+Amended: 2026-09-26（本地 Web serve 与任务 goroutine）
+
 ## 背景
 
 阶段 1 需要一条可恢复的产品工作流，但其部署边界是一台宿主和一个本地项目工作区。已完成的 Slice 0 Docker 看门狗、测量、预算与制品证据已经提供了困难的外部效果安全边界。构建托管式通用工作流运行时会引入产品并不需要的机制。
@@ -15,6 +17,10 @@ Amended: 2026-09-13（本地固定调度）
 ## 决策
 
 决策：一台宿主上每个 run 一个前台 Go CLI 执行器；操作系统进程锁；固定的类型化流水线；SQLite 投影加 CPGen 领域账本；无托管运行时。
+
+**2026-09-26 Web 执行方式修订：**同一个 `cpgen` 二进制增加前台 `serve` 子命令。Web 模式由一个 Go 进程承载多个 run goroutine，每个 goroutine 直接调用 `internal/application`；它不启动每 run 的 CLI 子进程，也不经 CLI 文本协议调用。服务内轻量管理器只负责并发容量、run 登记、独立任务 context 和退出等待。CLI 原有执行方式保留。任一模式下每个 run 仍最多一个修改状态的执行器，继续使用 per-run OS 锁协调 serve 与独立 CLI；SQLite 仍是唯一权威状态。没有队列或自动恢复，服务重启后由操作者显式恢复。
+
+serve 在启动时验证配置并只监听 loopback。读取路由使用本地装配，不要求 Docker 可用；依赖检查留在真实生成/恢复路径。静态 UI 随二进制嵌入，不提供动态配置和 Web doctor/diagnostics 接口。
 
 规范性契约使用以下确切短语：one foreground executor per run、per-run process lock、fixed pipeline 和 no workflow-hosting service。
 

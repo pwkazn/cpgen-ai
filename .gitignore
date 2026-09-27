@@ -6,6 +6,7 @@
 !.github/workflows/
 
 # Compiled binaries.
+node_modules/
 # `go build ./cmd/...` discards its output, but building a single command
 # (e.g. `go build ./cmd/cpgen`) writes a ~23 MB binary into the working
 # directory. These must never be committed.

@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -179,13 +180,24 @@ type generationReaderFixture struct {
 }
 
 func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
+	return newGenerationReaderFixtureWithPolicy(t, false)
+}
+
+func newGenerationReaderFixtureWithPolicy(t *testing.T, live bool) generationReaderFixture {
 	t.Helper()
 	cfg := llmApplicationConfig(t)
+	if live {
+		cfg = explicitSlice2ApplicationConfig(t)
+		cfg.Workflow.IdeaCount = 2
+		cfg.LLM.MaxOutputTokens = 512
+		cfg.LLM.MaxResponseBytes = 16384
+		cfg.LLM.BaseURL = "https://1.1.1.1/v1"
+	}
 	cfg.LLM.MaxFormatRepairs = 1
 	t.Setenv(cfg.LLM.APIKeyEnv, "fixture-key")
 	outputs := llmBuiltinOutputs(t)
 	httpCalls := new(atomic.Int32)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ordinal := httpCalls.Add(1)
 		content := `{"private":"invalid output"}`
 		if ordinal == 2 {
@@ -196,12 +208,26 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "generation-reader", "choices": []any{map[string]any{"message": map[string]string{"content": content}}}, "usage": map[string]int{"prompt_tokens": 3, "completion_tokens": 4}})
 	}))
+	if live {
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
 	t.Cleanup(server.Close)
 	mapped, _, err := application.BuildLLMConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapped.Endpoint, mapped.AllowInsecureHTTP = server.URL, true
+	if live {
+		transport := server.Client().Transport.(*http.Transport).Clone()
+		transport.TLSClientConfig.ServerName = server.Certificate().DNSNames[0]
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+		mapped.HTTPClient = &http.Client{Transport: transport}
+	} else {
+		mapped.Endpoint, mapped.AllowInsecureHTTP = server.URL, true
+	}
 	model, err := agent.NewLangChain(mapped)
 	if err != nil {
 		t.Fatal(err)
@@ -237,6 +263,12 @@ func newGenerationReaderFixture(t *testing.T) generationReaderFixture {
 		t.Fatal(err)
 	}
 	options := application.GenerationReaderOptions{IdeaCount: 2, SelectionPolicy: domain.SelectionOrdinalPolicyV1, StatementRevision: 1, ProviderPolicyDigest: cfg.EffectiveDigest(), Sampling: port.SamplingPolicy{TopP: 1}, MaxOutput: port.OutputLimit{Tokens: 512, Bytes: 16384}}
+	if live {
+		options, _, err = application.BuildGenerationExecutionSettings(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	ideaInput, err := domain.NewIdeaDraftInput(snapshot, options.IdeaCount)
 	if err != nil {
 		t.Fatal(err)

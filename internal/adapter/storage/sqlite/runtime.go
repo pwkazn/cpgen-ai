@@ -145,6 +145,15 @@ func (s *Store) GetRun(ctx context.Context, runID domain.RunID) (domain.RunSnaps
 }
 
 func (s *Store) ListRuns(ctx context.Context, filter domain.RunFilter) ([]domain.RunSummary, error) {
+	return s.listRuns(ctx, filter, false)
+}
+
+// RecentRuns is the bounded Web list projection ordered by most recently updated.
+func (s *Store) RecentRuns(ctx context.Context, filter domain.RunFilter) ([]domain.RunSummary, error) {
+	return s.listRuns(ctx, filter, true)
+}
+
+func (s *Store) listRuns(ctx context.Context, filter domain.RunFilter, recent bool) ([]domain.RunSummary, error) {
 	if err := filter.Validate(); err != nil {
 		return nil, err
 	}
@@ -159,7 +168,11 @@ func (s *Store) ListRuns(ctx context.Context, filter domain.RunFilter) ([]domain
 		query += " WHERE state = ?"
 		args = append(args, string(*filter.State))
 	}
-	query += " ORDER BY created_at, run_id"
+	if recent {
+		query += " ORDER BY updated_at DESC, run_id DESC"
+	} else {
+		query += " ORDER BY created_at, run_id"
+	}
 	limit := filter.Limit
 	if limit == 0 {
 		limit = 100
@@ -224,6 +237,61 @@ func (s *Store) Events(ctx context.Context, runID domain.RunID, afterVersion int
 		events = append(events, item)
 	}
 	return events, rows.Err()
+}
+
+// EventsBefore returns a bounded ascending page within the newest matching
+// history window. beforeVersion is exclusive; zero selects the latest events.
+// It is separate from Events,
+// whose established contract is an ascending forward read after a version.
+func (s *Store) EventsBefore(ctx context.Context, runID domain.RunID, beforeVersion int64, limit int) ([]domain.RunEvent, error) {
+	if err := runID.Validate(); err != nil {
+		return nil, err
+	}
+	if beforeVersion < 0 || limit < 1 || limit > 500 {
+		return nil, errors.New("invalid event history page")
+	}
+	connection, err := s.connection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	query := `SELECT version,event_type,COALESCE(stage_name,''),idempotency_key,command_digest,occurred_at FROM run_events WHERE run_id=?`
+	args := []any{string(runID)}
+	if beforeVersion > 0 {
+		query += ` AND version < ?`
+		args = append(args, beforeVersion)
+	}
+	query += ` ORDER BY version DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := connection.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.RunEvent, 0, limit)
+	for rows.Next() {
+		var item domain.RunEvent
+		var kind, stage, idempotency, digest, occurred string
+		if err := rows.Scan(&item.Version, &kind, &stage, &idempotency, &digest, &occurred); err != nil {
+			return nil, err
+		}
+		item.RunID = runID
+		item.Type = domain.RunEventType(kind)
+		item.StageName = domain.StageName(stage)
+		item.IdempotencyKey = idempotency
+		item.CommandDigest = domain.Digest(digest)
+		if item.OccurredAt, err = parseTime(occurred); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
 }
 
 func (s *Store) BeginStage(ctx context.Context, command domain.BeginStageCommand) (domain.StageAttempt, error) {

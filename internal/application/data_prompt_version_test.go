@@ -24,6 +24,9 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Git may check the example out with CRLF on Windows. Normalize it before
+	// editing individual YAML lines for the historical workflow fixtures.
+	raw = []byte(strings.ReplaceAll(string(raw), "\r\n", "\n"))
 	// The example ships Windows absolute paths, but the loader requires both
 	// state_root and toolchain_lock_path to be absolute, and D:/ is not
 	// absolute on Linux or macOS. Move every path onto this host, not just the
