@@ -319,8 +319,12 @@ func (s *Server) create(c *gin.Context) {
 		writeErr(c, 422, "invalid_request", "题目或预算字段无效")
 		return
 	}
-	if !validOperation(body.OperationKey) || request.Validate() != nil {
-		writeErr(c, 422, "invalid_request", "题目字段或操作身份无效")
+	if !validOperation(body.OperationKey) {
+		writeErr(c, 422, "invalid_request", "操作身份无效，请重新提交")
+		return
+	}
+	if err := application.ValidateCreateRequest(s.cfg, request); err != nil {
+		writeApplicationError(c, err)
 		return
 	}
 	if snapshot, exists, lookupErr := application.LookupCreate(c.Request.Context(), s.app, s.cfg, request, body.OperationKey); lookupErr != nil {
@@ -409,6 +413,10 @@ func writeManagerError(c *gin.Context, err error) {
 	}
 }
 func writeApplicationError(c *gin.Context, err error) {
+	if errors.Is(err, application.ErrInvalidCreateRequest) {
+		writeErr(c, 422, "invalid_request", "题目要求、算法标签或预算字段无效，请修改后重试")
+		return
+	}
 	if errors.Is(err, sqlite.ErrVersionConflict) || errors.Is(err, application.ErrRunVersionConflict) {
 		writeErr(c, 409, "version_conflict", "任务版本已变化，请刷新后重试")
 		return

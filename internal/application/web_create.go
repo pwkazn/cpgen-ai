@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -17,6 +18,35 @@ import (
 )
 
 var ErrCreateIdempotencyConflict = errors.New("create identity was already used for a different request")
+var ErrInvalidCreateRequest = errors.New("invalid create request")
+
+// ValidateCreateRequest checks all deterministic request contracts before a
+// create identity is looked up or any capacity is reserved. Workflow/config
+// failures remain internal errors; only submitted request failures are typed
+// as client input errors.
+func ValidateCreateRequest(cfg config.Config, request domain.RunRequest) error {
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCreateRequest, err)
+	}
+	revision := workflow.FakeRevision
+	if cfg.Workflow != nil {
+		revision = cfg.Workflow.Revision
+	}
+	definition, err := workflow.DefinitionFor(revision)
+	if err != nil {
+		return err
+	}
+	if definition.UsesGeneration() {
+		submitted, err := domain.GenerationRequestFromRunRequest(request)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidCreateRequest, err)
+		}
+		if err := submitted.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidCreateRequest, err)
+		}
+	}
+	return nil
+}
 
 func webCreateRunID(operationKey string) domain.RunID {
 	digest := domain.SumBytes([]byte("cpgen.web.create/v1:" + operationKey))
@@ -52,7 +82,7 @@ func LookupCreate(ctx context.Context, app *Application, cfg config.Config, requ
 	if app == nil || app.Runtime == nil || strings.TrimSpace(operationKey) == "" || len(operationKey) > 256 {
 		return domain.RunSnapshot{}, false, errors.New("invalid create lookup")
 	}
-	if err := request.Validate(); err != nil {
+	if err := ValidateCreateRequest(cfg, request); err != nil {
 		return domain.RunSnapshot{}, false, err
 	}
 	digest, err := webRequestDigest(cfg, request)
@@ -84,7 +114,7 @@ func CreateOnly(ctx context.Context, app *Application, cfg config.Config, reques
 	if strings.TrimSpace(operationKey) == "" || len(operationKey) > 256 {
 		return domain.RunSnapshot{}, false, errors.New("create operation key is required")
 	}
-	if err := request.Validate(); err != nil {
+	if err := ValidateCreateRequest(cfg, request); err != nil {
 		return domain.RunSnapshot{}, false, err
 	}
 	cfg, effectiveJSON, err := FreezeEffectiveConfig(cfg)

@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	RequestSchemaV1          = "cpgen.request/v1"
-	RequestSnapshotSchemaV1  = "cpgen.request-snapshot/v1"
-	IdeaCandidateSchemaV1    = "cpgen.idea-candidate/v1"
-	IdeaBatchSchemaV1        = "cpgen.idea-batch/v1"
-	IdeaSelectionSchemaV1    = "cpgen.idea-selection/v1"
-	StatementInputSchemaV1   = "cpgen.statement-input/v1"
-	ProblemSpecSchemaV1      = "cpgen.problem-spec/v1"
-	GenerationPolicyV1       = "policy/v1"
-	SeedDerivationPolicyV1   = "seed-axes/v1"
+	RequestSchemaV1         = "cpgen.request/v1"
+	RequestSnapshotSchemaV1 = "cpgen.request-snapshot/v1"
+	IdeaCandidateSchemaV1   = "cpgen.idea-candidate/v1"
+	IdeaBatchSchemaV1       = "cpgen.idea-batch/v1"
+	IdeaSelectionSchemaV1   = "cpgen.idea-selection/v1"
+	StatementInputSchemaV1  = "cpgen.statement-input/v1"
+	ProblemSpecSchemaV1     = "cpgen.problem-spec/v1"
+	GenerationPolicyV1      = "policy/v1"
+	SeedDerivationPolicyV1  = "seed-axes/v1"
+	// RequestTagPolicyV1 versions the tag normalization contract, not a tag vocabulary.
 	RequestTagPolicyV1       = "request-tags/v1"
 	RequestModeManual        = "manual"
 	RequestModeRandom        = "random"
@@ -105,9 +106,6 @@ func (r GenerationRequestV1) Validate() error {
 	derived := make([]string, len(r.Tags))
 	for i, tag := range r.Tags {
 		derived[i] = strings.ToLower(cleanText(tag))
-		if !allowedRequestTagV1(derived[i]) {
-			return fmt.Errorf("tag is outside %s allowlist: %q", RequestTagPolicyV1, tag)
-		}
 	}
 	sort.Strings(derived)
 	derived = slices.Compact(derived)
@@ -115,17 +113,6 @@ func (r GenerationRequestV1) Validate() error {
 		return errors.New("normalized_tags must equal sorted unique lower-case NFC/trimmed tags")
 	}
 	return disjoint(cleanSet(r.RequiredFeatures), cleanSet(r.ForbiddenFeatures))
-}
-
-// RequestTagPolicyV1 is fixed by the request/v1 schema; additions require a new
-// policy/schema revision, never a runtime-configurable expansion of acceptance.
-func allowedRequestTagV1(tag string) bool {
-	switch tag {
-	case "arrays", "binary-search", "bitmasks", "combinatorics", "constructive", "data-structures", "divide-and-conquer", "dp", "dynamic-programming", "flows", "games", "geometry", "graphs", "greedy", "hashing", "implementation", "math", "number-theory", "probability", "shortest-path", "sorting", "strings", "trees", "two-pointers":
-		return true
-	default:
-		return false
-	}
 }
 
 func (r GenerationRequestV1) validateSourceText() error {

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -34,6 +35,31 @@ func TestIdeaDraftDerivesIdentityAndFrozenConstraintsLocally(t *testing.T) {
 	input.Candidates[0].SeedAxes[0] = "changed after binding"
 	if err := batch.Validate(); err != nil {
 		t.Fatalf("output aliases input: %v", err)
+	}
+}
+
+func TestIdeaDraftInputCarriesFreeformTagsToPromptVariables(t *testing.T) {
+	snapshot, err := NewGenerationRequestSnapshotV1(GenerationRequestV1{
+		SchemaVersion: RequestSchemaV1, Mode: RequestModeManual, Brief: "Localized prompt fixture",
+		Tags: []string{" 图论 ", "动态规划"}, NormalizedTags: []string{"动态规划", "图论"},
+		Language: "zh-CN", Difficulty: "hard", TimeLimitMilliseconds: 2000,
+		MemoryLimitMegabytes: 512, SolutionLanguage: "cpp", VerificationProfile: "default",
+	}, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := NewIdeaDraftInput(snapshot, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables, err := input.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range [][]byte{[]byte(`"tags":[" 图论 ","动态规划"]`), []byte(`"normalized_tags":["动态规划","图论"]`)} {
+		if !bytes.Contains(variables, tag) {
+			t.Fatalf("prompt variables omitted submitted tag data %s: %s", tag, variables)
+		}
 	}
 }
 
