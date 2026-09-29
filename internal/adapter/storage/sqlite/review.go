@@ -58,6 +58,11 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			evidenceDigest != string(request.EvidenceDigest) || policyDigest != string(request.PolicyDigest) {
 			return wrap(ErrConsistency, "review binding does not match the current stage snapshot", nil)
 		}
+		if request.Kind == domain.ReviewRetry {
+			if err := validateReviewBudgetFitsTx(ctx, tx, request.RunID, request.BudgetIncrease); err != nil {
+				return err
+			}
+		}
 		waivable := request.Kind == domain.ReviewWaive
 		if waivable && stageWaivable != 1 {
 			return wrap(ErrInvalidTransition, "persisted review gate is not waivable", nil)
@@ -116,6 +121,12 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			request.IdempotencyKey, string(commandDigest), formatTime(request.At),
 		); err != nil {
 			return fmt.Errorf("insert review decision: %w", err)
+		}
+		for _, field := range reviewBudgetFields(request.BudgetIncrease) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_budget_grants(review_id,run_id,field,delta_value) VALUES (?,?,?,?)`,
+				string(request.ID), string(request.RunID), field.name, field.delta); err != nil {
+				return fmt.Errorf("record approved %s budget increase: %w", field.name, err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE runs SET version = ?, updated_at = ? WHERE run_id = ?`,
 			newVersion, formatTime(request.At), string(request.RunID)); err != nil {
@@ -275,42 +286,52 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE review_decisions SET state = ?, applied_at = ? WHERE review_id = ? AND state = 'PENDING'`,
-			string(newReviewState), formatTime(command.At), string(command.ReviewDecisionID)); err != nil {
-			return err
-		}
 		newVersion := run.Version + 1
-		if decision.Kind == domain.ReviewRevise {
-			var nextConfigRevision int
-			if err := tx.QueryRowContext(ctx, `
-				SELECT COALESCE(MAX(revision), 0) + 1 FROM run_config_revisions WHERE run_id = ?`,
-				string(command.RunID),
-			).Scan(&nextConfigRevision); err != nil {
+		if decision.Kind == domain.ReviewRetry {
+			if _, err := tx.ExecContext(ctx, `UPDATE review_decisions SET state = ?, applied_at = ? WHERE review_id = ? AND state = 'PENDING'`,
+				string(newReviewState), formatTime(command.At), string(command.ReviewDecisionID)); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `
+			if err := applyRetryBudgetTx(ctx, tx, decision, newRunState, newVersion, command.At); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `UPDATE review_decisions SET state = ?, applied_at = ? WHERE review_id = ? AND state = 'PENDING'`,
+				string(newReviewState), formatTime(command.At), string(command.ReviewDecisionID)); err != nil {
+				return err
+			}
+			if decision.Kind == domain.ReviewRevise {
+				var nextConfigRevision int
+				if err := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(revision), 0) + 1 FROM run_config_revisions WHERE run_id = ?`,
+					string(command.RunID),
+				).Scan(&nextConfigRevision); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `
 				INSERT INTO run_config_revisions(
 					run_id, revision, redacted_effective_config_json, redacted_effective_config_digest,
 					source_review_id, created_at
 				) VALUES (?, ?, ?, ?, ?, ?)`,
-				string(command.RunID), nextConfigRevision, command.NewConfigJSON, string(*command.NewConfigDigest),
-				string(command.ReviewDecisionID), formatTime(command.At),
-			); err != nil {
-				return fmt.Errorf("insert revised config binding: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx, `
+					string(command.RunID), nextConfigRevision, command.NewConfigJSON, string(*command.NewConfigDigest),
+					string(command.ReviewDecisionID), formatTime(command.At),
+				); err != nil {
+					return fmt.Errorf("insert revised config binding: %w", err)
+				}
+				if _, err := tx.ExecContext(ctx, `
 				UPDATE runs SET state = ?, current_stage = ?, current_stage_ordinal = ?,
 					redacted_effective_config_json = ?, redacted_effective_config_digest = ?,
 					version = ?, updated_at = ? WHERE run_id = ?`,
-				string(newRunState), string(restartStage), restartOrdinal,
-				command.NewConfigJSON, string(*command.NewConfigDigest), newVersion, formatTime(command.At), string(command.RunID),
-			); err != nil {
+					string(newRunState), string(restartStage), restartOrdinal,
+					command.NewConfigJSON, string(*command.NewConfigDigest), newVersion, formatTime(command.At), string(command.RunID),
+				); err != nil {
+					return err
+				}
+			} else if _, err := tx.ExecContext(ctx, `
+			UPDATE runs SET state = ?, version = ?, updated_at = ? WHERE run_id = ?`,
+				string(newRunState), newVersion, formatTime(command.At), string(command.RunID)); err != nil {
 				return err
 			}
-		} else if _, err := tx.ExecContext(ctx, `
-			UPDATE runs SET state = ?, version = ?, updated_at = ? WHERE run_id = ?`,
-			string(newRunState), newVersion, formatTime(command.At), string(command.RunID)); err != nil {
-			return err
 		}
 		result, err = readRun(ctx, tx, command.RunID)
 		if err != nil {

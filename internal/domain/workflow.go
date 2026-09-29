@@ -1198,7 +1198,13 @@ func (v CreateReviewRequest) Validate() error {
 			}
 		}
 	}
-	return validateReviewRequestPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease)
+	if err := validateReviewRequestPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease); err != nil {
+		return err
+	}
+	if v.Kind == ReviewRetry && v.BudgetIncrease.MaxMutationsPerStage != 0 {
+		return errors.New("RETRY cannot increase max mutations per stage because mutation evidence is bound to the submitted request")
+	}
+	return nil
 }
 
 type ApplyReviewCommand struct {

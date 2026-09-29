@@ -100,6 +100,9 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 		if err != nil {
 			return fmt.Errorf("insert run: %w", err)
 		}
+		if err := insertInitialRunBudgetBaseline(ctx, tx, request.RunID, limits); err != nil {
+			return err
+		}
 		if err := insertInitialBudgetAccounts(ctx, tx, request.RunID, request.SubmittedRequestDigest, limits); err != nil {
 			return err
 		}

@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"cpgen/internal/adapter/storage/sqlite"
+	"cpgen/internal/application"
 	"cpgen/internal/config"
 	"cpgen/internal/domain"
+	"cpgen/internal/runlock"
 )
 
 func TestHTTPCreateReplayUsesOnePersistedRun(t *testing.T) {
@@ -176,6 +180,50 @@ func TestHTTPCreateReplayUsesOnePersistedRun(t *testing.T) {
 	if server.manager.isActive(domain.RunID(id)) {
 		t.Fatal("replay restarted executor")
 	}
+	// A budget-patched RETRY applies only when the explicit Web resume reaches
+	// the shared LocalRunService/SQLite application path.
+	retryCreate := doRequest(http.MethodPost, "/api/runs/create", strings.Replace(body, "http-create-replay-review", "retry-budget-review", 1))
+	if retryCreate.Code != http.StatusAccepted {
+		t.Fatalf("retry fixture create: HTTP %d %s", retryCreate.Code, retryCreate.Body.String())
+	}
+	if err := json.Unmarshal(retryCreate.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	retryID := result.Data.RunID
+	if retryID == "" {
+		retryID = result.Data.Run.RunID
+	}
+	awaitManagerEmpty(t, server.manager)
+	retryRun, err := server.app.Runtime.GetRun(context.Background(), domain.RunID(retryID))
+	if err != nil || retryRun.State != domain.RunNeedsReview {
+		t.Fatalf("retry fixture did not reach review: %+v %v", retryRun, err)
+	}
+	retryReviewBody := fmt.Sprintf(`{"operation_key":"approve-budget","expected_run_version":"%d","workflow_revision":%q,"kind":"RETRY","reviewer":"test","reason":"approved retry allowance","budget_increase":{"max_similarity_cost_usd":"0.25"}}`, retryRun.Version, retryRun.WorkflowRevision)
+	if response := doRequest(http.MethodPost, "/api/runs/"+retryID+"/review", retryReviewBody); response.Code != http.StatusCreated {
+		t.Fatalf("budget review: HTTP %d %s", response.Code, response.Body.String())
+	}
+	retryPending, err := server.app.Runtime.GetRun(context.Background(), domain.RunID(retryID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRetryBody := fmt.Sprintf(`{"operation_key":"resume-budget-retry","expected_run_version":"%d"}`, retryPending.Version)
+	if response := doRequest(http.MethodPost, "/api/runs/"+retryID+"/resume", resumeRetryBody); response.Code != http.StatusAccepted {
+		t.Fatalf("budget retry resume: HTTP %d %s", response.Code, response.Body.String())
+	}
+	awaitManagerEmpty(t, server.manager)
+	budgetReader, ok := server.app.Runtime.(interface {
+		BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
+	})
+	if !ok {
+		t.Fatal("runtime does not expose authoritative budget snapshots")
+	}
+	retryBudget, err := budgetReader.BudgetSnapshot(context.Background(), domain.RunID(retryID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryBudget.Limits.MaxSimilarityCostMicroUSD != 250000 {
+		t.Fatalf("Web resume did not apply the approved budget: %+v", retryBudget.Limits)
+	}
 	// A separate task can be cancelled while waiting for review, then retried safely.
 	response = doRequest(http.MethodPost, "/api/runs/create", strings.Replace(body, "http-create-replay-review", "cancel-fixture", 1))
 	if response.Code != 202 {
@@ -199,5 +247,123 @@ func TestHTTPCreateReplayUsesOnePersistedRun(t *testing.T) {
 	cancelled, err := server.app.Runtime.GetRun(context.Background(), domain.RunID(cancelID))
 	if err != nil || cancelled.State != domain.RunCancelled {
 		t.Fatalf("cancelled: %+v %v", cancelled, err)
+	}
+}
+
+func TestHTTPRetryReviewPersistsBudgetGrantWithoutApplyingItEarly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "state")
+	cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.ToSlash(stateRoot) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := cfg.EffectiveConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(effective.Paths.Locks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	locks, err := runlock.NewManager(effective.Paths.Locks, runlock.Options{PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{app: &application.Application{Runtime: store, Reviews: store, Locks: locks}, cfg: cfg, manager: newTaskManager(1), secret: "web-review-test", sessions: map[string]time.Time{}}
+	t.Cleanup(func() { _ = server.Close() })
+	handler := server.Handler()
+	sessionBody, _ := json.Marshal(map[string]string{"token": server.secret})
+	exchange := httptest.NewRecorder()
+	handler.ServeHTTP(exchange, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/session", bytes.NewReader(sessionBody)))
+	if exchange.Code != http.StatusOK {
+		t.Fatalf("session exchange: HTTP %d %s", exchange.Code, exchange.Body.String())
+	}
+	cookies := exchange.Result().Cookies()
+	doRequest := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "http://127.0.0.1:8080"+path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CPGen-CSRF", "local-session")
+		for _, cookie := range cookies {
+			request.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	runID := domain.RunID("run_000000000000000000000000000000b1")
+	configJSON := []byte(`{}`)
+	configDigest := domain.SumBytes(configJSON)
+	limits := domain.BudgetLimits{MaxSimilarityCostMicroUSD: 7000, MaxActiveTimeMilliseconds: 30000}
+	submitted := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: "manual", Brief: "HTTP review test", Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en", Difficulty: "easy", TimeLimitMilliseconds: 1000, MemoryLimitMegabytes: 64, SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: limits}
+	raw, err := json.Marshal(submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonicalValue any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&canonicalValue); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(canonicalValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := store.CreateRun(ctx, domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 7,
+		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: configDigest, WorkflowRevision: "slice1/v1", SchemaVersion: domain.RequestSchemaV1,
+		WorkflowDigest: domain.SumBytes([]byte("workflow")), BudgetLimits: limits, StageSequence: []domain.StageName{"prepare", "exercise"}, CreatedAt: createdAt,
+		IdempotencyKey: "create_000000000000000000000000000000b1"}); err != nil {
+		t.Fatalf("CreateRun fixture: %v", err)
+	}
+	input := domain.SumBytes([]byte("HTTP review input"))
+	evidence := domain.SumBytes([]byte("HTTP review evidence"))
+	attemptID := domain.AttemptID("attempt_000000000000000000000000000000b1")
+	if _, err := store.BeginStage(ctx, domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: 1, StageName: "prepare", AttemptID: attemptID, InputDigest: input, IdempotencyKey: "begin_000000000000000000000000000000b1", At: createdAt.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &configDigest, IdempotencyKey: "finish_000000000000000000000000000000b1", At: createdAt.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody := fmt.Sprintf(`{"operation_key":"retry-review","expected_run_version":"%d","workflow_revision":%q,"kind":"RETRY","reviewer":"web-test","reason":"continue with approved headroom","budget_increase":{"max_similarity_cost_usd":"0.25"}}`, snapshot.Version, snapshot.WorkflowRevision)
+	response := doRequest(http.MethodPost, "/api/runs/"+string(runID)+"/review", reviewBody)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("retry review: HTTP %d %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Data struct {
+			Decision struct {
+				ID             string `json:"id"`
+				State          string `json:"state"`
+				BudgetIncrease struct {
+					MaxSimilarityCostMicroUSD string `json:"max_similarity_cost_micro_usd"`
+				} `json:"budget_increase"`
+			} `json:"decision"`
+			RequiresExplicitResume bool `json:"requires_explicit_resume"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Data.Decision.State != string(domain.ReviewPending) || result.Data.Decision.BudgetIncrease.MaxSimilarityCostMicroUSD != "250000" || !result.Data.RequiresExplicitResume {
+		t.Fatalf("HTTP review did not persist exact approved amount: %+v", result.Data)
+	}
+	pending, err := store.PendingReview(ctx, runID)
+	if err != nil || pending == nil || string(pending.ID) != result.Data.Decision.ID {
+		t.Fatalf("pending review = %+v, %v", pending, err)
+	}
+	budget, err := store.BudgetSnapshot(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.Limits.MaxSimilarityCostMicroUSD != 7000 {
+		t.Fatalf("HTTP review changed allowance before explicit resume: %d", budget.Limits.MaxSimilarityCostMicroUSD)
 	}
 }
