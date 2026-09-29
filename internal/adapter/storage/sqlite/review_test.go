@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -158,6 +159,243 @@ func TestReviewKindsValidateAndApply(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetryBudgetIncreasesAreAppliedAndBackedByReservations keeps the stored
+// run limits, metered accounts, immutable request and live reservation path in
+// agreement across repeated approvals and an idempotent apply replay.
+func TestRetryBudgetIncreasesAreAppliedAndBackedByReservations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	runID := domain.RunID("run_00000000000000000000000000000041")
+	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "retry-budget.db"), clock.NewFake(testNow))
+	attemptID := domain.AttemptID("attempt_00000000000000000000000000000041")
+	snapshot, binding := driveRunToNeedsReview(t, store, runID, attemptID)
+	var submitted []byte
+	var requestDigest string
+	if err := store.db.QueryRowContext(ctx, `SELECT submitted_request_json,submitted_request_digest FROM runs WHERE run_id=?`, string(runID)).Scan(&submitted, &requestDigest); err != nil {
+		t.Fatal(err)
+	}
+
+	request := testCreateReviewRequest(runID, snapshot.Version, domain.ReviewRetry, binding, 41)
+	request.BudgetIncrease = domain.BudgetLimits{MaxSimilarityCostMicroUSD: 100000, MaxPackageBytes: 512, MaxActiveTimeMilliseconds: 5000}
+	decision, err := store.CreateReview(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateReview: %v", err)
+	}
+	command := domain.ApplyReviewCommand{
+		RunID: runID, ExpectedRunVersion: decision.RunVersion, ReviewDecisionID: decision.ID,
+		StageName: binding.stage, StageInputDigest: binding.input, EvidenceDigest: binding.evidence, PolicyDigest: binding.policy,
+		IdempotencyKey: "reviewapply_00000000000000000000000000000041", At: testNow.Add(4 * time.Second),
+	}
+	first, err := store.ApplyReview(ctx, command)
+	if err != nil {
+		t.Fatalf("ApplyReview: %v", err)
+	}
+	replayed, err := store.ApplyReview(ctx, command)
+	if err != nil || !reflect.DeepEqual(replayed, first) {
+		t.Fatalf("ApplyReview replay = %+v, %v", replayed, err)
+	}
+	budget, err := store.BudgetSnapshot(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.Limits.MaxSimilarityCostMicroUSD != 107000 || budget.Limits.MaxPackageBytes != (1<<20)+512 || budget.Limits.MaxActiveTimeMilliseconds != 35000 || budget.Limits.MaxMutationsPerStage != 2 {
+		t.Fatalf("first effective budget = %+v", budget.Limits)
+	}
+	account := readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+	if account.Limit != 107000 || account.Version != 2 || account.Reserved != 0 || account.Consumed != 0 {
+		t.Fatalf("similarity account after first review = %+v", account)
+	}
+
+	// A later RETRY adds to the already approved effective cap.
+	secondAttempt := domain.AttemptID("attempt_00000000000000000000000000000042")
+	mustBeginStage(t, store, runID, secondAttempt, first.Version, binding.stage, binding.input, testNow.Add(5*time.Second), "begin_00000000000000000000000000000042")
+	evidence := domain.SumBytes([]byte("second review evidence"))
+	policy := binding.policy
+	secondSnapshot, err := store.FinishStage(ctx, domain.FinishStageCommand{
+		RunID: runID, ExpectedRunVersion: first.Version + 1, StageName: binding.stage, AttemptID: secondAttempt,
+		AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview,
+		ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &policy,
+		IdempotencyKey: "finish_00000000000000000000000000000042", At: testNow.Add(6 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("FinishStage second review: %v", err)
+	}
+	secondBinding := reviewBinding{stage: binding.stage, input: binding.input, evidence: evidence, policy: policy, workflowRevision: secondSnapshot.WorkflowRevision}
+	secondRequest := testCreateReviewRequest(runID, secondSnapshot.Version, domain.ReviewRetry, secondBinding, 42)
+	secondRequest.BudgetIncrease = domain.BudgetLimits{MaxSimilarityCostMicroUSD: 11}
+	secondDecision, err := store.CreateReview(ctx, secondRequest)
+	if err != nil {
+		t.Fatalf("CreateReview second: %v", err)
+	}
+	secondCommand := domain.ApplyReviewCommand{
+		RunID: runID, ExpectedRunVersion: secondDecision.RunVersion, ReviewDecisionID: secondDecision.ID,
+		StageName: secondBinding.stage, StageInputDigest: secondBinding.input, EvidenceDigest: secondBinding.evidence, PolicyDigest: secondBinding.policy,
+		IdempotencyKey: "reviewapply_00000000000000000000000000000042", At: testNow.Add(7 * time.Second),
+	}
+	resumed, err := store.ApplyReview(ctx, secondCommand)
+	if err != nil {
+		t.Fatalf("ApplyReview second: %v", err)
+	}
+	budget, err = store.BudgetSnapshot(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account = readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+	if budget.Limits.MaxSimilarityCostMicroUSD != 107011 || account.Limit != 107011 || account.Version != 3 {
+		t.Fatalf("accumulated similarity budget = limit:%d account:%+v", budget.Limits.MaxSimilarityCostMicroUSD, account)
+	}
+	var applications int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM review_budget_applications WHERE run_id=? AND field='max_similarity_cost_micro_usd'`, string(runID)).Scan(&applications); err != nil || applications != 2 {
+		t.Fatalf("budget application audit count = %d, %v", applications, err)
+	}
+
+	var submittedAfter []byte
+	var digestAfter string
+	if err := store.db.QueryRowContext(ctx, `SELECT submitted_request_json,submitted_request_digest FROM runs WHERE run_id=?`, string(runID)).Scan(&submittedAfter, &digestAfter); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(submittedAfter, submitted) || digestAfter != requestDigest {
+		t.Fatal("review changed the immutable submitted request or digest")
+	}
+
+	// The increased account now admits a reservation that exceeded the original
+	// similarity-cost limit, through the same metering path used by the runner.
+	thirdAttempt := domain.AttemptID("attempt_00000000000000000000000000000043")
+	mustBeginStage(t, store, runID, thirdAttempt, resumed.Version, binding.stage, binding.input, testNow.Add(8*time.Second), "begin_00000000000000000000000000000043")
+	running, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeStart, err := store.AccountActiveTime(ctx, domain.ActiveTimeCommand{
+		RunID: runID, ExpectedRunVersion: running.Version, Action: domain.ActiveTimeStart,
+		IdempotencyKey: "active_00000000000000000000000000000041", At: testNow.Add(9 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("start active time after retry: %v", err)
+	}
+	activeHeartbeat, err := store.AccountActiveTime(ctx, domain.ActiveTimeCommand{
+		RunID: runID, ExpectedRunVersion: activeStart.RunVersion, Action: domain.ActiveTimeHeartbeat,
+		IdempotencyKey: "active_00000000000000000000000000000042", At: testNow.Add(43 * time.Second),
+	})
+	if err != nil || activeHeartbeat.ActiveElapsed != 34*time.Second || activeHeartbeat.Remaining != time.Second {
+		t.Fatalf("active-time allowance beyond original 30s cap = %+v, %v", activeHeartbeat, err)
+	}
+	running, err = store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := meteringFixture{store: store, runID: runID, attemptID: thirdAttempt, stage: binding.stage, now: testNow.Add(44 * time.Second)}
+	open := openCallRequest(fixture, 41, domain.CallSimilaritySearch)
+	open.ExpectedRunVersion = running.Version
+	open.At = fixture.now
+	call, err := store.OpenCall(ctx, open)
+	if err != nil {
+		t.Fatalf("OpenCall after retry: %v", err)
+	}
+	prepared, err := store.PrepareCalls(ctx, domain.PrepareCallsRequest{
+		RunID: runID, ExpectedRunVersion: running.Version, StageName: binding.stage, AttemptID: thirdAttempt,
+		CallRecordID: call.ID, PlanDigest: domain.SumBytes([]byte("review retry reservation")),
+		Calls:          []domain.PhysicalCallPlan{oneReservationPhysicalPlan(41, 1, domain.PhysicalSimilarityRequest, domain.BudgetSimilarityCostMicroUSD, 100000)},
+		IdempotencyKey: "prepare_00000000000000000000000000000041", At: fixture.now,
+	})
+	if err != nil || prepared.Failure != nil {
+		t.Fatalf("PrepareCalls above original limit = %+v, %v", prepared.Failure, err)
+	}
+	account = readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+	if account.Reserved != 100000 || account.Remaining() != 7011 {
+		t.Fatalf("reservation was not charged against the increased limit: %+v", account)
+	}
+}
+
+func TestRetryBudgetFailureRollsBackAndOverflowIsRejected(t *testing.T) {
+	t.Parallel()
+	t.Run("account failure rolls back approval application", func(t *testing.T) {
+		ctx := context.Background()
+		runID := domain.RunID("run_00000000000000000000000000000044")
+		store := openRuntimeStore(t, filepath.Join(t.TempDir(), "retry-rollback.db"), clock.NewFake(testNow))
+		snapshot, binding := driveRunToNeedsReview(t, store, runID, domain.AttemptID("attempt_00000000000000000000000000000044"))
+		request := testCreateReviewRequest(runID, snapshot.Version, domain.ReviewRetry, binding, 44)
+		request.BudgetIncrease = domain.BudgetLimits{MaxSimilarityCostMicroUSD: 100}
+		decision, err := store.CreateReview(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER test_fail_review_budget_account BEFORE UPDATE OF limit_value ON budget_accounts
+			WHEN NEW.run_id='run_00000000000000000000000000000044' AND NEW.dimension='SIMILARITY_COST_MICRO_USD'
+			BEGIN SELECT RAISE(ABORT,'injected account failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		command := domain.ApplyReviewCommand{
+			RunID: runID, ExpectedRunVersion: decision.RunVersion, ReviewDecisionID: decision.ID,
+			StageName: binding.stage, StageInputDigest: binding.input, EvidenceDigest: binding.evidence, PolicyDigest: binding.policy,
+			IdempotencyKey: "reviewapply_00000000000000000000000000000044", At: testNow.Add(4 * time.Second),
+		}
+		if _, err := store.ApplyReview(ctx, command); err == nil {
+			t.Fatal("ApplyReview succeeded despite injected account failure")
+		}
+		pending, err := store.PendingReview(ctx, runID)
+		if err != nil || pending == nil || pending.ID != decision.ID {
+			t.Fatalf("failed transaction did not restore pending decision: %+v %v", pending, err)
+		}
+		account := readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+		var runLimit, ledgerRows int64
+		if err := store.db.QueryRowContext(ctx, `SELECT max_similarity_cost_micro_usd FROM runs WHERE run_id=?`, string(runID)).Scan(&runLimit); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM review_budget_applications WHERE review_id=?`, string(decision.ID)).Scan(&ledgerRows); err != nil {
+			t.Fatal(err)
+		}
+		if account.Limit != 7000 || account.Version != 1 || runLimit != 7000 || ledgerRows != 0 {
+			t.Fatalf("failed apply leaked changes: account=%+v run_limit=%d ledger=%d", account, runLimit, ledgerRows)
+		}
+		if _, err := store.db.ExecContext(ctx, `DROP TRIGGER test_fail_review_budget_account`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.ApplyReview(ctx, command); err != nil {
+			t.Fatalf("retry after rolled-back apply: %v", err)
+		}
+		account = readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+		if account.Limit != 7100 || account.Version != 2 {
+			t.Fatalf("retry after rollback produced wrong account: %+v", account)
+		}
+	})
+
+	t.Run("effective cap overflow is rejected before creating approval", func(t *testing.T) {
+		ctx := context.Background()
+		runID := domain.RunID("run_00000000000000000000000000000045")
+		store := openRuntimeStore(t, filepath.Join(t.TempDir(), "retry-overflow.db"), clock.NewFake(testNow))
+		snapshot, binding := driveRunToNeedsReview(t, store, runID, domain.AttemptID("attempt_00000000000000000000000000000045"))
+		review := testCreateReviewRequest(runID, snapshot.Version, domain.ReviewRetry, binding, 45)
+		review.BudgetIncrease = domain.BudgetLimits{MaxSimilarityCostMicroUSD: math.MaxInt64}
+		if _, err := store.CreateReview(ctx, review); !errors.Is(err, ErrConsistency) {
+			t.Fatalf("overflowing review amount = %v, want ErrConsistency", err)
+		}
+		var reviews int
+		if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM review_decisions WHERE run_id=?`, string(runID)).Scan(&reviews); err != nil {
+			t.Fatal(err)
+		}
+		if reviews != 0 {
+			t.Fatalf("overflowing budget persisted %d review decisions", reviews)
+		}
+		account := readBudgetAccount(t, store, runID, domain.BudgetSimilarityCostMicroUSD)
+		if account.Limit != 7000 {
+			t.Fatalf("overflow changed the authoritative account: %+v", account)
+		}
+	})
+
+	t.Run("frozen mutation quota cannot be increased by RETRY", func(t *testing.T) {
+		ctx := context.Background()
+		runID := domain.RunID("run_00000000000000000000000000000046")
+		store := openRuntimeStore(t, filepath.Join(t.TempDir(), "retry-mutation.db"), clock.NewFake(testNow))
+		snapshot, binding := driveRunToNeedsReview(t, store, runID, domain.AttemptID("attempt_00000000000000000000000000000046"))
+		review := testCreateReviewRequest(runID, snapshot.Version, domain.ReviewRetry, binding, 46)
+		review.BudgetIncrease = domain.BudgetLimits{MaxMutationsPerStage: 1}
+		if _, err := store.CreateReview(ctx, review); err == nil {
+			t.Fatal("RETRY accepted a mutation quota detached from the immutable request")
+		}
+	})
 }
 
 // TestReviewApplyRechecksBinding catches applying an otherwise valid decision
@@ -481,6 +719,12 @@ func driveRunToNeedsReview(t *testing.T, store *Store, runID domain.RunID, attem
 	t.Helper()
 	request := testCreateRunRequest(runID, testNow, 30*time.Second)
 	request.IdempotencyKey = "create_" + string(runID[len(runID)-32:])
+	return driveRunRequestToNeedsReview(t, store, request, attemptID, len(waivable) != 0 && waivable[0])
+}
+
+func driveRunRequestToNeedsReview(t *testing.T, store *Store, request domain.CreateRunRequest, attemptID domain.AttemptID, waivable bool) (domain.RunSnapshot, reviewBinding) {
+	t.Helper()
+	runID := request.RunID
 	mustCreateRun(t, store, request)
 	input := domain.SumBytes([]byte("review input " + string(runID)))
 	mustBeginStage(t, store, runID, attemptID, 1, "prepare", input, testNow.Add(time.Second), "begin_"+string(attemptID[len(attemptID)-32:]))
@@ -490,7 +734,7 @@ func driveRunToNeedsReview(t *testing.T, store *Store, runID domain.RunID, attem
 		RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID,
 		AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview,
 		ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &policy,
-		ReviewGateWaivable: len(waivable) != 0 && waivable[0],
+		ReviewGateWaivable: waivable,
 		IdempotencyKey:     "finish_" + string(attemptID[len(attemptID)-32:]), At: testNow.Add(2 * time.Second),
 	})
 	if err != nil {

@@ -109,8 +109,8 @@ func TestMigrationSimultaneousFirstOpenIsIdempotent(t *testing.T) {
 	if err := check.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migration history: %v", err)
 	}
-	if count != 29 {
-		t.Fatalf("migration rows = %d, want 29", count)
+	if count != 30 {
+		t.Fatalf("migration rows = %d, want 30", count)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 	if err != nil {
 		t.Fatalf("upgrade historical M4 database: %v", err)
 	}
-	assertMigrationHistory(t, store, 29)
+	assertMigrationHistory(t, store, 30)
 	for _, name := range []string{"call_records_terminal_matrix_insert", "physical_calls_terminal_parent_update"} {
 		var count int
 		if err := store.db.QueryRowContext(ctx,
@@ -209,7 +209,7 @@ func TestMigrationPreservesAppliedCallBudgetBytesAndUpgradesTerminalGuards(t *te
 		t.Fatalf("reopen upgraded M4 database: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 29)
+	assertMigrationHistory(t, reopened, 30)
 }
 
 // TestMigrationFreshOpenAppliesForwardWorkflowMigration catches fresh stores
@@ -222,8 +222,118 @@ func TestMigrationFreshOpenAppliesForwardWorkflowMigration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 29)
+	assertMigrationHistory(t, store, 30)
 	assertForwardWorkflowSchema(t, store)
+}
+
+// TestMigrationRecoversAppliedRetryBudgets records the previously ignored
+// approved deltas in the immutable audit tables, projects their aggregate into
+// run limits/accounts, and verifies a later open cannot credit them twice.
+func TestMigrationRecoversAppliedRetryBudgets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-reviews.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:29] {
+		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
+			t.Fatalf("apply legacy migration %d: %v", migration.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,sha256,applied_at) VALUES(?,?,?,?)`, migration.version, migration.name, migration.hash, formatTime(testNow)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := &Store{db: db, config: Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1}, clock: clock.NewFake(testNow)}
+	runID := domain.RunID("run_000000000000000000000000000000d9")
+	snapshot, binding := driveRunToNeedsReview(t, legacy, runID, domain.AttemptID("attempt_000000000000000000000000000000d9"))
+	var originalRequest []byte
+	var originalDigest string
+	if err := db.QueryRowContext(ctx, `SELECT submitted_request_json,submitted_request_digest FROM runs WHERE run_id=?`, string(runID)).Scan(&originalRequest, &originalDigest); err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range []struct {
+		id    string
+		key   string
+		delta int64
+	}{
+		{id: "review_000000000000000000000000000000d1", key: "reviewcreate_000000000000000000000000000000d1", delta: 200000},
+		{id: "review_000000000000000000000000000000d2", key: "reviewcreate_000000000000000000000000000000d2", delta: 300000},
+	} {
+		increase := domain.BudgetLimits{MaxSimilarityCostMicroUSD: item.delta}
+		budgetJSON, err := json.Marshal(increase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created := testNow.Add(time.Duration(3+index*2) * time.Second)
+		applied := created.Add(time.Second)
+		if _, err := db.ExecContext(ctx, `INSERT INTO review_decisions(
+			review_id,run_id,kind,state,expected_run_version,run_version,workflow_revision,stage_name,
+			stage_input_digest,evidence_digest,policy_digest,budget_increase_json,waivable_gate,reviewer,reason,
+			idempotency_key,command_digest,created_at,applied_at
+		) VALUES(?,?, 'RETRY','APPLIED', ?, ?, ?, ?, ?, ?, ?, ?, 0, 'migration-test', 'legacy approved budget', ?, ?, ?, ?)`,
+			item.id, string(runID), snapshot.Version+int64(index*2), snapshot.Version+int64(index*2)+1,
+			binding.workflowRevision, string(binding.stage), string(binding.input), string(binding.evidence), string(binding.policy),
+			budgetJSON, item.key, string(domain.SumBytes([]byte(item.id))), formatTime(created), formatTime(applied)); err != nil {
+			t.Fatalf("insert legacy applied review: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE stage_records SET state='PENDING',version=version+1,review_evidence_digest=NULL,review_policy_digest=NULL,review_waivable=NULL WHERE run_id=? AND stage_name=?`, string(runID), string(binding.stage)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE runs SET state='CREATED',version=?,updated_at=? WHERE run_id=?`, snapshot.Version+4, formatTime(testNow.Add(8*time.Second)), string(runID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatalf("upgrade legacy applied reviews: %v", err)
+	}
+	checkRecovered := func() {
+		t.Helper()
+		assertMigrationHistory(t, store, 30)
+		var runLimit, accountLimit, accountVersion int64
+		if err := store.db.QueryRowContext(ctx, `SELECT max_similarity_cost_micro_usd FROM runs WHERE run_id=?`, string(runID)).Scan(&runLimit); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.db.QueryRowContext(ctx, `SELECT limit_value,account_version FROM budget_accounts WHERE run_id=? AND dimension='SIMILARITY_COST_MICRO_USD'`, string(runID)).Scan(&accountLimit, &accountVersion); err != nil {
+			t.Fatal(err)
+		}
+		var requestAfter []byte
+		var digestAfter string
+		if err := store.db.QueryRowContext(ctx, `SELECT submitted_request_json,submitted_request_digest FROM runs WHERE run_id=?`, string(runID)).Scan(&requestAfter, &digestAfter); err != nil {
+			t.Fatal(err)
+		}
+		var applications, recovered int
+		if err := store.db.QueryRowContext(ctx, `SELECT count(*),sum(source='LEGACY_RECOVERY') FROM review_budget_applications WHERE run_id=?`, string(runID)).Scan(&applications, &recovered); err != nil {
+			t.Fatal(err)
+		}
+		if runLimit != 507000 || accountLimit != runLimit || accountVersion != 2 || applications != 2 || recovered != 2 {
+			t.Fatalf("recovered budget: run=%d account=%d version=%d applications=%d legacy=%d", runLimit, accountLimit, accountVersion, applications, recovered)
+		}
+		if !reflect.DeepEqual(requestAfter, originalRequest) || digestAfter != originalDigest {
+			t.Fatal("migration changed the immutable submitted request or digest")
+		}
+	}
+	checkRecovered()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, Config{Path: path, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatalf("reopen recovered database: %v", err)
+	}
+	defer store.Close()
+	checkRecovered()
 }
 
 // TestMigrationUpgradesM14VolumeWithoutPhysicalCallID verifies the forward
@@ -331,7 +441,7 @@ func TestMigrationUpgradesM14VolumeWithoutPhysicalCallID(t *testing.T) {
 		t.Fatalf("upgrade M14 database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 29)
+	assertMigrationHistory(t, store, 30)
 	var phase string
 	var gotDigest sql.NullString
 	if err := store.db.QueryRowContext(ctx, `SELECT phase, physical_call_id FROM sandbox_resources WHERE resource_id=?`, resourceID).Scan(&phase, &gotDigest); err != nil {
@@ -568,7 +678,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("upgrade historical database: %v", err)
 	}
 	defer store.Close()
-	assertMigrationHistory(t, store, 29)
+	assertMigrationHistory(t, store, 30)
 	assertForwardWorkflowSchema(t, store)
 
 	for table, want := range fixture.rowCounts {
@@ -663,7 +773,7 @@ func TestMigrationUpgradesHistoricalWorkflowDatabase(t *testing.T) {
 		t.Fatalf("idempotent reopen after upgrade: %v", err)
 	}
 	defer reopened.Close()
-	assertMigrationHistory(t, reopened, 29)
+	assertMigrationHistory(t, reopened, 30)
 }
 
 // TestCreateRunReplaysLegacyCreateAfterHistoricalMigration catches rejecting
@@ -815,7 +925,7 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertMigrationHistory(t, store, 29)
+	assertMigrationHistory(t, store, 30)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first store: %v", err)
 	}
@@ -828,8 +938,8 @@ func TestMigrationRecordsVersionNameAndHashAndReopens(t *testing.T) {
 	if err := reopened.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 29 {
-		t.Fatalf("migration count = %d, want 29", count)
+	if count != 30 {
+		t.Fatalf("migration count = %d, want 30", count)
 	}
 }
 
