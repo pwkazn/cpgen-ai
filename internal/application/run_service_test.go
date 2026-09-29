@@ -13,19 +13,12 @@ import (
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	"cpgen/internal/runlock"
-	"cpgen/internal/workflow"
 )
 
 func TestRunServiceRejectsIncompleteConfiguration(t *testing.T) {
 	if _, err := application.NewRunService(application.RunServiceConfig{}); err == nil {
 		t.Fatal("incomplete run service configuration was accepted")
 	}
-}
-
-func TestRunServiceInterfaceHasFixedLifecycle(t *testing.T) {
-	var _ application.RunService = (*application.LocalRunService)(nil)
-	_ = context.Background()
-	_ = workflow.FakeRevision
 }
 
 func TestRunServiceGenerateStopsAtSlice1Review(t *testing.T) {

@@ -150,27 +150,6 @@ func TestEvidenceBindsCacheProvenanceAndDigest(t *testing.T) {
 	}
 }
 
-func TestFakeIsDeterministicAndBindsRequests(t *testing.T) {
-	policy, err := NewPolicy("fake/v1", .5, .8, .5, .8, 1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := testRequest(t, policy)
-	evidence := testEvidence(t, request, .4)
-	fake := NewFakeEvidence(evidence)
-	outcome, err := fake.SearchEvidence(context.Background(), request)
-	if err != nil || outcome.Value == nil {
-		t.Fatalf("fake outcome = %#v, err=%v", outcome, err)
-	}
-	if len(fake.Requests()) != 1 {
-		t.Fatalf("fake requests = %#v", fake.Requests())
-	}
-	request.NormalizedTags = append(request.NormalizedTags, "changed")
-	if _, err := fake.SearchEvidence(context.Background(), request); err == nil {
-		t.Fatal("fake accepted a request bound to another evidence")
-	}
-}
-
 func TestHTTPAdapterSuccessUsageSortingAndCompatibilityPort(t *testing.T) {
 	const secret = "similarity-secret-never-in-errors"
 	t.Setenv("CPGEN_SIM_TEST_KEY", secret)

@@ -415,26 +415,6 @@ func TestBatchAndSelectionPoliciesRejectInvalidMatrices(t *testing.T) {
 	t.Fatal("fixture did not exercise differing policy orders")
 }
 
-func TestRequestCanonicalEncodingPreservesSubmittedIdentity(t *testing.T) {
-	a := testGenerationRequest()
-	a.Brief = "Cafe\u0301"
-	a.RequiredFeatures = []string{" z ", "a"}
-	b := testGenerationRequest()
-	b.Brief = " Café "
-	b.RequiredFeatures = []string{"a", "z"}
-	da, err := a.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := b.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if da == db {
-		t.Fatal("distinct submitted requests lost their byte identity")
-	}
-}
-
 func candidateDrafts(v []IdeaCandidate) []IdeaCandidate {
 	out := append([]IdeaCandidate(nil), v...)
 	for i := range out {

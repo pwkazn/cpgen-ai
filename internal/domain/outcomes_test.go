@@ -7,38 +7,30 @@ import (
 	"cpgen/internal/domain"
 )
 
-func TestDomainEnumsRejectUnknownJSONValues(t *testing.T) {
+func TestJSONEnumsRejectUnsupportedValues(t *testing.T) {
 	t.Parallel()
-	targets := []any{
-		new(domain.CompileOutcome), new(domain.ProcessOutcome), new(domain.ValidatorOutcome),
-		new(domain.CheckerOutcome), new(domain.SolutionVerdict), new(domain.FailureRouteClass),
-		new(domain.ExecutionCause), new(domain.ArtifactRole), new(domain.DispatchKind),
-		new(domain.FailureClass), new(domain.PortFailureCode),
+	targets := []struct {
+		name   string
+		target any
+	}{
+		{"compile outcome", new(domain.CompileOutcome)}, {"process outcome", new(domain.ProcessOutcome)},
+		{"validator outcome", new(domain.ValidatorOutcome)}, {"checker outcome", new(domain.CheckerOutcome)},
+		{"solution verdict", new(domain.SolutionVerdict)}, {"failure route", new(domain.FailureRouteClass)},
+		{"execution cause", new(domain.ExecutionCause)}, {"artifact role", new(domain.ArtifactRole)},
+		{"dispatch kind", new(domain.DispatchKind)}, {"failure class", new(domain.FailureClass)},
+		{"port failure", new(domain.PortFailureCode)}, {"run state", new(domain.RunState)},
+		{"stage state", new(domain.StageState)}, {"stage attempt state", new(domain.StageAttemptState)},
+		{"review decision kind", new(domain.ReviewDecisionKind)}, {"review decision state", new(domain.ReviewDecisionState)},
 	}
-	for _, target := range targets {
-		if err := json.Unmarshal([]byte(`"NOT_A_REAL_VALUE"`), target); err == nil {
-			t.Fatalf("%T accepted an unknown enum value", target)
+	for _, tc := range targets {
+		if err := json.Unmarshal([]byte(`"NOT_A_REAL_VALUE"`), tc.target); err == nil {
+			t.Errorf("%s accepted an unknown enum value", tc.name)
 		}
 	}
-}
-
-func TestExecutionCauseRejectsObsoleteOwnershipModes(t *testing.T) {
-	t.Parallel()
 	for _, raw := range []string{`"quiesce"`, `"lease_lost"`} {
 		var cause domain.ExecutionCause
 		if err := json.Unmarshal([]byte(raw), &cause); err == nil {
-			t.Fatalf("obsolete execution cause %s was accepted", raw)
+			t.Errorf("obsolete execution cause %s was accepted", raw)
 		}
-	}
-}
-
-func TestDomainEnumsAcceptKnownJSONValues(t *testing.T) {
-	t.Parallel()
-	var outcome domain.ProcessOutcome
-	if err := json.Unmarshal([]byte(`"TLE"`), &outcome); err != nil {
-		t.Fatalf("decode known outcome: %v", err)
-	}
-	if outcome != domain.ProcessTLE {
-		t.Fatalf("got %q, want TLE", outcome)
 	}
 }

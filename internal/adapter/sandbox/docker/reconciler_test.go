@@ -14,13 +14,6 @@ import (
 	moby "github.com/moby/moby/client"
 )
 
-func TestSandboxReconcilerPublicSurfaceIsCleanupOnly(t *testing.T) {
-	var reconciler SandboxReconciler = &narrowReconciler{}
-	if reconciler == nil {
-		t.Fatal("reconciler interface must be usable")
-	}
-}
-
 func TestReconcilerCreatingWithoutEngineIDSettlesNoCreate(t *testing.T) {
 	now := time.Unix(123, 0).UTC()
 	execution := reconcilerTestExecution()
@@ -261,9 +254,3 @@ func (e *reconcilerTestEngine) ContainerRemove(context.Context, string, moby.Con
 
 var _ port.SandboxCleanupRecorder = (*reconcilerTestStore)(nil)
 var _ Engine = (*reconcilerTestEngine)(nil)
-
-type narrowReconciler struct{}
-
-func (*narrowReconciler) ReconcileRun(context.Context, domain.RunID) (domain.SandboxReconcileReport, error) {
-	return domain.SandboxReconcileReport{}, nil
-}

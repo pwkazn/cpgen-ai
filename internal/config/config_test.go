@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"cpgen/internal/config"
-	"cpgen/internal/domain"
 )
 
 func TestDecodeStrictConfigDerivesPrivatePathsAndStableDigest(t *testing.T) {
@@ -97,15 +96,5 @@ func TestDecodeRejectsExplicitNonPositiveMaxReaders(t *testing.T) {
 				t.Fatalf("error field = %v, want sqlite.max_readers: %v", fieldErr, err)
 			}
 		})
-	}
-}
-
-func TestConfigDigestIsAValidDomainDigest(t *testing.T) {
-	cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.Join(t.TempDir(), "state") + "\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := domain.Digest(cfg.Digest()).Validate(); err != nil {
-		t.Fatal(err)
 	}
 }

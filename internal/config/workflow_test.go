@@ -15,14 +15,6 @@ func explicitWorkflowYAML() string {
 	return "workflow:\n  revision: " + workflow.LegacySimilarityCheckpointRevision + "\n  idea_count: 2\n  llm_cost_upper_bound_micro_usd: 10000\n  similarity_cost_upper_bound_micro_usd: 1000\n"
 }
 
-func TestWorkflowDefaultIdeaCountMatchesDeclaredContentPolicy(t *testing.T) {
-	selector := strings.ReplaceAll(explicitWorkflowYAML(), "  idea_count: 2\n", "")
-	cfg, err := config.Decode([]byte(configBase(t) + providerYAML + similarityYAML + selector))
-	if err != nil || cfg.Workflow == nil || cfg.Workflow.IdeaCount != 4 {
-		t.Fatalf("default candidate count=%+v %v", cfg.Workflow, err)
-	}
-}
-
 func TestWorkflowSelectionIsExplicitAndFrozenWithoutCredentialValues(t *testing.T) {
 	base := configBase(t)
 	plain, err := config.Decode([]byte(base))

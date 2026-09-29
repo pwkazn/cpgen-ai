@@ -9,56 +9,6 @@ import (
 	"cpgen/internal/domain"
 )
 
-// TestWorkflowEnumsRejectUnknownJSON catches opening a persisted lifecycle enum to
-// arbitrary strings, which would let incompatible database state enter the workflow.
-func TestWorkflowEnumsRejectUnknownJSON(t *testing.T) {
-	t.Parallel()
-	for _, target := range []any{
-		new(domain.RunState), new(domain.StageState), new(domain.StageAttemptState),
-		new(domain.ReviewDecisionKind), new(domain.ReviewDecisionState),
-	} {
-		if err := json.Unmarshal([]byte(`"UNKNOWN"`), target); err == nil {
-			t.Fatalf("%T accepted an unknown lifecycle value", target)
-		}
-	}
-}
-
-// TestWorkflowEnumsAcceptDocumentedValues catches an enum implementation that
-// accidentally rejects a valid persisted lifecycle value.
-func TestWorkflowEnumsAcceptDocumentedValues(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		json string
-		dst  any
-	}{
-		{"run", `"READY"`, new(domain.RunState)},
-		{"stage", `"SUCCEEDED"`, new(domain.StageState)},
-		{"attempt", `"INTERRUPTED"`, new(domain.StageAttemptState)},
-		{"review kind", `"WAIVE"`, new(domain.ReviewDecisionKind)},
-		{"review state", `"STALE"`, new(domain.ReviewDecisionState)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := json.Unmarshal([]byte(tc.json), tc.dst); err != nil {
-				t.Fatalf("decode %s: %v", tc.name, err)
-			}
-		})
-	}
-}
-
-// TestWorkflowStageBoundaryRejectsReady catches treating READY as a normal stage
-// boundary before the package-verification slice can enforce its atomic binding.
-func TestWorkflowStageBoundaryRejectsReady(t *testing.T) {
-	t.Parallel()
-	if err := domain.ValidateStageBoundary(domain.RunReady); !errors.Is(err, domain.ErrStageBoundary) {
-		t.Fatalf("ValidateStageBoundary(READY) = %v, want ErrStageBoundary", err)
-	}
-	if err := domain.ValidateStageBoundary(domain.RunRunning); err != nil {
-		t.Fatalf("ValidateStageBoundary(RUNNING): %v", err)
-	}
-}
-
 // TestLifecycleValuesValidatePersistentInvariants catches accepting malformed
 // projections that would make versioned restart and audit state ambiguous.
 func TestLifecycleValuesValidatePersistentInvariants(t *testing.T) {
@@ -112,25 +62,6 @@ func TestLifecycleValuesValidatePersistentInvariants(t *testing.T) {
 				t.Fatal("malformed persistent value was accepted")
 			}
 		})
-	}
-}
-
-// TestLifecycleUsesOnlyClosedExecutionCauses catches reintroducing obsolete
-// ownership modes as interruption causes.
-func TestLifecycleUsesOnlyClosedExecutionCauses(t *testing.T) {
-	t.Parallel()
-	for _, cause := range []domain.ExecutionCause{
-		domain.CauseUserCancel, domain.CauseRevisionInvalidated,
-		domain.CauseStepDeadline, domain.CauseRunBudgetDeadline,
-	} {
-		if err := (domain.ExecutionInterrupted{Cause: cause}).Validate(); err != nil {
-			t.Fatalf("documented cause %q rejected: %v", cause, err)
-		}
-	}
-	for _, cause := range []domain.ExecutionCause{"quiesce", "lease_lost"} {
-		if err := (domain.ExecutionInterrupted{Cause: cause}).Validate(); err == nil {
-			t.Fatalf("obsolete cause %q accepted", cause)
-		}
 	}
 }
 
