@@ -474,18 +474,20 @@ func TestSlice1RequestConversionPreservesAllLegalValues(t *testing.T) {
 	}
 }
 
-func TestGenerationRequestModeAndTagPolicy(t *testing.T) {
+func TestGenerationRequestModeAndFreeformTagNormalization(t *testing.T) {
 	for _, tt := range []struct {
 		name, mode, brief string
 		tags, normalized  []string
 		valid             bool
 	}{
 		{"manual", "manual", "brief", []string{"graphs"}, []string{"graphs"}, true},
+		{"chinese tag", "manual", "brief", []string{" 图论 "}, []string{"图论"}, true},
+		{"localized and custom tags", "manual", "brief", []string{"数据结构", " XOR trie "}, []string{"xor trie", "数据结构"}, true},
 		{"random empty", "random", "", nil, nil, true},
 		{"random seeded brief", "random", "hint", []string{" DP ", "graphs"}, []string{"dp", "graphs"}, true},
 		{"manual empty", "manual", " ", nil, nil, false},
 		{"unknown mode", "generate", "brief", nil, nil, false},
-		{"unknown tag", "manual", "brief", []string{"not-a-topic"}, []string{"not-a-topic"}, false},
+		{"arbitrary tag", "manual", "brief", []string{"not-a-topic"}, []string{"not-a-topic"}, true},
 		{"mismatch", "manual", "brief", []string{"trees"}, []string{"graphs"}, false},
 		{"missing derived", "manual", "brief", []string{"graphs"}, nil, false},
 		{"sort", "manual", "brief", []string{"trees", "graphs"}, []string{"trees", "graphs"}, false},
