@@ -1,8 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -135,7 +138,8 @@ func TestExecutorPanicReleasesCapacityAndDoesNotExposeSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitManagerEmpty(t, m)
-	if m.observe(id).LastError == "" {
+	lastError := m.observe(id).LastError
+	if lastError == "" || !strings.Contains(lastError, "诊断编号") || strings.Contains(lastError, "secret-provider-token") {
 		t.Fatal("panic not surfaced")
 	}
 	r, err = m.reserve()
@@ -143,4 +147,46 @@ func TestExecutorPanicReleasesCapacityAndDoesNotExposeSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.release()
+}
+
+func TestRedactLocalErrorRemovesProviderCredentials(t *testing.T) {
+	message := `request failed Authorization: Bearer header-secret {"api_key":"config-secret","authorization":"Bearer json-secret"} https://user:pass@example.test/search?token=query-secret`
+	redacted := redactLocalError(message, []string{"config-secret"})
+	for _, secret := range []string{"header-secret", "config-secret", "json-secret", "user:pass", "query-secret"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("local diagnostic retained credential %q: %s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "[REDACTED]") {
+		t.Fatalf("credential markers were not included: %s", redacted)
+	}
+}
+
+func TestTaskFailureKeepsDetailsInRedactedLocalLogOnly(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	m := newTaskManager(1, "fixture-provider-secret")
+	r, err := m.reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "run_00000000000000000000000000000042"
+	if err = r.start(id, func(context.Context) error {
+		return errors.New("provider rejected request; api_key=fixture-provider-secret")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	awaitManagerEmpty(t, m)
+
+	lastError := m.observe(id).LastError
+	if strings.Contains(lastError, "fixture-provider-secret") || strings.Contains(lastError, "provider rejected") || !strings.Contains(lastError, "诊断编号") {
+		t.Fatalf("API observation leaked detail or lost its diagnostic reference: %s", lastError)
+	}
+	localLog := output.String()
+	if !strings.Contains(localLog, "provider rejected") || !strings.Contains(localLog, "[REDACTED]") || strings.Contains(localLog, "fixture-provider-secret") {
+		t.Fatalf("local diagnostic missing or retained provider credential: %s", localLog)
+	}
 }

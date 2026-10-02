@@ -118,8 +118,16 @@ func runStateful(command *preparedCommand, configPath string, stdout, stderr io.
 	if command.configOnly {
 		return runConfigCommand(command.effective, cfg, stdout, stderr)
 	}
+	if cfg.Similarity != nil && cfg.Similarity.Endpoint == web.FixtureSimilarityEndpoint && !command.serveSimilarityFixture {
+		return writeStateError(stdout, stderr, 9, "fixture_mode_required", errors.New("the local similarity fixture endpoint requires serve --fixture-similarity"))
+	}
 	if command.serveListen != "" {
-		server, err := web.NewWithCapacity(context.Background(), cfg, command.serveCapacity)
+		var server *web.Server
+		if command.serveSimilarityFixture {
+			server, err = web.NewWithCapacityAndSimilarityFixture(context.Background(), cfg, command.serveCapacity)
+		} else {
+			server, err = web.NewWithCapacity(context.Background(), cfg, command.serveCapacity)
+		}
 		if err != nil {
 			return writeStateError(stdout, stderr, 9, "bootstrap_failed", err)
 		}
@@ -153,13 +161,14 @@ func prepareServe(args []string) (*preparedCommand, *commandError) {
 	flags := commandFlags("serve")
 	listen := flags.String("listen", "127.0.0.1:8080", "loopback address")
 	capacity := flags.Int("capacity", 1, "maximum concurrent generation tasks (1-64)")
+	similarityFixture := flags.Bool("fixture-similarity", false, "use the local TLS similarity fixture (development only)")
 	if err := parseFlags(flags, args); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(*listen) == "" || flags.NArg() != 0 || *capacity < 1 || *capacity > 64 {
 		return nil, usageError("serve requires a non-empty loopback address")
 	}
-	return &preparedCommand{serveListen: *listen, serveCapacity: *capacity}, nil
+	return &preparedCommand{serveListen: *listen, serveCapacity: *capacity, serveSimilarityFixture: *similarityFixture}, nil
 }
 
 type runDocumentsReader interface {
@@ -472,8 +481,8 @@ func prepareReviewMutation(kind string, args []string) (*preparedCommand, *comma
 	}
 	switch kind {
 	case "revise":
-		if options.step == "" || options.patchPath == "" {
-			return nil, usageError("revise requires --step and --patch")
+		if options.step == "" {
+			return nil, usageError("revise requires --step TARGET_STAGE")
 		}
 	case "retry":
 		if options.budgetPath == "" && options.evidence == "" {
@@ -512,7 +521,11 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 	if snapshot.State != domain.RunNeedsReview {
 		return writeStateError(stdout, stderr, 5, "invalid_state", fmt.Errorf("run is %s, review requires NEEDS_REVIEW", snapshot.State))
 	}
-	stageInput, err := reviewStageInput(context.Background(), app.Runtime, snapshot)
+	bindingReader, ok := app.Runtime.(port.ReviewBindingReader)
+	if !ok {
+		return writeStateError(stdout, stderr, 5, "review_binding", errors.New("runtime store cannot read exact review evidence binding"))
+	}
+	stageInput, evidence, policy, err := bindingReader.ReadReviewBinding(context.Background(), id, snapshot.CurrentStage)
 	if err != nil {
 		return writeStateError(stdout, stderr, 5, "review_binding", err)
 	}
@@ -521,9 +534,10 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 	if err != nil {
 		return writeStateError(stdout, stderr, 9, "id_generation", err)
 	}
-	request := domain.CreateReviewRequest{ID: domain.ReviewDecisionID(decisionID), RunID: id, ExpectedRunVersion: snapshot.Version, Kind: kindValue, WorkflowRevision: snapshot.WorkflowRevision, StageName: snapshot.CurrentStage, StageInputDigest: stageInput, EvidenceDigest: stageInput, PolicyDigest: snapshot.ConfigDigest, Reviewer: strings.TrimSpace(options.reviewer), Reason: strings.TrimSpace(options.reason), IdempotencyKey: decisionID, At: time.Now().UTC()}
-	if options.step != "" {
-		request.StageName = domain.StageName(options.step)
+	request := domain.CreateReviewRequest{ID: domain.ReviewDecisionID(decisionID), RunID: id, ExpectedRunVersion: snapshot.Version, Kind: kindValue, WorkflowRevision: snapshot.WorkflowRevision, StageName: snapshot.CurrentStage, StageInputDigest: stageInput, EvidenceDigest: evidence, PolicyDigest: policy, Reviewer: strings.TrimSpace(options.reviewer), Reason: strings.TrimSpace(options.reason), IdempotencyKey: decisionID, At: time.Now().UTC()}
+	if kind == "revise" {
+		target := domain.StageName(options.step)
+		request.RevisionTargetStage = &target
 	}
 	if options.patchPath != "" {
 		data, readErr := os.ReadFile(options.patchPath)
@@ -531,6 +545,13 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 			return writeStateError(stdout, stderr, 2, "patch_invalid", readErr)
 		}
 		digest := domain.SumBytes(data)
+		request.RequestedEditsDigest = &digest
+	}
+	if kind == "revise" && request.RequestedEditsDigest == nil {
+		digest, digestErr := domain.ReviewRevisionIntentDigest(*request.RevisionTargetStage, request.Reason)
+		if digestErr != nil {
+			return writeStateError(stdout, stderr, 2, "revision_invalid", digestErr)
+		}
 		request.RequestedEditsDigest = &digest
 	}
 	if options.budgetPath != "" {
@@ -565,20 +586,6 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
 	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(decision.State), Data: decision, RunVersion: decision.RunVersion}, 0)
-}
-
-func reviewStageInput(ctx context.Context, runtimeStore port.RuntimeStore, snapshot domain.RunSnapshot) (domain.Digest, error) {
-	reader, ok := runtimeStore.(interface {
-		CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
-	})
-	if !ok {
-		return snapshot.RequestDigest, nil
-	}
-	attempt, err := reader.CurrentStageAttempt(ctx, snapshot.RunID, snapshot.CurrentStage)
-	if err != nil {
-		return "", err
-	}
-	return attempt.InputDigest, nil
 }
 
 func parseRunID(raw string) (domain.RunID, error) {

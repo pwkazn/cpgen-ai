@@ -2,6 +2,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"cpgen/internal/domain"
 )
@@ -38,4 +39,17 @@ type ReviewStore interface {
 	CreateReview(context.Context, domain.CreateReviewRequest) (domain.ReviewDecision, error)
 	PendingReview(context.Context, domain.RunID) (*domain.ReviewDecision, error)
 	ApplyReview(context.Context, domain.ApplyReviewCommand) (domain.RunSnapshot, error)
+}
+
+// ReviewBindingReader returns the durable stage input, failure evidence and
+// policy digests that a new review decision must bind exactly.
+type ReviewBindingReader interface {
+	ReadReviewBinding(context.Context, domain.RunID, domain.StageName) (domain.Digest, domain.Digest, domain.Digest, error)
+}
+
+// DraftRetryFeedbackReader returns the latest retry/revision diagnostic that
+// was effective when an attempt started. The time bound lets readers
+// reconstruct committed requests after later reviews have added feedback.
+type DraftRetryFeedbackReader interface {
+	ReadDraftRetryFeedbackBefore(context.Context, domain.RunID, domain.StageName, time.Time) (*domain.DraftRetryFeedback, error)
 }

@@ -180,6 +180,51 @@ func TestHTTPCreateReplayUsesOnePersistedRun(t *testing.T) {
 	if server.manager.isActive(domain.RunID(id)) {
 		t.Fatal("replay restarted executor")
 	}
+	// REVISE records its producer target and the next explicit resume applies
+	// the exact suffix from that producer before the Fake workflow reruns.
+	reviseCreate := doRequest(http.MethodPost, "/api/runs/create", strings.Replace(body, "http-create-replay-review", "revision-target-review", 1))
+	if reviseCreate.Code != http.StatusAccepted {
+		t.Fatalf("revision fixture create: HTTP %d %s", reviseCreate.Code, reviseCreate.Body.String())
+	}
+	if err := json.Unmarshal(reviseCreate.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	reviseID := result.Data.RunID
+	if reviseID == "" {
+		reviseID = result.Data.Run.RunID
+	}
+	awaitManagerEmpty(t, server.manager)
+	reviseRun, err := server.app.Runtime.GetRun(context.Background(), domain.RunID(reviseID))
+	if err != nil || reviseRun.State != domain.RunNeedsReview || reviseRun.CurrentStage != "checkpoint" {
+		t.Fatalf("revision fixture did not reach review checkpoint: %+v %v", reviseRun, err)
+	}
+	revisionBody := fmt.Sprintf(`{"operation_key":"revise-from-prepare","expected_run_version":"%d","workflow_revision":%q,"kind":"REVISE","revision_target_stage":"prepare","reviewer":"test","reason":"repair producer and rerun checks"}`, reviseRun.Version, reviseRun.WorkflowRevision)
+	if response := doRequest(http.MethodPost, "/api/runs/"+reviseID+"/review", revisionBody); response.Code != http.StatusCreated {
+		t.Fatalf("REVISE review: HTTP %d %s", response.Code, response.Body.String())
+	}
+	pendingRevision, err := server.app.Reviews.PendingReview(context.Background(), domain.RunID(reviseID))
+	if err != nil || pendingRevision == nil || pendingRevision.RevisionTargetStage == nil || *pendingRevision.RevisionTargetStage != "prepare" {
+		t.Fatalf("persisted REVISE target = %+v, %v", pendingRevision, err)
+	}
+	reviseResumeBody := fmt.Sprintf(`{"operation_key":"resume-revised-run","expected_run_version":"%d"}`, reviseRun.Version+1)
+	if response := doRequest(http.MethodPost, "/api/runs/"+reviseID+"/resume", reviseResumeBody); response.Code != http.StatusAccepted {
+		t.Fatalf("REVISE resume: HTTP %d %s", response.Code, response.Body.String())
+	}
+	awaitManagerEmpty(t, server.manager)
+	revisedRun, err := server.app.Runtime.GetRun(context.Background(), domain.RunID(reviseID))
+	if err != nil || revisedRun.State != domain.RunNeedsReview || revisedRun.CurrentStage != "checkpoint" {
+		t.Fatalf("revised Fake run did not repeat downstream review: %+v %v", revisedRun, err)
+	}
+	attemptReader, ok := server.app.Runtime.(interface {
+		CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
+	})
+	if !ok {
+		t.Fatal("runtime does not expose current stage attempts")
+	}
+	prepareAttempt, err := attemptReader.CurrentStageAttempt(context.Background(), domain.RunID(reviseID), "prepare")
+	if err != nil || prepareAttempt.Ordinal != 2 {
+		t.Fatalf("REVISE did not restart its selected producer: %+v %v", prepareAttempt, err)
+	}
 	// A budget-patched RETRY applies only when the explicit Web resume reaches
 	// the shared LocalRunService/SQLite application path.
 	retryCreate := doRequest(http.MethodPost, "/api/runs/create", strings.Replace(body, "http-create-replay-review", "retry-budget-review", 1))

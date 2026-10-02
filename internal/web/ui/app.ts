@@ -971,10 +971,24 @@ function renderReviewForm(id, d) {
   const panel = document.querySelector("#panel-" + state.tab);
   if (document.querySelector("#review-form")) return;
   const rv = d.review || {};
+  const currentStage = String(d.run?.current_stage || "");
+  const targets =
+    currentStage === "judge"
+      ? [["statement", "题面与样例"], ["data", "数据生成器与校验器"]]
+      : currentStage === "solution_decision"
+        ? [["solution", "题解"], ["statement", "题面与样例"]]
+        : currentStage === "quality"
+          ? [["solution", "题解"]]
+          : [[currentStage, `当前阶段（${currentStage}）`]];
+  const defaultTarget = targets.some(([stage]) => stage === currentStage)
+    ? currentStage
+    : targets[0]?.[0] || currentStage;
   state.editing = true;
   panel.insertAdjacentHTML(
     "afterbegin",
-    `<form id="review-form" class="inline-form"><h2>人工评审</h2><p>${esc(rv.reason || rv.trigger_reason || "请查看阶段与相关证据，再提交重试或拒绝。")}</p><label>评审人<input name="reviewer" required></label><details><summary>补充说明（选填）</summary><label>说明<textarea name="reason" maxlength="4000"></textarea></label></details><label>决定<select name="kind"><option value="RETRY">重试</option><option value="REJECT">拒绝</option></select></label><details><summary>预算增加（按需填写）</summary><div class="fields">${budgetFields
+    `<form id="review-form" class="inline-form"><h2>人工评审</h2><p>${esc(rv.reason || rv.trigger_reason || "请先查看失败阶段与相关制品，再选择修订目标或其他决定。")}</p><label>评审人<input name="reviewer" required></label><details><summary>补充说明（建议写明报告和失败原因）</summary><label>说明<textarea name="reason" maxlength="4000"></textarea></label></details><label>决定<select name="kind"><option value="REVISE">修复并重做上游阶段</option><option value="RETRY">增加预算后重试当前阶段</option><option value="REJECT">拒绝继续</option></select></label><label>修订目标阶段<select name="revision_target_stage">${targets
+      .map(([stage, label]) => `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(label)}</option>`)
+      .join("")}</select></label><details><summary>预算增加（仅用于重试）</summary><div class="fields">${budgetFields
       .filter((x) => x[3] !== "hidden")
       .map(
         ([t, n]) =>
@@ -982,7 +996,7 @@ function renderReviewForm(id, d) {
       )
       .join(
         "",
-      )}</div></details><button data-write type="submit">提交决定</button><button type="button" data-dismiss>返回</button><p role="alert"></p><p>决定保存为待执行状态；提交后需显式继续执行。</p></form>`,
+      )}</div></details><button data-write type="submit">提交决定</button><button type="button" data-dismiss>返回</button><p role="alert"></p><p>修订会从所选阶段重做并重新运行其后的全部验证；保存后仍需显式继续执行。</p></form>`,
   );
   const f = document.querySelector("#review-form");
   f.querySelector("[data-dismiss]").onclick = () => {
@@ -1000,8 +1014,8 @@ function renderReviewForm(id, d) {
       f.querySelector("[role=alert]").textContent = err.message;
       return;
     }
-    if (kind === "REJECT" && Object.keys(patch).length) {
-      f.querySelector("[role=alert]").textContent = "拒绝决定不能包含预算增加";
+    if (kind !== "RETRY" && Object.keys(patch).length) {
+      f.querySelector("[role=alert]").textContent = "修订或拒绝决定不能包含预算增加";
       return;
     }
     if (kind === "RETRY" && !Object.keys(patch).length) {
@@ -1018,10 +1032,17 @@ function renderReviewForm(id, d) {
           workflow_revision:
             d.run?.workflow_revision || d.run?.workflow_version || "",
           kind,
+          ...(kind === "REVISE"
+            ? { revision_target_stage: fd.get("revision_target_stage") }
+            : {}),
           reviewer: fd.get("reviewer"),
           reason:
             String(fd.get("reason") || "").trim() ||
-            (kind === "REJECT" ? "用户拒绝继续执行" : "用户增加预算并请求重试"),
+            (kind === "REJECT"
+              ? "用户拒绝继续执行"
+              : kind === "REVISE"
+                ? `根据失败证据修复并重做 ${fd.get("revision_target_stage")}`
+                : "用户增加预算并请求重试"),
           budget_increase: patch,
         },
       });

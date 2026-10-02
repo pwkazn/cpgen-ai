@@ -22,7 +22,7 @@ llm:
   max_output_tokens: 8192
   max_response_bytes: 1048576
   max_format_repairs: 0
-  data_prompt_version: v3
+  data_prompt_version: v5
 similarity:
   endpoint: https://similarity.example.com/search
   api_key_env: CPGEN_SIMILARITY_API_KEY

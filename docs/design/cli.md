@@ -56,13 +56,13 @@ run cancel 插入一个幂等的取消请求。当执行器活跃时，它会观
 
 ~~~text
 cpgen review show <run-id>
-cpgen review revise <run-id> --reviewer NAME --step STEP --patch FILE --reason TEXT
+cpgen review revise <run-id> --reviewer NAME --step TARGET_STAGE [--patch FILE] --reason TEXT
 cpgen review retry <run-id> --reviewer NAME [--budget-patch FILE] [--evidence DIGEST] --reason TEXT
 cpgen review waive <run-id> --reviewer NAME --gate DIGEST --evidence DIGEST --reason TEXT
 cpgen review reject <run-id> --reviewer NAME --reason TEXT
 ~~~
 
-会改变状态的复核命令仅对 NEEDS_REVIEW 有效，它创建一个不可变的 PENDING ReviewDecision，绑定到期望的 run 版本、工作流 revision、当前阶段输入、证据与策略。它不会直接继续 run。用户随后执行 run resume。
+会改变状态的复核命令仅对 NEEDS_REVIEW 有效，它创建一个不可变的 PENDING ReviewDecision，绑定到期望的 run 版本、工作流 revision、当前阶段输入、证据与策略。`revise --step` 选择当前失败阶段或更早的生产阶段；Resume 从该生产阶段开始，精确失效其后的全部阶段，并使用该阶段原输入和冻结配置。`--patch` 可选；未提供时，目标与理由会组成修订意图摘要。它不会直接继续 run。用户随后执行 run resume。
 
 retry 至少需要 `--budget-patch` 或 `--evidence` 之一。waive 仍受阶段可豁免策略限制，不能越过不可豁免的查重或质量门禁。show 呈现当前复核状态与决定。
 

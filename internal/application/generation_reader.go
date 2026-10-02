@@ -194,6 +194,11 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 	if attempt.Validate() != nil || committed.StageVersion <= 0 || attempt.RunID != runID || attempt.StageName != stage || attempt.State != domain.StageAttemptSucceeded || attempt.InputDigest != inputDigest || attempt.OutputDigest == nil || len(committed.Artifacts) == 0 || len(committed.Artifacts) > 2 {
 		return nil, "", errors.New("committed draft stage differs from the expected typed input")
 	}
+	feedbackReader, _ := r.store.(port.DraftRetryFeedbackReader)
+	variables, err = addDraftRetryFeedback(ctx, r.options.WorkflowRevision, feedbackReader, runID, stage, attempt.Ordinal, attempt.StartedAt, variables)
+	if err != nil {
+		return nil, "", err
+	}
 	var selected port.CommittedLLMStageArtifact
 	var source domain.CallRecord
 	seen := map[domain.CallRecordID]bool{}
@@ -226,7 +231,7 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 	if len(candidates) > 64 {
 		return nil, "", errors.New("committed draft call history exceeds bound")
 	}
-	prompt, schema, err := buildLLMDraftPrompt(string(stage), r.options.WorkflowRevision, r.options.DataPromptVersion)
+	prompt, schema, err := buildLLMDraftPromptForVariables(string(stage), r.options.WorkflowRevision, r.options.DataPromptVersion, variables)
 	if err != nil {
 		return nil, "", err
 	}

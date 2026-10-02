@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cpgen/internal/domain"
+	"cpgen/internal/workflow"
 )
 
 func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewRequest) (domain.ReviewDecision, error) {
@@ -63,6 +64,9 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 				return err
 			}
 		}
+		if request.Kind == domain.ReviewRevise && !workflow.AllowsManualRevisionTarget(run.WorkflowRevision, request.StageName, *request.RevisionTargetStage) {
+			return wrap(ErrInvalidTransition, "REVISE target is not an allowed upstream producer", nil)
+		}
 		waivable := request.Kind == domain.ReviewWaive
 		if waivable && stageWaivable != 1 {
 			return wrap(ErrInvalidTransition, "persisted review gate is not waivable", nil)
@@ -73,7 +77,7 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 			ExpectedRunVersion: request.ExpectedRunVersion, RunVersion: newVersion,
 			WorkflowRevision: request.WorkflowRevision, StageName: request.StageName,
 			StageInputDigest: request.StageInputDigest, EvidenceDigest: request.EvidenceDigest, PolicyDigest: request.PolicyDigest,
-			RequestedEditsDigest: request.RequestedEditsDigest, WaiverScopeDigest: request.WaiverScopeDigest,
+			RequestedEditsDigest: request.RequestedEditsDigest, RevisionTargetStage: request.RevisionTargetStage, WaiverScopeDigest: request.WaiverScopeDigest,
 			ExternalConditionDigest: request.ExternalConditionDigest, BudgetIncrease: request.BudgetIncrease,
 			WaivableGate: waivable, Reviewer: request.Reviewer, Reason: request.Reason,
 			CreatedAt: request.At,
@@ -85,9 +89,12 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 		if err != nil {
 			return err
 		}
-		var edits, waiver, condition, budgetJSON any
+		var edits, revisionTarget, waiver, condition, budgetJSON any
 		if request.RequestedEditsDigest != nil {
 			edits = string(*request.RequestedEditsDigest)
+		}
+		if request.RevisionTargetStage != nil {
+			revisionTarget = string(*request.RevisionTargetStage)
 		}
 		if request.WaiverScopeDigest != nil {
 			waiver = string(*request.WaiverScopeDigest)
@@ -109,14 +116,14 @@ func (s *Store) CreateReview(ctx context.Context, request domain.CreateReviewReq
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO review_decisions(
 				review_id, run_id, kind, state, expected_run_version, run_version, workflow_revision,
-				stage_name, stage_input_digest, evidence_digest, policy_digest,
+				stage_name, stage_input_digest, evidence_digest, policy_digest, revision_target_stage,
 				requested_edits_digest, waiver_scope_digest, external_condition_digest,
 				budget_increase_json, waivable_gate, reviewer, reason,
 				idempotency_key, command_digest, created_at
-			) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			string(request.ID), string(request.RunID), string(request.Kind), request.ExpectedRunVersion, newVersion,
 			request.WorkflowRevision, string(request.StageName), string(request.StageInputDigest),
-			string(request.EvidenceDigest), string(request.PolicyDigest), edits, waiver, condition,
+			string(request.EvidenceDigest), string(request.PolicyDigest), revisionTarget, edits, waiver, condition,
 			budgetJSON, waivableValue, request.Reviewer, request.Reason,
 			request.IdempotencyKey, string(commandDigest), formatTime(request.At),
 		); err != nil {
@@ -222,6 +229,14 @@ func (s *Store) ApplyReview(ctx context.Context, command domain.ApplyReviewComma
 		}
 		restartStage, restartOrdinal := run.CurrentStage, run.CurrentStageOrdinal
 		if decision.Kind == domain.ReviewRevise {
+			target := command.InvalidatedStages[0]
+			if decision.RevisionTargetStage != nil {
+				if target != *decision.RevisionTargetStage {
+					return wrap(ErrConsistency, "REVISE suffix does not start at its approved producer", nil)
+				}
+			} else if target != command.StageName {
+				return wrap(ErrConsistency, "legacy REVISE must restart its reviewed stage", nil)
+			}
 			rows, err := tx.QueryContext(ctx, `
 				SELECT stage_name, ordinal FROM stage_records WHERE run_id = ? ORDER BY ordinal`, string(command.RunID))
 			if err != nil {
@@ -367,7 +382,7 @@ func reviewByIDTx(ctx context.Context, queryer rowQuerier, runID domain.RunID, i
 
 const reviewSelect = `
 	SELECT review_id, run_id, kind, state, expected_run_version, run_version, workflow_revision,
-		stage_name, stage_input_digest, evidence_digest, policy_digest,
+		stage_name, stage_input_digest, evidence_digest, policy_digest, revision_target_stage,
 		requested_edits_digest, waiver_scope_digest, external_condition_digest,
 		budget_increase_json, waivable_gate, reviewer, reason, created_at, applied_at
 	FROM review_decisions`
@@ -375,12 +390,12 @@ const reviewSelect = `
 func scanReview(row *sql.Row) (*domain.ReviewDecision, error) {
 	var result domain.ReviewDecision
 	var id, runID, kind, state, stage, input, evidence, policy, created string
-	var edits, waiver, condition, applied sql.NullString
+	var revisionTarget, edits, waiver, condition, applied sql.NullString
 	var budgetJSON []byte
 	var waivable int
 	err := row.Scan(
 		&id, &runID, &kind, &state, &result.ExpectedRunVersion, &result.RunVersion, &result.WorkflowRevision,
-		&stage, &input, &evidence, &policy, &edits, &waiver, &condition,
+		&stage, &input, &evidence, &policy, &revisionTarget, &edits, &waiver, &condition,
 		&budgetJSON, &waivable, &result.Reviewer, &result.Reason, &created, &applied,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -392,6 +407,10 @@ func scanReview(row *sql.Row) (*domain.ReviewDecision, error) {
 	result.ID, result.RunID = domain.ReviewDecisionID(id), domain.RunID(runID)
 	result.Kind, result.State, result.StageName = domain.ReviewDecisionKind(kind), domain.ReviewDecisionState(state), domain.StageName(stage)
 	result.StageInputDigest, result.EvidenceDigest, result.PolicyDigest = domain.Digest(input), domain.Digest(evidence), domain.Digest(policy)
+	if revisionTarget.Valid {
+		target := domain.StageName(revisionTarget.String)
+		result.RevisionTargetStage = &target
+	}
 	if edits.Valid {
 		value := domain.Digest(edits.String)
 		result.RequestedEditsDigest = &value

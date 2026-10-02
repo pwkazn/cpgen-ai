@@ -38,9 +38,11 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 		{"legacy-v2", workflow.RetryingGenerationRevision, "", "v1"},
 		{"existing-v3", workflow.ExecutedSamplesRevision, "", "v2"},
 		{"explicit-v3", workflow.ExecutedSamplesRevision, "v3", "v3"},
+		{"explicit-v5", workflow.ExecutedSamplesRevision, "v5", "v5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := strings.Replace(string(raw), workflow.ExecutedSamplesRevision, tc.revision, 1)
+			input = strings.Replace(input, "  data_prompt_version: v5\n", "", 1)
 			input = strings.Replace(input, "  data_prompt_version: v3\n", "", 1)
 			cfg, err := config.Decode([]byte(input))
 			if err != nil {
@@ -87,6 +89,13 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 				for _, required := range []string{`argc=4`, `argv[1]="--seed=42"`, `argv[2]="--case=1"`, `argv[3]="--kind=small"`, `remove_prefix(7)`, `std::uint64_t`, `std::from_chars`, `18446744073709551615`} {
 					if !strings.Contains(definition.Template, required) {
 						t.Fatalf("V3 lacks argument clarification %q", required)
+					}
+				}
+			}
+			if tc.selected == "v5" {
+				for _, required := range []string{"943718 bytes", "90%", "decimal digit widths", "Never rely on truncation"} {
+					if !strings.Contains(definition.Template, required) {
+						t.Fatalf("V5 lacks stdout headroom rule %q", required)
 					}
 				}
 			}

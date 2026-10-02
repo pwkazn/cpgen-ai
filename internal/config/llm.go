@@ -109,8 +109,8 @@ func (c LLMConfig) Validate() error {
 	if c.MaxFormatRepairs < 0 || c.MaxFormatRepairs > 1 {
 		return field("llm.max_format_repairs", errors.New("must be zero or one"))
 	}
-	if c.DataPromptVersion != "" && c.DataPromptVersion != "v3" {
-		return field("llm.data_prompt_version", errors.New("must be empty or v3"))
+	if c.DataPromptVersion != "" && c.DataPromptVersion != "v3" && c.DataPromptVersion != "v5" {
+		return field("llm.data_prompt_version", errors.New("must be empty, v3, or v5"))
 	}
 	return nil
 }

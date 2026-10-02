@@ -11,6 +11,7 @@ import (
 
 // StageAdmission validates the active run, frozen policy, budget and current attempt.
 type StageAdmissionStore interface {
+	BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
 	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)
 	ReadGenerationSnapshot(context.Context, domain.RunID) (domain.GenerationRequestSnapshotV1, error)
 	CurrentStageAttempt(context.Context, domain.RunID, domain.StageName) (domain.StageAttempt, error)
@@ -44,8 +45,12 @@ func (s *StageAdmission) admit(ctx context.Context, view domain.RunView, stage d
 	if err != nil {
 		return empty, err
 	}
-	if snapshot.Request.BudgetLimits != view.Budget().Limits {
-		return empty, errors.New("generation view budget differs from the admitted request")
+	budget, err := s.store.BudgetSnapshot(ctx, view.RunID())
+	if err != nil {
+		return empty, err
+	}
+	if budget.Limits != view.Budget().Limits || !budgetLimitsAtLeast(budget.Limits, snapshot.Request.BudgetLimits) {
+		return empty, errors.New("generation view budget differs from the persisted approved budget")
 	}
 	attempt, err := s.store.CurrentStageAttempt(ctx, view.RunID(), stage)
 	if err != nil {
@@ -55,6 +60,23 @@ func (s *StageAdmission) admit(ctx context.Context, view domain.RunView, stage d
 		return empty, errors.New("generation input or attempt differs from the current stage")
 	}
 	return attempt, nil
+}
+
+// Reviews may increase individual run limits, while the originally submitted
+// request remains immutable. The runtime snapshot is authoritative for the
+// currently approved limits; they may only stay equal to or exceed the request.
+func budgetLimitsAtLeast(effective, submitted domain.BudgetLimits) bool {
+	return effective.MaxLLMCalls >= submitted.MaxLLMCalls &&
+		effective.MaxSimilarityCalls >= submitted.MaxSimilarityCalls &&
+		effective.MaxLLMInputTokens >= submitted.MaxLLMInputTokens &&
+		effective.MaxLLMOutputTokens >= submitted.MaxLLMOutputTokens &&
+		effective.MaxLLMCostMicroUSD >= submitted.MaxLLMCostMicroUSD &&
+		effective.MaxSimilarityCostMicroUSD >= submitted.MaxSimilarityCostMicroUSD &&
+		effective.MaxSandboxCreates >= submitted.MaxSandboxCreates &&
+		effective.MaxArtifactBytes >= submitted.MaxArtifactBytes &&
+		effective.MaxPackageBytes >= submitted.MaxPackageBytes &&
+		effective.MaxMutationsPerStage >= submitted.MaxMutationsPerStage &&
+		effective.MaxActiveTimeMilliseconds >= submitted.MaxActiveTimeMilliseconds
 }
 
 func (s *StageAdmission) reconciliationAttempt(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, *domain.StageAttempt, error) {

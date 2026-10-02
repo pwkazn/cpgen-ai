@@ -37,6 +37,57 @@ func TestSlice2RunServiceGeneratesCommittedChainToUnfinishedCheckpoint(t *testin
 	}
 }
 
+func TestSlice2RunServiceResumesAfterReviewApprovedSimilarityBudgetIncrease(t *testing.T) {
+	ctx := context.Background()
+	f := newSimilarityExecutorFixture(t, 0)
+	service := slice2FixtureService(t, f)
+	seed := f.snapshot.EffectiveSeed
+	request := domain.RunRequest(f.snapshot.Request)
+	request.Seed = &seed
+	paused, err := service.Generate(ctx, request)
+	if err != nil || paused.State != domain.RunNeedsReview || paused.CurrentStage != "similarity" || f.sends.Load() != 0 {
+		t.Fatalf("expected the zero-call budget to pause for review: run=%+v err=%v sends=%d", paused, err, f.sends.Load())
+	}
+	input, evidence, policy, err := f.store.WorkbenchReviewBinding(ctx, paused.RunID, paused.CurrentStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{
+		ID: domain.ReviewDecisionID(coordinatorID("review", "approved-similarity-budget")), RunID: paused.RunID,
+		ExpectedRunVersion: paused.Version, WorkflowRevision: paused.WorkflowRevision, StageName: paused.CurrentStage,
+		StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, Kind: domain.ReviewRetry,
+		BudgetIncrease: domain.BudgetLimits{MaxSimilarityCalls: 1, MaxSimilarityCostMicroUSD: 100}, Reviewer: "fixture", Reason: "approve one bounded retry",
+		IdempotencyKey: coordinatorID("control", "approved-similarity-budget"), At: f.clock.Now(),
+	})
+	if err != nil || decision.State != domain.ReviewPending {
+		t.Fatalf("create retry review: %+v %v", decision, err)
+	}
+
+	// Resume applies the pending approval, then retries the same compiled stage
+	// against the persisted effective budget while the submitted request stays
+	// immutable.
+	resumed, err := service.Resume(ctx, paused.RunID)
+	if err != nil || resumed.State != domain.RunNeedsReview || resumed.CurrentStage != "slice2_checkpoint" {
+		budget, _ := f.store.BudgetSnapshot(ctx, paused.RunID)
+		attempt, _ := f.store.CurrentStageAttempt(ctx, paused.RunID, "similarity")
+		t.Fatalf("approved retry did not complete similarity and reach the checkpoint: run=%+v err=%v sends=%d budget=%+v attempt=%+v", resumed, err, f.sends.Load(), budget, attempt)
+	}
+	if f.sends.Load() != 1 {
+		t.Fatalf("similarity sends=%d, want exactly one approved dispatch", f.sends.Load())
+	}
+	budget, err := f.store.BudgetSnapshot(ctx, paused.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.Limits.MaxSimilarityCalls != 1 || budget.Remaining[domain.BudgetSimilarityCalls] != 0 || budget.Limits.MaxSimilarityCostMicroUSD != 100 || budget.Remaining[domain.BudgetSimilarityCostMicroUSD] != 89 {
+		t.Fatalf("approved retry budget was not used exactly once: %+v", budget)
+	}
+	attempt, err := f.store.CurrentStageAttempt(ctx, paused.RunID, "similarity")
+	if err != nil || attempt.Ordinal != 2 || attempt.State != domain.StageAttemptSucceeded {
+		t.Fatalf("approved similarity retry attempt=%+v err=%v", attempt, err)
+	}
+}
+
 func TestSlice2RunServiceResumesSameAttemptAcrossPrivateReceiptInterruption(t *testing.T) {
 	for _, boundary := range []string{"before_call", "sealed", "completed"} {
 		t.Run(boundary, func(t *testing.T) {

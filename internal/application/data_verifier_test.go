@@ -1,6 +1,7 @@
 package application_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,7 +34,7 @@ func dataVerifierContent(t *testing.T) (domain.DataDraftInputV1, domain.DataCont
 }
 
 func TestDataVerifierRequiresReproductionAndValidatorEvidence(t *testing.T) {
-	for _, mode := range []string{"pass", "compile_error", "invalid_sample", "invalid_generated", "nondeterministic", "generator_tle", "shared_execution"} {
+	for _, mode := range []string{"pass", "compile_error", "invalid_sample", "invalid_generated", "nondeterministic", "generator_tle", "generator_ole", "shared_execution"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			input, content := dataVerifierContent(t)
@@ -66,6 +67,12 @@ func TestDataVerifierRequiresReproductionAndValidatorEvidence(t *testing.T) {
 			if (result.DatasetArtifact != nil) != result.Report.Passed {
 				t.Fatal("failed data verification produced a dataset")
 			}
+			if mode == "generator_ole" {
+				generated := result.Report.Generated[0]
+				if result.Report.Reason != "generated.1.run.1.OLE" || len(generated.Runs) != 1 || generated.Runs[0].Outcome != domain.ProcessOLE || generated.Runs[0].Stdout.Blob.Size != 1<<20 || generated.Validator != nil || result.DatasetArtifact != nil {
+					t.Fatalf("one-MiB generator OLE evidence was not stopped and classified: %+v", result.Report)
+				}
+			}
 			if mode == "pass" {
 				if main.compiles != 2 || main.runs != len(input.SolutionInput.Problem.Samples)+2*len(content.Plan.Cases) || repeat.runs != len(content.Plan.Cases) {
 					t.Fatalf("missing real checks: compile=%d run=%d repeat=%d", main.compiles, main.runs, repeat.runs)
@@ -95,7 +102,11 @@ type dataSandboxFixture struct {
 
 func (s *dataSandboxFixture) Run(ctx context.Context, request port.RunRequest) (domain.MeteredOutcome[port.RunResult], error) {
 	s.runs++
-	if request.Validate() != nil || request.Limits.Time.Milliseconds() != 2000 || request.Limits.MemoryBytes != 256<<20 {
+	wantStdout := int64(4096)
+	if request.Role == port.RoleGenerator {
+		wantStdout = 1 << 20
+	}
+	if request.Validate() != nil || request.Limits.Time.Milliseconds() != 2000 || request.Limits.MemoryBytes != 256<<20 || request.Limits.StdoutBytes != wantStdout {
 		s.t.Fatal("data run lost typed arguments or resource bounds")
 	}
 	zero := 0
@@ -105,6 +116,9 @@ func (s *dataSandboxFixture) Run(ctx context.Context, request port.RunRequest) (
 			s.t.Fatal("generator lost case arguments")
 		}
 		output = []byte(fmt.Sprintf("%d %d\n", request.Args.GeneratorCase.Ordinal, *request.Seed%97))
+		if s.mode == "generator_ole" {
+			output = bytes.Repeat([]byte{'x'}, 1<<20)
+		}
 		if s.mode == "nondeterministic" && s.name == "repeat" {
 			output = append(output, ' ')
 		}
@@ -126,6 +140,9 @@ func (s *dataSandboxFixture) Run(ctx context.Context, request port.RunRequest) (
 	result := port.RunResult{CallTrace: trace, Outcome: domain.ProcessExited, ExitCode: &zero, Stdout: &stdout, Execution: &evidence}
 	if s.mode == "generator_tle" && request.Role == port.RoleGenerator {
 		result.Outcome, result.ExitCode = domain.ProcessTLE, nil
+	}
+	if s.mode == "generator_ole" && request.Role == port.RoleGenerator {
+		result.Outcome, result.ExitCode = domain.ProcessOLE, nil
 	}
 	return domain.MeteredOutcome[port.RunResult]{Value: &result, CallTrace: trace}, nil
 }

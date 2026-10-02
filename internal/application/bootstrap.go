@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 
@@ -41,16 +42,27 @@ type Application struct {
 // composes durable generation and, for the Solution revision, a pinned local
 // Docker engine with detached cleanup. Each revision keeps its own boundary.
 func Bootstrap(ctx context.Context, cfg config.Config) (*Application, error) {
-	return bootstrap(ctx, cfg, true)
+	return bootstrap(ctx, cfg, true, nil)
+}
+
+// BootstrapWithSimilarityHTTPClient composes a live workflow with a trusted
+// caller-supplied similarity transport. It is used by local development
+// fixtures; ordinary CLI and web bootstraps retain the policy-controlled
+// provider transport.
+func BootstrapWithSimilarityHTTPClient(ctx context.Context, cfg config.Config, client *http.Client) (*Application, error) {
+	if client == nil {
+		return nil, errors.New("similarity HTTP client is required")
+	}
+	return bootstrap(ctx, cfg, true, client)
 }
 
 // BootstrapLocal opens local persistence and verified package readers without
 // constructing stage executors, provider clients, or the Docker runtime.
 func BootstrapLocal(ctx context.Context, cfg config.Config) (*Application, error) {
-	return bootstrap(ctx, cfg, false)
+	return bootstrap(ctx, cfg, false, nil)
 }
 
-func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Application, error) {
+func bootstrap(ctx context.Context, cfg config.Config, execution bool, similarityHTTPClient *http.Client) (*Application, error) {
 	if ctx == nil {
 		return nil, errors.New("bootstrap context is nil")
 	}
@@ -126,7 +138,7 @@ func bootstrap(ctx context.Context, cfg config.Config, execution bool) (*Applica
 	reconciler := &localSandboxReconciler{runtime: store}
 	var runs *LocalRunService
 	if cfg.Workflow != nil {
-		runs, app.closeExecution, err = bootstrapGenerationRunService(ctx, cfg, store, blobs, locks, reconciler, effectiveJSON)
+		runs, app.closeExecution, err = bootstrapGenerationRunService(ctx, cfg, store, blobs, locks, reconciler, effectiveJSON, similarityHTTPClient)
 	} else {
 		pipeline, pipelineErr := fake.NewPipeline(
 			fake.NewPrepareStep(fake.PrepareCapabilities{}),

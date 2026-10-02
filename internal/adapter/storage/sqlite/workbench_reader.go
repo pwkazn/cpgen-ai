@@ -263,10 +263,10 @@ func readWorkbenchAttempts(ctx context.Context, q *sql.Tx, runID domain.RunID, s
 func readPendingWorkbenchReview(ctx context.Context, q rowQuerier, runID domain.RunID) (*domain.ReviewDecision, error) {
 	var v domain.ReviewDecision
 	var kind, state, stage, input, evidence, policy string
-	var edits, waiver, external, budget, applied sql.NullString
+	var revisionTarget, edits, waiver, external, budget, applied sql.NullString
 	var gate bool
 	var created string
-	err := q.QueryRowContext(ctx, `SELECT review_id,kind,state,expected_run_version,run_version,workflow_revision,stage_name,stage_input_digest,evidence_digest,policy_digest,requested_edits_digest,waiver_scope_digest,external_condition_digest,budget_increase_json,waivable_gate,reviewer,reason,created_at,applied_at FROM review_decisions WHERE run_id=? AND state='PENDING'`, string(runID)).Scan(&v.ID, &kind, &state, &v.ExpectedRunVersion, &v.RunVersion, &v.WorkflowRevision, &stage, &input, &evidence, &policy, &edits, &waiver, &external, &budget, &gate, &v.Reviewer, &v.Reason, &created, &applied)
+	err := q.QueryRowContext(ctx, `SELECT review_id,kind,state,expected_run_version,run_version,workflow_revision,stage_name,stage_input_digest,evidence_digest,policy_digest,revision_target_stage,requested_edits_digest,waiver_scope_digest,external_condition_digest,budget_increase_json,waivable_gate,reviewer,reason,created_at,applied_at FROM review_decisions WHERE run_id=? AND state='PENDING'`, string(runID)).Scan(&v.ID, &kind, &state, &v.ExpectedRunVersion, &v.RunVersion, &v.WorkflowRevision, &stage, &input, &evidence, &policy, &revisionTarget, &edits, &waiver, &external, &budget, &gate, &v.Reviewer, &v.Reason, &created, &applied)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -274,6 +274,10 @@ func readPendingWorkbenchReview(ctx context.Context, q rowQuerier, runID domain.
 		return nil, err
 	}
 	v.RunID, v.Kind, v.State, v.StageName, v.StageInputDigest, v.EvidenceDigest, v.PolicyDigest = runID, domain.ReviewDecisionKind(kind), domain.ReviewDecisionState(state), domain.StageName(stage), domain.Digest(input), domain.Digest(evidence), domain.Digest(policy)
+	if revisionTarget.Valid {
+		target := domain.StageName(revisionTarget.String)
+		v.RevisionTargetStage = &target
+	}
 	for src, dst := range map[*sql.NullString]**domain.Digest{&edits: &v.RequestedEditsDigest, &waiver: &v.WaiverScopeDigest, &external: &v.ExternalConditionDigest} {
 		if src.Valid {
 			d := domain.Digest(src.String)

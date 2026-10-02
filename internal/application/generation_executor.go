@@ -22,6 +22,7 @@ type GenerationExecutionStore interface {
 	durable.LLMCacheLedger
 	port.RuntimeStore
 	port.GenerationStore
+	BudgetSnapshot(context.Context, domain.RunID) (domain.BudgetSnapshot, error)
 }
 
 type GenerationExecutorConfig struct {
@@ -258,6 +259,11 @@ func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
 
 func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
 	var result generatedDraft
+	feedbackReader, _ := s.config.Store.(port.DraftRetryFeedbackReader)
+	variables, err := addDraftRetryFeedback(ctx, s.config.Content.WorkflowRevision, feedbackReader, view.RunID(), attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
+	if err != nil {
+		return result, err
+	}
 	ledger, err := durable.NewRunLedger(s.config.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err

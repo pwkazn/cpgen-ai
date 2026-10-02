@@ -677,6 +677,7 @@ type ReviewDecision struct {
 	EvidenceDigest          Digest              `json:"evidence_digest"`
 	PolicyDigest            Digest              `json:"policy_digest"`
 	RequestedEditsDigest    *Digest             `json:"requested_edits_digest,omitempty"`
+	RevisionTargetStage     *StageName          `json:"revision_target_stage,omitempty"`
 	WaiverScopeDigest       *Digest             `json:"waiver_scope_digest,omitempty"`
 	ExternalConditionDigest *Digest             `json:"external_condition_digest,omitempty"`
 	BudgetIncrease          BudgetLimits        `json:"budget_increase"`
@@ -713,6 +714,14 @@ func (v ReviewDecision) Validate() error {
 			return err
 		}
 	}
+	if v.RevisionTargetStage != nil {
+		if v.Kind != ReviewRevise {
+			return errors.New("only REVISE may carry a revision target stage")
+		}
+		if err := v.RevisionTargetStage.Validate(); err != nil {
+			return err
+		}
+	}
 	if v.WaiverScopeDigest != nil {
 		if err := v.WaiverScopeDigest.Validate(); err != nil {
 			return err
@@ -723,7 +732,7 @@ func (v ReviewDecision) Validate() error {
 			return err
 		}
 	}
-	if strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Reason) == "" {
+	if strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Reason) == "" || len(v.Reason) > 4096 {
 		return errors.New("reviewer and reason are required")
 	}
 	if err := validateReviewDecisionPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease, v.WaivableGate); err != nil {
@@ -1164,6 +1173,7 @@ type CreateReviewRequest struct {
 	EvidenceDigest          Digest             `json:"evidence_digest"`
 	PolicyDigest            Digest             `json:"policy_digest"`
 	RequestedEditsDigest    *Digest            `json:"requested_edits_digest,omitempty"`
+	RevisionTargetStage     *StageName         `json:"revision_target_stage,omitempty"`
 	WaiverScopeDigest       *Digest            `json:"waiver_scope_digest,omitempty"`
 	ExternalConditionDigest *Digest            `json:"external_condition_digest,omitempty"`
 	BudgetIncrease          BudgetLimits       `json:"budget_increase"`
@@ -1180,7 +1190,7 @@ func (v CreateReviewRequest) Validate() error {
 	if err := v.ID.Validate(); err != nil {
 		return err
 	}
-	if !v.Kind.Valid() || strings.TrimSpace(v.WorkflowRevision) == "" || strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Reason) == "" {
+	if !v.Kind.Valid() || strings.TrimSpace(v.WorkflowRevision) == "" || strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Reason) == "" || len(v.Reason) > 4096 {
 		return errors.New("review kind, revision, reviewer, or reason is invalid")
 	}
 	if err := v.StageName.Validate(); err != nil {
@@ -1198,11 +1208,62 @@ func (v CreateReviewRequest) Validate() error {
 			}
 		}
 	}
+	if v.Kind == ReviewRevise {
+		if v.RevisionTargetStage == nil {
+			return errors.New("REVISE requires a target producer stage")
+		}
+		if err := v.RevisionTargetStage.Validate(); err != nil {
+			return err
+		}
+	} else if v.RevisionTargetStage != nil {
+		return errors.New("only REVISE may carry a revision target stage")
+	}
 	if err := validateReviewRequestPayload(v.Kind, v.RequestedEditsDigest, v.WaiverScopeDigest, v.ExternalConditionDigest, v.BudgetIncrease); err != nil {
 		return err
 	}
 	if v.Kind == ReviewRetry && v.BudgetIncrease.MaxMutationsPerStage != 0 {
 		return errors.New("RETRY cannot increase max mutations per stage because mutation evidence is bound to the submitted request")
+	}
+	return nil
+}
+
+// ReviewRevisionIntentDigest binds a producer rewind to the selected target
+// and review reason without changing the immutable run request.
+func ReviewRevisionIntentDigest(target StageName, reason string) (Digest, error) {
+	if err := target.Validate(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(reason) == "" {
+		return "", errors.New("revision reason is required")
+	}
+	raw, err := json.Marshal(struct {
+		Schema string    `json:"schema_version"`
+		Target StageName `json:"target_stage"`
+		Reason string    `json:"reason"`
+	}{"cpgen.review-revision-intent/v1", target, reason})
+	if err != nil {
+		return "", err
+	}
+	return SumBytes(raw), nil
+}
+
+// DraftRetryFeedback is an immutable diagnostic passed to a regenerated
+// producer. It never replaces the run request or the producer's source input.
+type DraftRetryFeedback struct {
+	SourceStage StageName `json:"source_stage"`
+	TargetStage StageName `json:"target_stage"`
+	Reason      string    `json:"reason"`
+}
+
+func (v DraftRetryFeedback) Validate() error {
+	if err := v.SourceStage.Validate(); err != nil {
+		return err
+	}
+	if err := v.TargetStage.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(v.Reason) == "" || len(v.Reason) > 4096 {
+		return errors.New("draft retry feedback reason is invalid")
 	}
 	return nil
 }

@@ -87,7 +87,7 @@ func TestBudgetAccountsBackfillAndActiveTimeAuthority(t *testing.T) {
 		if similarityCostLimit != 0 {
 			t.Fatalf("historical similarity cost limit = %d, want zero/no allowance", similarityCostLimit)
 		}
-		assertMigrationHistory(t, store, 30)
+		assertMigrationHistory(t, store, 31)
 	})
 
 	t.Run("heartbeat replay and recovery keep account equal to projection", func(t *testing.T) {

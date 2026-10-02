@@ -12,7 +12,7 @@ import (
 )
 
 func (s *DraftExecution) draftCall(runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte) (domain.OpenCallRequest, port.GenerateRequest, error) {
-	prompt, schema, err := buildLLMDraftPrompt(string(attempt.StageName), s.config.Content.WorkflowRevision, s.config.Content.DataPromptVersion)
+	prompt, schema, err := buildLLMDraftPromptForVariables(string(attempt.StageName), s.config.Content.WorkflowRevision, s.config.Content.DataPromptVersion, variables)
 	if err != nil {
 		return domain.OpenCallRequest{}, port.GenerateRequest{}, err
 	}
@@ -83,6 +83,11 @@ func (s *GenerationExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 
 func (s *DraftExecution) reconcileDraftRequest(ctx context.Context, current domain.RunSnapshot, attempt domain.StageAttempt, variables []byte) error {
 	runID := current.RunID
+	feedbackReader, _ := s.config.Store.(port.DraftRetryFeedbackReader)
+	variables, err := addDraftRetryFeedback(ctx, s.config.Content.WorkflowRevision, feedbackReader, runID, attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
+	if err != nil {
+		return err
+	}
 	open, request, err := s.draftCall(runID, current.Version, attempt, variables)
 	if err != nil {
 		return err

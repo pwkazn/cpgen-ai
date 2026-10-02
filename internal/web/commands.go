@@ -134,6 +134,7 @@ func (s *Server) review(c *gin.Context) {
 		ExpectedVersion  int64                     `json:"expected_run_version,string"`
 		WorkflowRevision string                    `json:"workflow_revision"`
 		Kind             domain.ReviewDecisionKind `json:"kind"`
+		RevisionTarget   domain.StageName          `json:"revision_target_stage,omitempty"`
 		Reviewer         string                    `json:"reviewer"`
 		Reason           string                    `json:"reason"`
 		BudgetIncrease   *budgetDTO                `json:"budget_increase,omitempty"`
@@ -142,8 +143,12 @@ func (s *Server) review(c *gin.Context) {
 		writeErr(c, 400, "invalid_request", "评审需要任务版本、工作流版本、评审人和理由")
 		return
 	}
-	if body.Kind != domain.ReviewRetry && body.Kind != domain.ReviewReject {
-		writeErr(c, 422, "invalid_review_kind", "仅支持重试或拒绝")
+	if body.Kind != domain.ReviewRetry && body.Kind != domain.ReviewReject && body.Kind != domain.ReviewRevise {
+		writeErr(c, 422, "invalid_review_kind", "评审决定类型无效")
+		return
+	}
+	if (body.Kind == domain.ReviewRevise && body.RevisionTarget == "") || (body.Kind != domain.ReviewRevise && body.RevisionTarget != "") {
+		writeErr(c, 422, "invalid_revision_target", "修订必须指定目标阶段，其他决定不能包含修订目标")
 		return
 	}
 	var increase domain.BudgetLimits
@@ -155,8 +160,8 @@ func (s *Server) review(c *gin.Context) {
 			return
 		}
 	}
-	if body.Kind == domain.ReviewReject && increase != (domain.BudgetLimits{}) {
-		writeErr(c, 422, "invalid_review_payload", "拒绝决定不能增加预算")
+	if body.Kind != domain.ReviewRetry && increase != (domain.BudgetLimits{}) {
+		writeErr(c, 422, "invalid_review_payload", "修订或拒绝决定不能增加预算")
 		return
 	}
 	id := domain.RunID(c.Param("id"))
@@ -171,7 +176,7 @@ func (s *Server) review(c *gin.Context) {
 	}
 	previous, err := store.WorkbenchReview(c.Request.Context(), id, domain.ReviewDecisionID(key))
 	if err == nil {
-		if previous.ExpectedRunVersion != body.ExpectedVersion || previous.WorkflowRevision != body.WorkflowRevision || previous.Kind != body.Kind || previous.Reviewer != strings.TrimSpace(body.Reviewer) || previous.Reason != strings.TrimSpace(body.Reason) || previous.BudgetIncrease != increase {
+		if previous.ExpectedRunVersion != body.ExpectedVersion || previous.WorkflowRevision != body.WorkflowRevision || previous.Kind != body.Kind || previous.Reviewer != strings.TrimSpace(body.Reviewer) || previous.Reason != strings.TrimSpace(body.Reason) || previous.BudgetIncrease != increase || revisionTargetValue(previous.RevisionTargetStage) != body.RevisionTarget {
 			writeErr(c, 409, "idempotency_conflict", "操作身份已用于不同评审")
 			return
 		}
@@ -206,8 +211,17 @@ func (s *Server) review(c *gin.Context) {
 		return
 	}
 	req := domain.CreateReviewRequest{ID: domain.ReviewDecisionID(key), RunID: id, ExpectedRunVersion: body.ExpectedVersion, WorkflowRevision: body.WorkflowRevision, StageName: snapshot.CurrentStage, StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, Kind: body.Kind, BudgetIncrease: increase, Reviewer: strings.TrimSpace(body.Reviewer), Reason: strings.TrimSpace(body.Reason), IdempotencyKey: key, At: time.Now().UTC()}
+	if body.Kind == domain.ReviewRevise {
+		req.RevisionTargetStage = &body.RevisionTarget
+		digest, digestErr := domain.ReviewRevisionIntentDigest(body.RevisionTarget, req.Reason)
+		if digestErr != nil {
+			writeErr(c, 422, "invalid_revision_target", "修订目标或理由无效")
+			return
+		}
+		req.RequestedEditsDigest = &digest
+	}
 	if err = req.Validate(); err != nil {
-		writeErr(c, 422, "invalid_review_payload", "重试需增加预算，拒绝需完整理由")
+		writeErr(c, 422, "invalid_review_payload", "评审决定、修订目标或预算无效")
 		return
 	}
 	d, err := s.app.Reviews.CreateReview(c.Request.Context(), req)
@@ -216,6 +230,13 @@ func (s *Server) review(c *gin.Context) {
 		return
 	}
 	respond(d)
+}
+
+func revisionTargetValue(stage *domain.StageName) domain.StageName {
+	if stage == nil {
+		return ""
+	}
+	return *stage
 }
 
 // Kept separate from admission: bootstrapping providers is per task and uses
@@ -228,6 +249,9 @@ func (s *Server) executionApp(ctx context.Context, id domain.RunID) (*applicatio
 	frozen, err := application.ConfigForRun(ctx, s.cfg, id, reader)
 	if err != nil {
 		return nil, err
+	}
+	if s.similarityHTTPClient != nil {
+		return application.BootstrapWithSimilarityHTTPClient(ctx, frozen, s.similarityHTTPClient)
 	}
 	return application.Bootstrap(ctx, frozen)
 }

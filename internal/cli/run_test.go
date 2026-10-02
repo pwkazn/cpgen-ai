@@ -219,6 +219,119 @@ func TestReviewRetryBudgetPatchUsesSharedPersistentApprovalPath(t *testing.T) {
 	}
 }
 
+func TestReviewReviseBindsReviewedEvidenceAndPersistsUpstreamTarget(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "state")
+	configPath := filepath.Join(root, "cpgen.yaml")
+	if err := os.WriteFile(configPath, []byte("storage:\n  state_root: "+filepath.ToSlash(stateRoot)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.ToSlash(stateRoot) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, err := cfg.EffectiveConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(effective.Paths.Locks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := domain.RunID("run_000000000000000000000000000000b1")
+	configJSON, err := cfg.Effective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDigest := cfg.EffectiveDigest()
+	limits := domain.BudgetLimits{MaxActiveTimeMilliseconds: 30000}
+	submitted := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: "manual", Brief: "CLI revision binding test", Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en", Difficulty: "easy", TimeLimitMilliseconds: 1000, MemoryLimitMegabytes: 64, SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: limits}
+	raw, err := json.Marshal(submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canonical any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&canonical); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	create := domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 7,
+		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: configDigest, WorkflowRevision: workflow.FakeRevision, SchemaVersion: domain.RequestSchemaV1,
+		WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)), BudgetLimits: limits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: createdAt,
+		IdempotencyKey: "create_000000000000000000000000000000b1"}
+	if _, err := store.CreateRun(context.Background(), create); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	prepareInput := domain.SumBytes([]byte("prepare input"))
+	prepareAttempt := domain.AttemptID("attempt_000000000000000000000000000000b1")
+	if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: 1, StageName: "prepare", AttemptID: prepareAttempt, InputDigest: prepareInput, IdempotencyKey: "begin_000000000000000000000000000000b1", At: createdAt.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	prepareOutput := domain.SumBytes([]byte("prepare output"))
+	advanced, err := store.FinishStage(context.Background(), domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: prepareAttempt, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &prepareOutput, NextInputDigest: &prepareOutput, NextStage: "exercise", IdempotencyKey: "finish_000000000000000000000000000000b1", At: createdAt.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exerciseAttempt := domain.AttemptID("attempt_000000000000000000000000000000b2")
+	if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: advanced.Version, StageName: "exercise", AttemptID: exerciseAttempt, InputDigest: prepareOutput, IdempotencyKey: "begin_000000000000000000000000000000b2", At: createdAt.Add(3 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	exerciseOutput := domain.SumBytes([]byte("exercise output"))
+	advanced, err = store.FinishStage(context.Background(), domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: advanced.Version + 1, StageName: "exercise", AttemptID: exerciseAttempt, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &exerciseOutput, NextInputDigest: &exerciseOutput, NextStage: "checkpoint", IdempotencyKey: "finish_000000000000000000000000000000b2", At: createdAt.Add(4 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointAttempt := domain.AttemptID("attempt_000000000000000000000000000000b3")
+	if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: advanced.Version, StageName: "checkpoint", AttemptID: checkpointAttempt, InputDigest: exerciseOutput, IdempotencyKey: "begin_000000000000000000000000000000b3", At: createdAt.Add(5 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	evidence := domain.SumBytes([]byte("checkpoint evidence"))
+	if _, err := store.FinishStage(context.Background(), domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: advanced.Version + 1, StageName: "checkpoint", AttemptID: checkpointAttempt, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &configDigest, IdempotencyKey: "finish_000000000000000000000000000000b3", At: createdAt.Add(6 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const reason = "repair the selected producer and rerun verification"
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"--config", configPath, "review", "revise", string(runID), "--reviewer", "cli-test", "--step", "prepare", "--reason", reason}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("review revise code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response struct {
+		Status string `json:"status"`
+		Data   struct {
+			StageName           domain.StageName  `json:"stage_name"`
+			RevisionTargetStage *domain.StageName `json:"revision_target_stage"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "PENDING" || response.Data.StageName != "checkpoint" || response.Data.RevisionTargetStage == nil || *response.Data.RevisionTargetStage != "prepare" {
+		t.Fatalf("CLI review binding/target = %+v", response)
+	}
+	store, err = sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pending, err := store.PendingReview(context.Background(), runID)
+	wantIntent, intentErr := domain.ReviewRevisionIntentDigest("prepare", reason)
+	if err != nil || intentErr != nil || pending == nil || pending.StageName != "checkpoint" || pending.StageInputDigest != exerciseOutput || pending.EvidenceDigest != evidence || pending.PolicyDigest != configDigest || pending.RequestedEditsDigest == nil || *pending.RequestedEditsDigest != wantIntent {
+		t.Fatalf("persisted CLI REVISE = %+v; want exact checkpoint evidence and prepare intent: %v %v", pending, err, intentErr)
+	}
+}
+
 func readCLIBudgetAccount(t *testing.T, store *sqlite.Store, runID domain.RunID) int64 {
 	t.Helper()
 	budget, err := store.BudgetSnapshot(context.Background(), runID)

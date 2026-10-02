@@ -650,6 +650,8 @@ func TestReviewReviseRequiresExactSuffixAndRestartsEarliestStage(t *testing.T) {
 	}
 	binding := reviewBinding{stage: "exercise", input: prepareOutput, evidence: evidence, policy: policy, workflowRevision: reviewSnapshot.WorkflowRevision}
 	reviewRequest := testCreateReviewRequest(runID, reviewSnapshot.Version, domain.ReviewRevise, binding, 33)
+	target := domain.StageName("prepare")
+	reviewRequest.RevisionTargetStage = &target
 	reviewRequest.At = testNow.Add(5 * time.Second)
 	edits := domain.SumBytes([]byte("revise from prepare"))
 	reviewRequest.RequestedEditsDigest = &edits
@@ -683,6 +685,14 @@ func TestReviewReviseRequiresExactSuffixAndRestartsEarliestStage(t *testing.T) {
 	restarted, err := store.ApplyReview(ctx, base)
 	if err != nil {
 		t.Fatalf("ApplyReview exact suffix: %v", err)
+	}
+	feedback, err := store.ReadLatestDraftRetryFeedback(ctx, runID, "prepare")
+	if err != nil || feedback == nil || feedback.SourceStage != "exercise" || feedback.TargetStage != "prepare" || feedback.Reason != reviewRequest.Reason {
+		t.Fatalf("persisted revision feedback = %+v, %v", feedback, err)
+	}
+	unrelatedFeedback, err := store.ReadLatestDraftRetryFeedback(ctx, runID, "exercise")
+	if err != nil || unrelatedFeedback != nil {
+		t.Fatalf("revision feedback for a different producer = %+v, %v", unrelatedFeedback, err)
 	}
 	if restarted.State != domain.RunCreated || restarted.CurrentStage != "prepare" || restarted.CurrentStageOrdinal != 1 {
 		t.Fatalf("restarted projection = %+v", restarted)
@@ -747,13 +757,18 @@ func driveRunRequestToNeedsReview(t *testing.T, store *Store, request domain.Cre
 }
 
 func testCreateReviewRequest(runID domain.RunID, expectedVersion int64, kind domain.ReviewDecisionKind, binding reviewBinding, suffix int) domain.CreateReviewRequest {
-	return domain.CreateReviewRequest{
+	request := domain.CreateReviewRequest{
 		ID: domain.ReviewDecisionID(reviewID(suffix)), RunID: runID, ExpectedRunVersion: expectedVersion,
 		Kind: kind, WorkflowRevision: binding.workflowRevision, StageName: binding.stage,
 		StageInputDigest: binding.input, EvidenceDigest: binding.evidence, PolicyDigest: binding.policy,
 		Reviewer: "reviewer@example.test", Reason: "review decision reason",
 		IdempotencyKey: reviewCreateID(suffix), At: testNow.Add(3 * time.Second),
 	}
+	if kind == domain.ReviewRevise {
+		target := binding.stage
+		request.RevisionTargetStage = &target
+	}
+	return request
 }
 
 func reviewID(suffix int) string {

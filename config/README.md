@@ -103,7 +103,7 @@ go run ./cmd/cpgen --config config/slice2.example.yaml generate --request config
 | `max_output_tokens` | `4096` | 1 到 1048576 的整数；应用策略界限，而非提供方能力声明 |
 | `max_response_bytes` | `1048576` | 1 到 67108864 的整数 |
 | `max_format_repairs` | `0` | 整数 0 或 1；一次可选的 JSON 格式重新生成，单独计量 |
-| `data_prompt_version` | 空值，沿用历史选择 | 空字符串或 `v3`；显式 `v3` 仅允许工作流 V3，选择包含完整 generator 参数解析示例的内置 Data 提示 |
+| `data_prompt_version` | 空值，沿用历史选择 | 空字符串、`v3` 或 `v5`；显式版本仅允许工作流 V3。`v3` 补充完整 generator 参数解析示例，`v5` 还要求每组完整输出不超过 1 MiB 沙箱上限的 90% |
 
 未知和重复的键、别名/合并键、null、错误的标量类型、
 空的必需字符串以及无效或越界的值都会被拒绝，并给出限定
@@ -114,11 +114,14 @@ go run ./cmd/cpgen --config config/slice2.example.yaml generate --request config
 被禁用的修复默认值会从有效 JSON 中省略，以保留较旧的
 提供方快照；启用它会改变有效策略摘要。
 
-`mvp.example.yaml` 显式选择 `llm.data_prompt_version: v3`。此版本明确
+`mvp.example.yaml` 显式选择 `llm.data_prompt_version: v5`。此版本保留
+完整 generator 参数解析示例，并要求按所有记录、空格、十进制位数和换行计算完整输出，
+每组最多占 943718 字节（1 MiB 上限的 90%）。带重试反馈时使用对应的 v6 提示。
+此前的 `v3` 和内部重试 `v4` 保持不变。版本 `v3` 明确
 generator 收到的是 `--seed=42`、`--case=1`、`--kind=small` 三个完整参数，
 应分别剥离七字符前缀，并用无符号 64 位整数解析 seed。
 省略或设置为空字符串时，有效 JSON 不增加此字段：旧 V1/V2 工作流仍使用
-Data 提示 v1，旧 V3 工作流仍使用 Data 提示 v2。显式选择 v3 会改变配置摘要，
+Data 提示 v1，旧 V3 工作流仍使用 Data 提示 v2。显式选择 v3 或 v5 会改变配置摘要，
 仅用于新 run；恢复、读取和格式修复都遵循 run 的冻结选择，不升级历史提示。
 
 `application.BuildLLMConfig(config.Config)` 返回 `(agent.Config,

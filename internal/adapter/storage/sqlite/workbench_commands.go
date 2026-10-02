@@ -68,6 +68,10 @@ func (s *Store) WorkbenchReview(ctx context.Context, id domain.RunID, decision d
 	return reviewByIDTx(ctx, s.db, id, decision)
 }
 func (s *Store) WorkbenchReviewBinding(ctx context.Context, id domain.RunID, stage domain.StageName) (domain.Digest, domain.Digest, domain.Digest, error) {
+	return s.ReadReviewBinding(ctx, id, stage)
+}
+
+func (s *Store) ReadReviewBinding(ctx context.Context, id domain.RunID, stage domain.StageName) (domain.Digest, domain.Digest, domain.Digest, error) {
 	var input, evidence, policy domain.Digest
 	err := s.db.QueryRowContext(ctx, `SELECT input_digest,review_evidence_digest,review_policy_digest FROM stage_records WHERE run_id=? AND stage_name=? AND state='NEEDS_REVIEW'`, string(id), string(stage)).Scan(&input, &evidence, &policy)
 	return input, evidence, policy, err

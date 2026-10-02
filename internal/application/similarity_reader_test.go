@@ -103,7 +103,8 @@ func TestSimilarityReaderRejectsHistoryAfterReviewInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("request another similarity pass"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001801", RunID: f.runID, ExpectedRunVersion: paused.Version, Kind: domain.ReviewRevise, WorkflowRevision: "slice1/v1", StageName: "exercise", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "re-evaluate input", IdempotencyKey: coordinatorID("review", "similarity-reader"), At: f.clock.Now()})
+	target := domain.StageName("prepare")
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001801", RunID: f.runID, ExpectedRunVersion: paused.Version, Kind: domain.ReviewRevise, WorkflowRevision: "slice1/v1", StageName: "exercise", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, RevisionTargetStage: &target, Reviewer: "fixture", Reason: "re-evaluate input", IdempotencyKey: coordinatorID("review", "similarity-reader"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}

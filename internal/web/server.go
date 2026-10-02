@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,13 +49,17 @@ type recentRunReader interface {
 }
 
 type Server struct {
-	app      *application.Application
-	cfg      config.Config
-	manager  *taskManager
-	secret   string
-	mu       sync.Mutex
-	sessions map[string]time.Time
-	limiter  *http.Server
+	app                  *application.Application
+	cfg                  config.Config
+	manager              *taskManager
+	secret               string
+	mu                   sync.Mutex
+	sessions             map[string]time.Time
+	limiter              *http.Server
+	similarityHTTPClient *http.Client
+	closeFixture         func() error
+	closeOnce            sync.Once
+	closeErr             error
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -62,19 +67,51 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 }
 
 func NewWithCapacity(ctx context.Context, cfg config.Config, capacity int) (*Server, error) {
+	return newWithCapacity(ctx, cfg, capacity, nil)
+}
+
+func newWithCapacity(ctx context.Context, cfg config.Config, capacity int, fixture *localSimilarityFixture) (*Server, error) {
 	if capacity < 1 || capacity > 64 {
 		return nil, errors.New("capacity must be between 1 and 64")
 	}
 	app, err := application.BootstrapLocal(ctx, cfg)
 	if err != nil {
+		if fixture != nil {
+			_ = fixture.Close()
+		}
 		return nil, err
 	}
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
 		_ = app.Close()
+		if fixture != nil {
+			_ = fixture.Close()
+		}
 		return nil, err
 	}
-	return &Server{app: app, cfg: cfg, manager: newTaskManager(capacity), secret: base64.RawURLEncoding.EncodeToString(raw), sessions: map[string]time.Time{}}, nil
+	server := &Server{app: app, cfg: cfg, manager: newTaskManager(capacity, configuredProviderSecrets(cfg)...), secret: base64.RawURLEncoding.EncodeToString(raw), sessions: map[string]time.Time{}}
+	if fixture != nil {
+		server.similarityHTTPClient = fixture.client
+		server.closeFixture = fixture.Close
+	}
+	return server, nil
+}
+
+func configuredProviderSecrets(cfg config.Config) []string {
+	names := make([]string, 0, 2)
+	if cfg.LLM != nil {
+		names = append(names, cfg.LLM.APIKeyEnv)
+	}
+	if cfg.Similarity != nil {
+		names = append(names, cfg.Similarity.APIKeyEnv)
+	}
+	secrets := make([]string, 0, len(names))
+	for _, name := range names {
+		if secret := os.Getenv(name); secret != "" {
+			secrets = append(secrets, secret)
+		}
+	}
+	return secrets
 }
 
 func (s *Server) BootstrapURL(listen string) string {
@@ -154,23 +191,27 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, onLis
 		}
 		return err
 	case <-ctx.Done():
-		s.manager.beginDrain()
-		s.manager.waitEmpty()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return errors.Join(s.limiter.Shutdown(shutdownCtx), s.app.Close())
+		return s.Close()
 	}
 }
 
 func (s *Server) Close() error {
 	s.manager.beginDrain()
 	s.manager.waitEmpty()
-	if s.limiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return errors.Join(s.limiter.Shutdown(ctx), s.app.Close())
-	}
-	return s.app.Close()
+	s.closeOnce.Do(func() {
+		var errs []error
+		if s.limiter != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			errs = append(errs, s.limiter.Shutdown(ctx))
+			cancel()
+		}
+		errs = append(errs, s.app.Close())
+		if s.closeFixture != nil {
+			errs = append(errs, s.closeFixture())
+		}
+		s.closeErr = errors.Join(errs...)
+	})
+	return s.closeErr
 }
 
 func (s *Server) originHostGuard() gin.HandlerFunc {

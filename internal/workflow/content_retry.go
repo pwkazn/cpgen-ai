@@ -34,10 +34,16 @@ func ContentRetryTarget(revision string, stage domain.StageName, reason string) 
 		if reason == "data_requires_review:compile.GENERATOR.CE" || reason == "data_requires_review:compile.VALIDATOR.CE" {
 			return "data"
 		}
-		for _, prefix := range []string{"data_requires_review:sample.", "data_requires_review:generated."} {
-			if strings.HasPrefix(reason, prefix) && (hasContentVerdict(reason) || hasSuffix(reason, ".INVALID", ".VALIDATOR_ERROR", ".validator_stdout_not_empty", ".nondeterministic")) {
-				return "data"
-			}
+		// A rejected committed sample is ambiguous: the sample can violate the
+		// problem format, or the generated validator can be too strict. Do not
+		// spend a content retry regenerating Data until a reviewer identifies
+		// which producer owns the defect. Generator-produced invalid input has
+		// an unambiguous Data owner.
+		if strings.HasPrefix(reason, "data_requires_review:generated.") && hasSuffix(reason, ".INVALID", ".VALIDATOR_ERROR", ".validator_stdout_not_empty", ".nondeterministic", ".OLE") {
+			return "data"
+		}
+		if strings.HasPrefix(reason, "data_requires_review:sample.") && hasSuffix(reason, ".VALIDATOR_ERROR", ".validator_stdout_not_empty") {
+			return "data"
 		}
 	case "quality":
 		if strings.HasPrefix(reason, "judge_requires_review:") && hasContentVerdict(reason) {
@@ -45,6 +51,13 @@ func ContentRetryTarget(revision string, stage domain.StageName, reason string) 
 		}
 	}
 	return ""
+}
+
+// AllowsManualRevisionTarget validates an explicit human-selected producer
+// rewind. The storage adapter additionally requires that the target is an
+// actual stage in the run and no later than the reviewed stage.
+func AllowsManualRevisionTarget(revision string, from, to domain.StageName) bool {
+	return revision != "" && from.Validate() == nil && to.Validate() == nil
 }
 
 func hasContentVerdict(reason string) bool {

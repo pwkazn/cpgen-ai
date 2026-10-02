@@ -67,6 +67,14 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		feedback, err := store.ReadLatestDraftRetryFeedback(ctx, run.RunID, "statement")
+		if err != nil || feedback == nil || feedback.SourceStage != "solution_decision" || feedback.TargetStage != "statement" || feedback.Reason != command.Reason {
+			t.Fatalf("persisted retry feedback = %+v, %v", feedback, err)
+		}
+		unrelated, err := store.ReadLatestDraftRetryFeedback(ctx, run.RunID, "data")
+		if err != nil || unrelated != nil {
+			t.Fatalf("feedback for a different producer = %+v, %v", unrelated, err)
+		}
 		replay, err := store.FinishContentRetry(ctx, command)
 		if err != nil || !reflect.DeepEqual(run, replay) {
 			t.Fatalf("replay changed result: %+v %v", replay, err)

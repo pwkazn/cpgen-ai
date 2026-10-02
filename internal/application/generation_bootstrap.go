@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"net/http"
 
 	sandboxexec "cpgen/internal/adapter/sandbox"
 	"cpgen/internal/adapter/storage/blob"
@@ -14,7 +15,7 @@ import (
 	"cpgen/internal/workflow"
 )
 
-func bootstrapGenerationRunService(ctx context.Context, cfg config.Config, store *sqlite.Store, blobs *blob.Store, locks *runlock.Manager, reconciler SandboxReconciler, effectiveJSON []byte) (*LocalRunService, func() error, error) {
+func bootstrapGenerationRunService(ctx context.Context, cfg config.Config, store *sqlite.Store, blobs *blob.Store, locks *runlock.Manager, reconciler SandboxReconciler, effectiveJSON []byte, similarityHTTPClient *http.Client) (*LocalRunService, func() error, error) {
 	content, retry, err := BuildGenerationExecutionSettings(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -53,6 +54,9 @@ func bootstrapGenerationRunService(ctx context.Context, cfg config.Config, store
 	similarityConfig, policy, err := BuildSimilarityConfig(cfg)
 	if err != nil {
 		return nil, nil, err
+	}
+	if similarityHTTPClient != nil {
+		similarityConfig.HTTPClient = similarityHTTPClient
 	}
 	provider, err := similarity.New(similarityConfig)
 	if err != nil {

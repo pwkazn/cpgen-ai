@@ -56,7 +56,7 @@ flowchart TD
 
 工作流修订、报告 schema、提示版本和题包 manifest 是不同的版本轴；不能仅凭一个 `v2` 或 `v3` 推断其它身份。此表中的 V1 指 MVP 工作流 V1，不是更早的探测题包格式 v1。
 
-新工作流为 `mvp.idea.statement.similarity.solution.data.judge.package.v3`，新 Solution/Judge 报告为 v2，Statement/Solution 提示词为 v2，导出 manifest 为 `cpgen.package/v3`。Data 默认保留已持久化的 v2 提示；新示例配置显式选择 `llm.data_prompt_version: v3`，补充 generator 的完整 `argv` 示例。该选择进入冻结配置，生成、格式修复、已提交读取及恢复采用同一版本；省略字段的旧配置摘要和提示身份不变。草稿 DTO 仍是 v1 形状；新增 program-context/finalized-statement 为各自 v1。V3 继续使用 V2 的 `content_retries` 有界配额与原有调用、token、成本和时间预算。
+新工作流为 `mvp.idea.statement.similarity.solution.data.judge.package.v3`，新 Solution/Judge 报告为 v2，Statement/Solution 提示词为 v2，导出 manifest 为 `cpgen.package/v3`。Data 默认保留已持久化的 v2 提示；新示例配置显式选择 `llm.data_prompt_version: v5`，保留 generator 的完整 `argv` 示例，并要求计算完整输出字节数后留出 10% 余量。选择进入冻结配置，生成、格式修复、已提交读取及恢复采用同一版本；带重试反馈的 v5 使用 v6 提示。既有 v2/v3/v4 提示字节不变，省略字段的旧配置摘要和提示身份不变。Judge 发现 generated generator OLE 时，现有有界内容重试会回到 Data；已耗尽配额仍进入人工审核，且不调整 1 MiB 沙箱上限。草稿 DTO 仍是 v1 形状；新增 program-context/finalized-statement 为各自 v1。V5 继续使用 V2 的 `content_retries` 有界配额与原有调用、token、成本和时间预算。
 
 旧 V1/V2 工作流不会在新语义下自动恢复或导出，旧报告也不会被当作 V3 证据。兼容路径会按旧 run 持久化的 workflow identity 读取旧包；新配置只用于创建独立的 V3 run。不要修改旧 run 的版本、草稿、SQLite 行或历史迁移文件。迁移 `000028` 只把 V3 加入题包准入触发器允许的工作流身份，保留原 Quality/Package/READY 条件，既有数据行不变。
 

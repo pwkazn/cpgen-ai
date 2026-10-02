@@ -50,7 +50,7 @@ func TestDataPromptVersionPreservesHistoricalEffectiveBytes(t *testing.T) {
 	}
 }
 
-func TestDataPromptVersionRequiresExplicitV3WorkflowAndIsFrozen(t *testing.T) {
+func TestDataPromptVersionRequiresExplicitSupportedWorkflowAndIsFrozen(t *testing.T) {
 	base := strings.Replace(solutionConfigYAML(t), workflow.LegacySolutionCheckpointRevision, workflow.ExecutedSamplesRevision, 1)
 	selected := strings.Replace(base, "llm:\n", "llm:\n  data_prompt_version: v3\n", 1)
 	old, err := config.Decode([]byte(base))
@@ -69,14 +69,29 @@ func TestDataPromptVersionRequiresExplicitV3WorkflowAndIsFrozen(t *testing.T) {
 	if err != nil || restored.LLM.DataPromptVersion != "v3" || restored.EffectiveDigest() != cfg.EffectiveDigest() {
 		t.Fatalf("selected version did not round-trip: %v", err)
 	}
-	for _, value := range []string{"v1", "v2", "v4", `" v3"`, "null", "3", "true", "[]", "{}"} {
+	v5YAML := strings.Replace(selected, "data_prompt_version: v3", "data_prompt_version: v5", 1)
+	v5, err := config.Decode([]byte(v5YAML))
+	if err != nil || v5.LLM.DataPromptVersion != "v5" {
+		t.Fatalf("v5 was not accepted: %v", err)
+	}
+	v5Frozen, err := v5.Effective()
+	if err != nil || !bytes.Contains(v5Frozen, []byte(`"data_prompt_version":"v5"`)) {
+		t.Fatalf("v5 selection missing from frozen config: %s %v", v5Frozen, err)
+	}
+	v5Restored, err := config.DecodeEffective(v5Frozen)
+	if err != nil || v5Restored.LLM.DataPromptVersion != "v5" || v5Restored.EffectiveDigest() != v5.EffectiveDigest() {
+		t.Fatalf("v5 selection did not round-trip: %v", err)
+	}
+	for _, value := range []string{"v1", "v2", "v4", "v6", `" v3"`, "null", "3", "true", "[]", "{}"} {
 		assertConfigField(t, strings.Replace(selected, "data_prompt_version: v3", "data_prompt_version: "+value, 1), "llm.data_prompt_version")
 	}
 	assertConfigField(t, strings.Replace(selected, "data_prompt_version: v3", "data_prompt_version: v3\n  data_prompt_version: v3", 1), "llm.data_prompt_version")
 	for _, revision := range []string{workflow.LegacySimilarityCheckpointRevision, workflow.LegacySolutionCheckpointRevision, workflow.GenerationRevision, workflow.RetryingGenerationRevision} {
 		assertConfigField(t, strings.Replace(selected, workflow.ExecutedSamplesRevision, revision, 1), "llm.data_prompt_version")
+		assertConfigField(t, strings.Replace(v5YAML, workflow.ExecutedSamplesRevision, revision, 1), "llm.data_prompt_version")
 	}
 	assertConfigField(t, configBase(t)+providerYAML+"  data_prompt_version: v3\n", "llm.data_prompt_version")
+	assertConfigField(t, configBase(t)+providerYAML+"  data_prompt_version: v5\n", "llm.data_prompt_version")
 	cfg.Workflow.Revision = workflow.GenerationRevision
 	var fieldErr *config.FieldError
 	if err := cfg.Validate(); !errors.As(err, &fieldErr) || fieldErr.Field != "llm.data_prompt_version" {

@@ -405,7 +405,8 @@ func TestGenerationReaderRestoresCurrentCacheUseAfterReviewInvalidation(t *testi
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("recheck the same admitted content"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001501", RunID: f.runID, ExpectedRunVersion: reviewRun.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.LegacySimilarityRevision, StageName: "similarity", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "reader-invalidation"), At: f.clock.Now()})
+	target := domain.StageName("idea")
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001501", RunID: f.runID, ExpectedRunVersion: reviewRun.Version, Kind: domain.ReviewRevise, WorkflowRevision: workflow.LegacySimilarityRevision, StageName: "similarity", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, RevisionTargetStage: &target, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "reader-invalidation"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}

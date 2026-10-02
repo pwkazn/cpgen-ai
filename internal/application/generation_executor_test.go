@@ -223,7 +223,8 @@ func testGenerationExecutorPriorAttemptCache(t *testing.T, recheck bool, retryWo
 		t.Fatal(err)
 	}
 	edits := domain.SumBytes([]byte("recheck the same frozen input"))
-	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: revision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
+	target := domain.StageName("idea")
+	decision, err := f.store.CreateReview(ctx, domain.CreateReviewRequest{ID: "review_00000000000000000000000000001601", RunID: f.runID, ExpectedRunVersion: review.Version, Kind: domain.ReviewRevise, WorkflowRevision: revision, StageName: "statement", StageInputDigest: input, EvidenceDigest: evidence, PolicyDigest: policy, RequestedEditsDigest: &edits, RevisionTargetStage: &target, Reviewer: "fixture", Reason: "recheck existing input", IdempotencyKey: coordinatorID("review", "executor"), At: f.clock.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}

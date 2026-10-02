@@ -19,6 +19,7 @@ type preparedCommand struct {
 	local, restore, configOnly, effective bool
 	serveListen                           string
 	serveCapacity                         int
+	serveSimilarityFixture                bool
 	execute                               func(*application.Application, io.Writer, io.Writer) int
 }
 

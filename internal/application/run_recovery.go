@@ -175,5 +175,52 @@ func (s *LocalRunService) applyPendingReview(ctx context.Context, snapshot domai
 		return snapshot, nil
 	}
 	command := domain.ApplyReviewCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, ReviewDecisionID: review.ID, StageName: review.StageName, StageInputDigest: review.StageInputDigest, EvidenceDigest: review.EvidenceDigest, PolicyDigest: review.PolicyDigest, IdempotencyKey: stableServiceID("review-apply", snapshot.RunID, snapshot.Version), At: s.clock.Now().UTC()}
+	if review.Kind == domain.ReviewRevise {
+		target := review.StageName
+		if review.RevisionTargetStage != nil {
+			target = *review.RevisionTargetStage
+		}
+		reader, ok := s.runtime.(interface {
+			StageSequence(context.Context, domain.RunID) ([]domain.StageName, error)
+			ReadStageInputDigest(context.Context, domain.RunID, domain.StageName) (domain.Digest, error)
+			RunViewDocuments(context.Context, domain.RunID) ([]byte, []byte, error)
+		})
+		if !ok {
+			return snapshot, errors.New("REVISE requires the persisted stage sequence, producer input and frozen config")
+		}
+		sequence, err := reader.StageSequence(ctx, snapshot.RunID)
+		if err != nil {
+			return snapshot, err
+		}
+		start := -1
+		reviewedIndex := -1
+		for i, stage := range sequence {
+			if stage == target {
+				start = i
+			}
+			if stage == review.StageName {
+				reviewedIndex = i
+			}
+		}
+		if start < 0 || reviewedIndex < 0 || start > reviewedIndex {
+			return snapshot, errors.New("REVISE target is not an upstream producer for the reviewed stage")
+		}
+		input, err := reader.ReadStageInputDigest(ctx, snapshot.RunID, target)
+		if err != nil {
+			return snapshot, err
+		}
+		_, configJSON, err := reader.RunViewDocuments(ctx, snapshot.RunID)
+		if err != nil {
+			return snapshot, err
+		}
+		configDigest := domain.SumBytes(configJSON)
+		if configDigest != snapshot.ConfigDigest {
+			return snapshot, errors.New("REVISE frozen config differs from the current run binding")
+		}
+		command.NewInputDigest = &input
+		command.NewConfigJSON = configJSON
+		command.NewConfigDigest = &configDigest
+		command.InvalidatedStages = append([]domain.StageName(nil), sequence[start:]...)
+	}
 	return s.reviews.ApplyReview(ctx, command)
 }
