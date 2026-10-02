@@ -8,19 +8,36 @@
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
+    <a class="skip-link" href="#app">跳转到主要内容</a>
     <header>
-      <strong>CPGen</strong><span>本地出题工作台</span
-      ><button data-nav="/runs/new">新建题目</button>
+      <a
+        class="brand"
+        href="/runs"
+        data-nav="/runs"
+        aria-label="CPGen 生成任务"
+      >
+        <span class="brand-mark" aria-hidden="true">&gt;_</span>
+        <strong>CPGen</strong>
+      </a>
+      <span class="brand-description">本地出题工作台</span>
+      <button class="primary" data-nav="/runs/new">
+        <span aria-hidden="true">＋</span>新建题目
+      </button>
     </header>
-    <nav aria-label="主导航">
-      <a href="/runs" data-nav="/runs">生成任务</a
-      ><a href="/reviews" data-nav="/reviews">待评审</a
-      ><a href="/settings" data-nav="/settings">环境与配置</a>
+    <nav class="main-nav" aria-label="主导航">
+      <a href="/runs" data-nav="/runs" data-section="runs">生成任务</a>
+      <a href="/reviews" data-nav="/reviews" data-section="reviews">待评审</a>
+      <a href="/settings" data-nav="/settings" data-section="settings"
+        >环境与配置</a
+      >
+      <span class="workspace-label">WORKSPACE / LOCAL</span>
     </nav>
-    <main id="app" aria-live="polite"><p>正在读取本地任务…</p></main>
+    <main id="app" tabindex="-1" aria-live="polite">
+      <p class="empty">正在读取本地任务…</p>
+    </main>
     <footer>
-      <span>CPGen / 本地工作区</span
-      ><span id="connection" role="status">正在连接本地服务…</span>
+      <span>CPGen / 本地工作区</span>
+      <span id="connection" role="status">正在连接本地服务…</span>
       <button id="reconnect" data-check-connection hidden>检查连接</button>
     </footer>
     <script type="module" src="/app.js"></script>

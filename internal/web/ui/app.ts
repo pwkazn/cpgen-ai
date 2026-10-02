@@ -17,6 +17,7 @@ const state = {
   activeRequest: null,
   detailTimer: 0,
   listTimer: 0,
+  listRequest: 0,
   lastSuccess: 0,
   listFilter: new URL(location.href).searchParams.get("state") || "",
   tab: "statement",
@@ -25,6 +26,7 @@ const state = {
   pendingCreate: null,
   createDraft: null,
   reviewRoute: false,
+  reviewDismissed: false,
   eventCursor: null,
   eventIds: new Set(),
   eventRunId: "",
@@ -123,12 +125,18 @@ async function api(path, { method = "GET", body, signal } = {}) {
 }
 function setOnline(v) {
   state.online = v;
-  document.querySelectorAll("[data-write]").forEach((b) => (b.disabled = !v));
+  document
+    .querySelectorAll("[data-write]")
+    .forEach(
+      (b) => (b.disabled = !v || b.closest("form")?.dataset.sending === "true"),
+    );
   const x = document.querySelector("#connection");
-  if (x)
+  if (x) {
+    x.dataset.state = v ? "online" : "offline";
     x.textContent = v
       ? `已连接 · 更新于 ${new Date(state.lastSuccess || Date.now()).toLocaleTimeString()}`
       : "连接中断 · 保留最近一次成功读取，写操作已停用";
+  }
   const retry = document.querySelector("#reconnect");
   if (retry) retry.hidden = v;
 }
@@ -148,10 +156,23 @@ function nav(path) {
   renderRoute();
 }
 function common(title, content, sub = "") {
-  return `<div class="toolbar"><div><h1>${esc(title)}</h1>${sub ? `<small class="muted">${esc(sub)}</small>` : ""}</div><div class="actions"><button data-nav="/runs/new">新建题目</button></div></div>${content}`;
+  return `<div class="toolbar page-heading"><div><h1>${esc(title)}</h1>${sub ? `<p class="page-description">${esc(sub)}</p>` : ""}</div></div>${content}`;
 }
 function statusBadge(s) {
-  return `<span class="badge state-${esc(String(s).toLowerCase())}">${esc(labels[s] || s || "状态未知")}</span>`;
+  const symbol =
+    {
+      CREATED: "○",
+      RUNNING: "●",
+      BLOCKED: "!",
+      NEEDS_REVIEW: "!",
+      READY: "✓",
+      FAILED: "×",
+      CANCELLED: "−",
+    }[s] || "·";
+  return `<span class="badge state-${esc(String(s).toLowerCase())}"><span class="status-icon" aria-hidden="true">${symbol}</span>${esc(labels[s] || s || "状态未知")}</span>`;
+}
+function emptyState(title, description = "", action = "", symbol = "＋") {
+  return `<div class="empty-state"><span class="empty-symbol" aria-hidden="true">${symbol}</span><h2 class="empty-title">${esc(title)}</h2>${description ? `<p class="empty-description">${esc(description)}</p>` : ""}${action}</div>`;
 }
 function humanDate(v) {
   if (!v) return "—";
@@ -188,6 +209,7 @@ function filterRuns(rows) {
 }
 async function listPage(reviewOnly = false) {
   const route = state.route;
+  const request = ++state.listRequest;
   clearInterval(state.detailTimer);
   try {
     const serverState = reviewOnly
@@ -200,24 +222,10 @@ async function listPage(reviewOnly = false) {
     const d = await api(
       "/runs?limit=1000" + (serverState ? "&state=" + serverState : ""),
     );
-    if (route !== state.route) return;
+    if (route !== state.route || request !== state.listRequest) return;
     setOnline(true);
     const all = Array.isArray(d.runs) ? d.runs : [];
     const rows = reviewOnly ? all : filterRuns(all);
-    const filters = [
-      "全部",
-      "",
-      "进行中",
-      "active",
-      "待评审",
-      "NEEDS_REVIEW",
-      "受阻",
-      "blocked",
-      "可导出",
-      "ready",
-      "已结束",
-      "ended",
-    ];
     const controls = reviewOnly
       ? ""
       : `<div class="filters" aria-label="任务状态筛选">${[
@@ -233,17 +241,56 @@ async function listPage(reviewOnly = false) {
               `<button data-filter="${v}" aria-pressed="${state.listFilter === v}">${t}</button>`,
           )
           .join("")}</div>`;
-    const content = `${controls}<div class="muted scope">最近 ${all.length} 条 · 服务端最多返回 ${esc(d.limit || 50)} 条</div>${
+    const content = `<div class="list-tools">${controls}<div class="list-summary" role="status">显示 ${rows.length} 项<span class="muted"> · 最近 ${all.length} 项${all.length >= (d.limit || 50) ? `（最多 ${esc(d.limit || 50)} 项）` : ""}</span></div></div>${
       rows.length
-        ? `<div class="table-wrap"><table><thead><tr><th>题目名称</th><th>状态</th><th>当前阶段</th><th>创建时间</th><th>更新时间</th></tr></thead><tbody>${rows
+        ? `<div class="table-wrap"><table class="run-table" aria-label="${reviewOnly ? "待评审任务" : "生成任务"}"><thead><tr><th scope="col" class="col-title">题目名称</th><th scope="col" class="col-state">状态</th><th scope="col" class="col-stage">当前阶段</th><th scope="col" class="col-created">创建时间</th><th scope="col" class="col-updated">更新时间</th></tr></thead><tbody>${rows
             .map((r) => {
               const id = r.run_id || r.id;
-              return `<tr><td><a href="${idUrl(id)}" data-nav="${idUrl(id)}">${esc(runTitle(r))}</a><div class="mono muted">${esc(id)}</div></td><td>${statusBadge(r.state)}</td><td>${esc(r.current_stage || r.stage || "—")}</td><td>${esc(humanDate(r.created_at))}</td><td>${esc(humanDate(r.updated_at))}</td></tr>`;
+              const path = idUrl(id) + (reviewOnly ? "/review" : "");
+              return `<tr><td class="col-title"><a class="run-link run-title" href="${path}" data-nav="${path}" title="${esc(runTitle(r))}">${esc(runTitle(r))}</a><div class="mono muted run-id" title="${esc(id)}">${esc(id)}</div></td><td class="col-state">${statusBadge(r.state)}</td><td class="col-stage">${esc(r.current_stage || r.stage || "—")}</td><td class="col-created">${esc(humanDate(r.created_at))}</td><td class="col-updated">${esc(humanDate(r.updated_at))}</td></tr>`;
             })
             .join("")}</tbody></table></div>`
-        : `<div class="empty">${reviewOnly ? "当前没有待评审任务" : state.listFilter ? "没有符合筛选条件的任务" : "尚无生成任务"}${!reviewOnly && !state.listFilter ? "。" : "。"} ${state.listFilter ? '<button data-filter="">清除筛选</button>' : '<button data-nav="/runs/new">新建题目</button>'}</div>`
+        : reviewOnly
+          ? emptyState(
+              "当前没有待评审任务",
+              "需要人工处理的任务会显示在这里。",
+              '<a class="button" href="/runs" data-nav="/runs">查看全部任务</a>',
+              "✓",
+            )
+          : state.listFilter
+            ? emptyState(
+                "没有符合筛选条件的任务",
+                "试试其他状态，或清除筛选查看全部任务。",
+                '<button data-filter="">清除筛选</button>',
+                "—",
+              )
+            : emptyState(
+                "尚无生成任务",
+                "从出题要求开始，生成题面、题解与测试数据。",
+                '<button class="primary" data-nav="/runs/new">新建题目</button>',
+              )
     }`;
-    app.innerHTML = common(reviewOnly ? "待评审" : "生成任务", content);
+    const focused = app.contains(document.activeElement)
+      ? document.activeElement
+      : null;
+    const focusFilter = focused?.dataset.filter;
+    const focusPath = focused?.dataset.nav;
+    app.innerHTML = common(
+      reviewOnly ? "待评审" : "生成任务",
+      content,
+      reviewOnly
+        ? "查看触发原因与运行证据，提交决定后继续执行。"
+        : "跟踪生成进度，审阅内容与核验结果，导出题包。",
+    );
+    if (focusFilter !== undefined) {
+      [...app.querySelectorAll("[data-filter]")]
+        .find((b) => b.dataset.filter === focusFilter)
+        ?.focus({ preventScroll: true });
+    } else if (focusPath) {
+      [...app.querySelectorAll("[data-nav]")]
+        .find((b) => b.dataset.nav === focusPath)
+        ?.focus({ preventScroll: true });
+    }
     if (!reviewOnly) {
       document.querySelectorAll("[data-filter]").forEach(
         (b) =>
@@ -258,9 +305,10 @@ async function listPage(reviewOnly = false) {
       );
     }
   } catch (e) {
-    if (route !== state.route) return;
+    if (route !== state.route || request !== state.listRequest) return;
     fail(e);
-    app.innerHTML = `<div class="empty error">读取任务失败：${esc(e.message)} <button data-retry>重试</button></div>`;
+    if (!app.querySelector(".list-tools"))
+      app.innerHTML = `<div class="empty error" role="alert">读取任务失败：${esc(e.message)} <button data-retry>重试</button></div>`;
   }
 }
 function moneyToMicro(v) {
@@ -317,10 +365,86 @@ function newPage() {
   const budgetSummary = `模型费用上限 $${esc(d.max_llm_cost_usd ?? "1.20")} · 查重费用上限 $${esc(d.max_similarity_cost_usd ?? "0.20")} · 模型调用 ${esc(d.max_llm_calls ?? "12")} 次`;
   app.innerHTML = common(
     "新建题目",
-    `<form id="create-form" class="form content-form"><label>出题要求<textarea name="brief" required rows="5" maxlength="30000" placeholder="描述题目目标、背景与希望考查的能力">${esc(d.brief || "")}</textarea></label><div class="fields"><label>算法标签（逗号分隔）<input name="tags" value="${esc(d.tags ?? "图论")}"><small class="muted">提交标签：<span id="normalized-tags">${esc(normalizeTags(d.tags ?? "图论").join(", ") || "—")}</span></small></label><label>难度<select name="difficulty"><option value="medium">中等</option><option value="easy">简单</option><option value="hard">困难</option></select></label><label>题面语言<select name="language"><option value="zh-CN">中文</option><option value="en">English</option></select></label><label>解题语言<output class="readonly">C++</output></label><label>时间限制（毫秒）<input name="time_limit_milliseconds" value="${esc(d.time_limit_milliseconds ?? "2000")}" required></label><label>内存限制（MB）<input name="memory_limit_megabytes" value="${esc(d.memory_limit_megabytes ?? "512")}" required></label></div><div class="budget-basic"><h2>本次生成预算</h2><div class="fields">${basics}</div></div><details><summary>高级题目要求与策略</summary><div class="fields"><label>必须包含（每行一项）<textarea name="required_features" rows="3">${esc(d.required_features || "")}</textarea></label><label>禁止包含（每行一项）<textarea name="forbidden_features" rows="3">${esc(d.forbidden_features || "")}</textarea></label><label>随机种子（可留空）<input name="seed" inputmode="numeric" value="${esc(d.seed || "")}" placeholder="十进制整数，按字符串传输"></label><label>工作模式<output class="readonly">manual</output></label><label>核验配置<output class="readonly">工作区默认</output></label><label>导出目标<output class="readonly">工作区默认</output></label></div></details><details><summary>完整预算上限</summary><div class="fields">${advanced}</div><p class="muted">费用按十进制输入，所有 64 位预算整数按十进制字符串无损传输。</p></details><div class="summary"><span id="budget-summary">${budgetSummary}</span><br>使用启动时加载的工作区配置。开始生成会调用外部服务并消耗预算。</div><div class="actions"><button class="primary" data-write type="submit">开始生成</button><button type="button" data-nav="/runs">取消</button></div><p id="form-error" role="alert" class="error"></p></form>`,
-    "请求会创建为可查询任务；长时间执行由本机服务管理。",
+    `<form id="create-form" class="form content-form">
+      <section class="form-section form-section--requirements" aria-labelledby="requirements-heading">
+        <div class="section-heading"><span class="section-number" aria-hidden="true">01</span><h2 id="requirements-heading">题目要求</h2></div>
+        <label><span>出题要求 <span class="muted">必填</span></span><textarea name="brief" required rows="5" maxlength="30000" aria-describedby="brief-help" placeholder="例如：设计一道以轮渡为背景的图遍历题，考查最短路径，并能用小规模数据进行暴力核验。">${esc(d.brief || "")}</textarea></label>
+        <p id="brief-help" class="field-help">说明想考查的能力、题目背景与数据范围，让生成方向更明确。</p>
+        <div class="fields create-preferences">
+          <label>算法标签<input name="tags" value="${esc(d.tags ?? "图论")}" aria-describedby="tags-help"><small id="tags-help" class="muted">用逗号分隔 · 已识别：<span id="normalized-tags">${esc(normalizeTags(d.tags ?? "图论").join(", ") || "—")}</span></small></label>
+          <label>难度<select name="difficulty"><option value="medium">中等</option><option value="easy">简单</option><option value="hard">困难</option></select></label>
+          <label>题面语言<select name="language"><option value="zh-CN">中文</option><option value="en">English</option></select></label>
+        </div>
+        <p class="create-policy">解题语言 <strong>C++</strong><span aria-hidden="true">·</span>工作模式 <strong>人工决策</strong></p>
+        <details><summary>高级题目要求与策略</summary><div class="fields">
+          <label>必须包含（每行一项）<textarea name="required_features" rows="3" placeholder="例如：图不保证连通">${esc(d.required_features || "")}</textarea></label>
+          <label>禁止包含（每行一项）<textarea name="forbidden_features" rows="3" placeholder="例如：交互题、特殊判题">${esc(d.forbidden_features || "")}</textarea></label>
+          <label>随机种子（可留空）<input name="seed" inputmode="numeric" value="${esc(d.seed || "")}" placeholder="填写非负整数以固定随机种子"></label>
+        </div><p class="field-help">核验配置与导出目标使用工作区默认值。</p></details>
+      </section>
+      <section class="form-section form-section--limits" aria-labelledby="limits-heading">
+        <div class="section-heading"><span class="section-number" aria-hidden="true">02</span><h2 id="limits-heading">题目运行限制</h2></div>
+        <p class="field-help">用于题目中参赛程序的运行与核验。</p>
+        <div class="fields">
+          <label>时间限制（毫秒）<input name="time_limit_milliseconds" inputmode="numeric" pattern="[0-9]+" value="${esc(d.time_limit_milliseconds ?? "2000")}" required></label>
+          <label>内存限制（MB）<input name="memory_limit_megabytes" inputmode="numeric" pattern="[0-9]+" value="${esc(d.memory_limit_megabytes ?? "512")}" required></label>
+        </div>
+      </section>
+      <section class="form-section form-section--budget" aria-labelledby="budget-heading">
+        <div class="section-heading"><span class="section-number" aria-hidden="true">03</span><h2 id="budget-heading">生成预算</h2></div>
+        <p class="field-help">设置本次任务的资源上限；如预算不足，可在任务详情中查看原因与处理方式。</p>
+        <div class="fields create-budget-basics">${basics}</div>
+        <details><summary>完整预算上限</summary><div class="fields">${advanced}</div><p class="field-help">活跃运行时间不包含暂停与等待处理的时间。</p></details>
+      </section>
+      <div class="form-footer">
+        <div class="summary"><strong id="budget-summary">${budgetSummary}</strong><p>使用当前工作区配置。开始生成会调用外部服务并消耗预算。</p></div>
+        <div class="actions"><button class="primary" data-write type="submit">开始生成</button><button type="button" data-nav="/runs">返回任务列表</button></div>
+        <p id="form-error" role="alert" class="error" tabindex="-1"></p>
+      </div>
+    </form>`,
+    "描述出题目标，设定运行限制与本次生成预算。",
   );
   const form = document.querySelector("#create-form");
+  const error = form.querySelector("#form-error");
+  let errorField = null;
+  const clearFieldError = () => {
+    form.querySelectorAll('[aria-invalid="true"]').forEach((field) => {
+      field.removeAttribute("aria-invalid");
+      field.removeAttribute("aria-errormessage");
+    });
+    errorField = null;
+    error.textContent = "";
+  };
+  const showFieldError = (field, message) => {
+    clearFieldError();
+    error.textContent = message;
+    if (field instanceof HTMLElement) {
+      const section = field.closest("details");
+      if (section) section.open = true;
+      field.setAttribute("aria-invalid", "true");
+      field.setAttribute("aria-errormessage", "form-error");
+      errorField = field;
+      field.focus();
+    } else error.focus();
+  };
+  form.addEventListener(
+    "invalid",
+    (event) => {
+      event.preventDefault();
+      const field = event.target;
+      if (field !== form.querySelector(":invalid")) return;
+      const label =
+        field.closest("label")?.firstChild?.textContent?.trim() || "此项";
+      const message = field.validity.valueMissing
+        ? `请填写${label.replace(/\s*必填$/, "")}。`
+        : field.validity.patternMismatch
+          ? `${label}请填写非负整数。`
+          : field.validationMessage;
+      showFieldError(field, message);
+    },
+    true,
+  );
+  form.querySelector("[type=submit]").disabled = !state.online;
   if (state.pendingCreate) {
     form
       .querySelectorAll("input,textarea,select")
@@ -331,7 +455,8 @@ function newPage() {
   }
   if (d.difficulty) form.elements.difficulty.value = d.difficulty;
   if (d.language) form.elements.language.value = d.language;
-  form.oninput = () => {
+  form.oninput = (event) => {
+    if (!errorField || event.target === errorField) clearFieldError();
     state.createDraft = Object.fromEntries(new FormData(form).entries());
     const normalized = normalizeTags(form.elements.tags.value);
     document.querySelector("#normalized-tags").textContent =
@@ -345,12 +470,13 @@ function newPage() {
     form.dataset.sending = "true";
     const fd = new FormData(form);
     const get = (n) => String(fd.get(n) || "").trim();
-    const error = document.querySelector("#form-error");
+    let validationField = "";
     try {
       let pending = state.pendingCreate;
       if (!pending) {
         const budget = {};
         for (const [, n, , type] of budgetFields) {
+          validationField = type === "hidden" ? "" : n;
           let k = n.replace("_mb", "");
           let v = type === "hidden" ? "0" : get(n);
           if (type === "money") {
@@ -369,6 +495,7 @@ function newPage() {
           } else budget[k] = int64String(v, "预算");
         }
         const seed = get("seed");
+        validationField = "seed";
         if (seed && !/^(0|[1-9]\d*)$/.test(seed))
           throw Error("随机种子必须为非负十进制整数");
         if (seed && BigInt(seed) > 9223372036854775807n)
@@ -401,8 +528,10 @@ function newPage() {
           budget_limits: budget,
         };
         if (!seed) delete request.seed;
+        validationField = "brief";
         if (!request.brief) throw Error("请填写出题要求");
         for (const n of ["time_limit_milliseconds", "memory_limit_megabytes"]) {
+          validationField = n;
           request[n] = int64String(request[n], "题目限制");
           if (BigInt(request[n]) < 1n) throw Error("题目限制必须为正整数");
         }
@@ -410,8 +539,10 @@ function newPage() {
         pending = { key: crypto.randomUUID(), request };
         state.pendingCreate = pending;
       }
+      validationField = "";
       const submit = form.querySelector("[type=submit]");
       submit.disabled = true;
+      submit.textContent = "正在创建任务…";
       form
         .querySelectorAll("input,textarea,select")
         .forEach((x) => (x.disabled = true));
@@ -442,7 +573,12 @@ function newPage() {
         form
           .querySelectorAll("input,textarea,select")
           .forEach((x) => (x.disabled = false));
-        if (submit) submit.disabled = !state.online;
+        if (submit) {
+          submit.disabled = !state.online;
+          submit.textContent = "开始生成";
+        }
+        const field = form.elements.namedItem(err.field || validationField);
+        showFieldError(field, err.message);
       } else {
         if (submit) {
           submit.disabled = true;
@@ -525,10 +661,21 @@ function artifactLabel(a) {
     "制品"
   );
 }
-async function artifactContent(id, occ, markdown = false) {
-  const key = id + "/" + occ + "/" + markdown;
+const automaticArtifactReads = new Set();
+const pendingArtifactReads = new Map();
+function artifactCacheKey(id, a, d, markdown = false) {
+  // This occurrence serves the draft until READY, then the verified package.
+  const revision = /\/verified-draft\.md$/.test(artifactLabel(a))
+    ? d.run?.state === "READY"
+      ? "/final"
+      : "/draft"
+    : "";
+  return id + "/" + (a.occurrence_id || a.id) + "/" + markdown + revision;
+}
+async function artifactContent(id, occ, markdown = false, key) {
   if (state.artifacts.has(key)) return state.artifacts.get(key);
-  try {
+  if (pendingArtifactReads.has(key)) return pendingArtifactReads.get(key);
+  const pending = (async () => {
     const d = await api(
       `/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(occ)}`,
     );
@@ -540,9 +687,27 @@ async function artifactContent(id, occ, markdown = false) {
         : `<pre class="source">${esc(text)}</pre>`;
     state.artifacts.set(key, html);
     return html;
-  } catch (e) {
-    return `<p class="error">无法读取此制品：${esc(e.message)}</p>`;
+  })();
+  pendingArtifactReads.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    pendingArtifactReads.delete(key);
   }
+}
+function artifactPanel(a, d, id, title, markdown = false, autoload = false) {
+  const key = artifactCacheKey(id, a, d, markdown);
+  const cached = state.artifacts.get(key);
+  const pending = !cached && pendingArtifactReads.has(key);
+  const statement = title === "题面";
+  const version = statement
+    ? /\/verified-draft\.md$/.test(artifactLabel(a))
+      ? d.run?.state === "READY"
+        ? "最终题面 · 来自已核验题包"
+        : "题面草稿 · 样例尚未定稿"
+      : "已提交题面"
+    : "已提交内容";
+  return `<section class="artifact"><div class="artifact-heading"><h2>${esc(title)}</h2><span class="artifact-version">${esc(version)}</span></div><p class="artifact-path"><code>${esc(artifactLabel(a))}</code></p><div class="artifact-body" aria-live="polite" ${pending ? 'aria-busy="true"' : ""}>${cached || `<p class="muted">${pending ? "正在读取已提交内容…" : "读取已提交内容后，可在此预览。"}</p>`}</div><button data-artifact="${esc(a.occurrence_id || a.id)}" data-markdown="${markdown}" data-cache-key="${esc(key)}" ${autoload ? "data-autoload" : ""} ${cached ? "hidden" : ""} ${pending ? "disabled" : ""}>${pending ? "正在读取…" : statement ? "读取题面" : "读取内容"}</button></section>`;
 }
 function detailTab(tab, d, id) {
   const arts = Array.isArray(d.artifacts) ? d.artifacts : [];
@@ -553,16 +718,42 @@ function detailTab(tab, d, id) {
   if (tab === "statement") {
     const a = arts.find((x) => /statement|problem/i.test(artifactLabel(x)));
     return a
-      ? `<h2>题面 · ${esc(artifactLabel(a))}</h2>${a.preview || a.content || a.text ? `<div class="markdown">${safeMarkdown(a.preview || a.content || a.text)}</div>` : "<p>已提交题面，可读取完整内容。</p>"}<button data-artifact="${esc(a.occurrence_id || a.id)}" data-markdown="true">读取题面</button>`
-      : '<p class="empty">当前阶段尚未提交内容。</p>';
+      ? artifactPanel(a, d, id, "题面", true, d.execution?.active !== true)
+      : emptyState(
+          "暂无可读取题面",
+          "当前任务尚未提交题面，可查看生成阶段与运行记录。",
+          "",
+          "○",
+        );
   }
   if (tab === "solution") {
     const choices = arts.filter((x) =>
       /solution|editorial|reference|brute|\.cpp/i.test(artifactLabel(x)),
     );
     return choices.length
-      ? `<h2>题解与程序</h2>${choices.map((a) => `<section class="artifact"><h3>${esc(artifactLabel(a))}</h3>${a.preview || a.content || a.text ? `<pre class="source">${esc(a.preview || a.content || a.text)}</pre>` : ""}<button data-artifact="${esc(a.occurrence_id || a.id)}">读取内容</button></section>`).join("")}`
-      : '<p class="empty">当前阶段尚未提交内容。</p>';
+      ? choices
+          .map((a) =>
+            artifactPanel(
+              a,
+              d,
+              id,
+              /brute/i.test(artifactLabel(a))
+                ? "暴力解法"
+                : /reference/i.test(artifactLabel(a))
+                  ? "参考程序"
+                  : /\.cpp$/i.test(artifactLabel(a))
+                    ? "程序源码"
+                    : "题解",
+              a.media_type === "text/markdown",
+            ),
+          )
+          .join("")
+      : emptyState(
+          "题解与代码尚未生成",
+          "这里只展示已经提交并可读取的题解与程序。",
+          "",
+          "○",
+        );
   }
   if (tab === "checks") {
     const reports = arts.filter(
@@ -570,7 +761,7 @@ function detailTab(tab, d, id) {
         String(x.role || "").toUpperCase() === "EVIDENCE" ||
         /report|check|verify|test|quality|duplicate/i.test(artifactLabel(x)),
     );
-    return `<h2>核验报告</h2>${reports.length ? reports.map((a) => `<section class="artifact"><h3>${esc(artifactLabel(a))}</h3><p>${esc(a.summary || "")}</p><button data-artifact="${esc(a.occurrence_id || a.id)}">展开报告</button></section>`).join("") : '<p class="empty">当前阶段尚未提交核验报告。</p>'}`;
+    return `<h2>核验报告</h2><p class="reading-note">报告记录已执行的核验；题意与算法仍需人工审阅。</p>${reports.length ? reports.map((a) => artifactPanel(a, d, id, `${stageLabel(a.stage_name)} · 核验记录`)).join("") : '<p class="empty">当前阶段尚未提交核验报告。</p>'}`;
   }
   return "<p>当前阶段尚未提交内容。</p>";
 }
@@ -578,17 +769,17 @@ function renderBudget(b, used = {}, reserved = {}) {
   if (!b) return "<p>预算账本不可用</p>";
   const limits = b.limits || b;
   const specs = [
-    ["模型调用", "LLM_CALLS", "max_llm_calls"],
-    ["输入 token", "LLM_INPUT_TOKENS", "max_llm_input_tokens"],
-    ["输出 token", "LLM_OUTPUT_TOKENS", "max_llm_output_tokens"],
     ["模型费用", "EXTERNAL_COST_MICRO_USD", "max_llm_cost_micro_usd", "money"],
-    ["查重调用", "SIMILARITY_CALLS", "max_similarity_calls"],
     [
       "查重费用",
       "SIMILARITY_COST_MICRO_USD",
       "max_similarity_cost_micro_usd",
       "money",
     ],
+    ["模型调用", "LLM_CALLS", "max_llm_calls"],
+    ["查重调用", "SIMILARITY_CALLS", "max_similarity_calls"],
+    ["输入 token", "LLM_INPUT_TOKENS", "max_llm_input_tokens"],
+    ["输出 token", "LLM_OUTPUT_TOKENS", "max_llm_output_tokens"],
     ["沙箱容器", "DOCKER_CONTAINER_CREATES", "max_sandbox_creates"],
     ["制品大小", "ARTIFACT_PHYSICAL_NEW_BYTES", "max_artifact_bytes", "bytes"],
     ["活跃时间", "ACTIVE_TIME_NS", "max_active_time_milliseconds", "duration"],
@@ -643,6 +834,97 @@ function activeTime(r) {
   }
   return "不可用";
 }
+function stageLabel(name) {
+  return (
+    {
+      idea: "题目构思",
+      statement: "题面与样例",
+      similarity: "相似度检查",
+      solution: "题解与程序",
+      data: "测试数据",
+      judge: "执行核验",
+      quality: "质量检查",
+      package: "题包打包",
+    }[name] ||
+    name ||
+    "阶段"
+  );
+}
+function stageStateLabel(status) {
+  return (
+    {
+      SUCCEEDED: "完成",
+      RUNNING: "执行中",
+      PENDING: "等待",
+      NEEDS_REVIEW: "待评审",
+      FAILED: "失败",
+      BLOCKED: "受阻",
+      CANCELLED: "已取消",
+      INTERRUPTED: "已中断",
+    }[status] ||
+    status ||
+    "等待"
+  );
+}
+function renderStage(s) {
+  const name = s.name || s.stage || s.stage_name;
+  const attempts = Array.isArray(s.attempts) ? s.attempts : [];
+  const heading = `<span class="stage-state">${esc(stageStateLabel(s.state))}</span><span class="stage-name">${esc(stageLabel(name))}<code>${esc(name)}</code></span>`;
+  const rows = attempts
+    .map(
+      (a) =>
+        `<div class="stage-attempt"><strong>尝试 ${esc(a.ordinal)} · ${esc(stageStateLabel(a.state))}</strong><span>${esc(humanDate(a.started_at))}</span>${a.cause ? `<span>中断原因：${esc({ user_cancel: "用户取消", revision_invalidated: "上游修订", step_deadline: "阶段时限已到", run_budget_deadline: "活跃时间预算已到" }[a.cause] || a.cause)}</span>` : ""}${a.blocked_binding?.retry_after ? `<span>可重试时间：${esc(humanDate(a.blocked_binding.retry_after))}</span>` : ""}</div>`,
+    )
+    .join("");
+  return attempts.length
+    ? `<details class="stage-details" data-stage="${esc(name)}" data-status="${esc(s.state || "PENDING")}"><summary class="stage">${heading}</summary>${rows}</details>`
+    : `<div class="stage" data-status="${esc(s.state || "PENDING")}">${heading}</div>`;
+}
+function detailNotice(d, r) {
+  const a = d.available_actions || {};
+  let title = "",
+    text = "",
+    kind = "neutral";
+  if (d.pending_cancel) {
+    title = "已请求取消，正在等待停止与清理";
+    text = "任务终态将以执行器完成清理后保存的结果为准。";
+  } else if (d.review) {
+    title = "评审决定已保存，等待执行";
+    text = a.resume
+      ? "点击“继续执行”应用此决定。"
+      : "决定尚未应用，请查看运行状态。";
+    kind = "warning";
+  } else if (r.state === "NEEDS_REVIEW") {
+    title = "任务需要人工评审";
+    text =
+      a.review || a.review_retry || a.review_reject
+        ? "先查看当前阶段与核验报告，再提交评审决定。"
+        : "请查看当前阶段与核验报告，服务端暂未开放评审操作。";
+    kind = "warning";
+  } else if (r.state === "BLOCKED") {
+    title = "任务受阻，已保存生成进度";
+    text = a.resume
+      ? "查看阶段记录与执行错误，处理后可尝试恢复任务。"
+      : "查看阶段记录与执行错误，确认受阻原因。";
+    kind = "warning";
+  } else if (r.state === "RUNNING" && d.execution?.active !== true) {
+    title = "执行状态待确认";
+    text = a.resume
+      ? "当前未观察到活跃执行器，可尝试恢复任务；服务端会检查执行锁。"
+      : "持久化状态为进行中，当前执行器状态尚未确认。";
+    kind = "warning";
+  } else if (r.state === "READY") {
+    title = "已通过当前核验门禁，可导出";
+    text = "题意与算法仍需人工审阅。";
+  } else if (r.state === "FAILED") {
+    title = "任务已失败";
+    text = "查看阶段记录、核验报告与执行错误。";
+    kind = "warning";
+  }
+  return title
+    ? `<div class="detail-notice" data-kind="${kind}"><strong>${esc(title)}</strong><span>${esc(text)}</span>${d.execution?.last_error ? `<p class="error">${esc(d.execution.last_error)}</p>` : ""}</div>`
+    : "";
+}
 function actionButtons(d, r, id) {
   const a = d.available_actions || {},
     s = r.state;
@@ -650,13 +932,15 @@ function actionButtons(d, r, id) {
   if (d.pending_cancel)
     out += '<span class="muted">已请求取消，等待清理</span>';
   if (a.cancel) {
-    out += '<button data-action="cancel" data-write>请求取消</button>';
+    out +=
+      '<button class="danger" data-action="cancel" data-write>请求取消</button>';
   }
   if (a.resume) {
-    out += `<button data-action="resume" data-write>${s === "NEEDS_REVIEW" ? "继续执行" : "恢复任务"}</button>`;
+    out += `<button class="primary" data-action="resume" data-write>${s === "NEEDS_REVIEW" ? "继续执行" : "恢复任务"}</button>`;
   }
   if (s === "NEEDS_REVIEW" && (a.review || a.review_retry || a.review_reject)) {
-    out += '<button data-action="review" data-write>提交评审决定</button>';
+    out +=
+      '<button class="primary" data-action="review" data-write>提交评审决定</button>';
   }
   if (s === "READY")
     out += `<a class="button primary" href="/api/runs/${encodeURIComponent(id)}/package">下载题包</a>`;
@@ -681,7 +965,7 @@ async function detailPage(id, { quiet = false } = {}) {
     ]);
     if (quiet && signature === state.lastDetail) return;
     const r = d.run || {};
-    const tab = new URL(location.href).searchParams.get("tab") || state.tab;
+    const tab = new URL(location.href).searchParams.get("tab") || "statement";
     state.tab = ["statement", "solution", "checks", "events"].includes(tab)
       ? tab
       : "statement";
@@ -739,12 +1023,8 @@ async function detailPage(id, { quiet = false } = {}) {
       typeof x === "string" ? { name: x } : x,
     );
     const stageHTML =
-      stageList
-        .map(
-          (s) =>
-            `<div class="stage"><span>${esc({ SUCCEEDED: "完成", RUNNING: "执行中", PENDING: "等待", NEEDS_REVIEW: "待评审", FAILED: "失败", BLOCKED: "受阻", CANCELLED: "取消" }[s.state] || s.state || "·")}</span> ${esc(s.name || s.stage || s.stage_name || s)}</div>`,
-        )
-        .join("") || '<p class="muted">没有阶段记录</p>';
+      stageList.map(renderStage).join("") ||
+      '<p class="muted">没有阶段记录</p>';
     const tabs = [
       ["statement", "题面"],
       ["solution", "题解与代码"],
@@ -759,18 +1039,31 @@ async function detailPage(id, { quiet = false } = {}) {
       state.reviewRoute && !canReview
         ? '<p class="summary">服务端当前未开放此任务的 Web 评审操作；任务状态与触发证据仍可在此查看。</p>'
         : "";
-    app.innerHTML = `<div class="detail-head"><div class="toolbar"><div><h1>${esc(runTitle(r))}</h1><div class="meta">${statusBadge(r.state)}<span>${esc(r.current_stage || "—")}</span><span>创建于 ${esc(humanDate(r.created_at))}</span><code>${esc(id)}</code></div></div><div class="actions">${actionButtons(d, r, id)}</div></div></div><div class="tabs" role="tablist" aria-label="任务内容">${tabs.map(([k, t]) => `<button role="tab" id="tab-${k}" aria-controls="panel-${k}" aria-selected="${state.tab === k}" data-tab="${k}">${t}</button>`).join("")}</div><div class="reading"><article class="content" id="panel-${state.tab}" role="tabpanel" aria-labelledby="tab-${state.tab}">${note}${detailTab(state.tab, d, id)}</article><aside class="rail"><section><h3>生成阶段</h3>${stageHTML}</section><section><h3>预算与耗时</h3>${renderBudget(d.budget, d.budget_used, d.budget_reserved)}<p>活跃耗时：${esc(activeTime(r))}</p>${d.execution?.last_error ? `<p class="error">${esc(d.execution.last_error)}</p>` : ""}<p>观察状态：${d.execution?.active === true ? "本进程执行器活跃" : d.execution?.active === false ? "未观察到活跃执行器" : "不可用"}</p></section><section><h3>评审与下一步</h3>${d.review ? `<p>待执行：${d.review.kind === "REJECT" ? "拒绝" : "重试"}</p><p>${esc(d.review.reviewer)} · ${esc(humanDate(d.review.created_at))}</p><p>${esc(d.review.reason)}</p><small>点击“继续执行”应用此决定。</small>` : "<p>当前无待处理评审</p>"}</section></aside></div><div class="status">连接已恢复 · 更新时间 ${new Date().toLocaleTimeString()}</div>`;
+    const focusTab = app.contains(document.activeElement)
+      ? document.activeElement?.dataset.tab
+      : null;
+    const openStages = new Set(
+      [...app.querySelectorAll(".stage-details[open]")].map(
+        (el) => el.dataset.stage,
+      ),
+    );
+    app.innerHTML = `<div class="breadcrumb"><a href="${state.reviewRoute ? "/reviews" : "/runs"}" data-nav="${state.reviewRoute ? "/reviews" : "/runs"}">${state.reviewRoute ? "待评审" : "生成任务"}</a><span aria-hidden="true">/</span><span>${state.reviewRoute ? "人工评审" : "任务详情"}</span></div><div class="detail-head"><div class="toolbar"><div><h1>${esc(runTitle(r))}</h1><div class="meta">${statusBadge(r.state)}<span>${esc(stageLabel(r.current_stage))}</span><span>创建于 ${esc(humanDate(r.created_at))}</span><code>${esc(id)}</code></div></div><div class="actions">${actionButtons(d, r, id)}</div></div></div>${detailNotice(d, r)}<div class="tabs" role="tablist" aria-label="任务内容">${tabs.map(([k, t]) => `<button role="tab" id="tab-${k}" aria-controls="panel-${k}" aria-selected="${state.tab === k}" tabindex="${state.tab === k ? "0" : "-1"}" data-tab="${k}">${t}</button>`).join("")}</div><div class="reading"><article class="content" id="panel-${state.tab}" role="tabpanel" tabindex="0" aria-labelledby="tab-${state.tab}">${note}${detailTab(state.tab, d, id)}</article><aside class="rail"><section><h3>生成阶段</h3>${stageHTML}</section><section><h3>预算与耗时</h3>${renderBudget(d.budget, d.budget_used, d.budget_reserved)}<p>活跃耗时：${esc(activeTime(r))}</p>${d.execution?.last_error ? `<p class="error">${esc(d.execution.last_error)}</p>` : ""}<p>观察状态：${d.execution?.active === true ? "已观察到活跃执行器" : d.execution?.active === false ? "未观察到活跃执行器" : "不可用"}</p></section><section><h3>评审与下一步</h3>${d.review ? `<p>待执行：${esc({ REJECT: "拒绝", RETRY: "重试", REVISE: "修订" }[d.review.kind] || d.review.kind)}</p><p>${esc(d.review.reviewer)} · ${esc(humanDate(d.review.created_at))}</p><p>${esc(d.review.reason)}</p><small>点击“继续执行”应用此决定。</small>` : r.state === "NEEDS_REVIEW" ? "<p>等待人工评审决定</p>" : r.state === "BLOCKED" ? "<p>处理受阻原因后，按可用操作恢复。</p>" : "<p>当前无待执行评审决定</p>"}</section></aside></div><div class="status" role="status">最近更新 · ${new Date().toLocaleTimeString()}</div>`;
     attachDetailActions(id, d);
-    for (const b of document.querySelectorAll("[data-artifact]")) {
-      const cached = state.artifacts.get(
-        id + "/" + b.dataset.artifact + "/" + (b.dataset.markdown === "true"),
-      );
-      if (cached) {
-        b.insertAdjacentHTML("afterend", cached);
-        b.remove();
+    app.querySelectorAll(".stage-details").forEach((el) => {
+      el.open = openStages.has(el.dataset.stage);
+    });
+    if (focusTab)
+      document
+        .querySelector(`#tab-${state.tab}`)
+        ?.focus({ preventScroll: true });
+    for (const b of app.querySelectorAll("[data-autoload]:not([hidden])")) {
+      if (!automaticArtifactReads.has(b.dataset.cacheKey)) {
+        automaticArtifactReads.add(b.dataset.cacheKey);
+        b.click();
       }
     }
-    if (state.reviewRoute && canReview) renderReviewForm(id, d);
+    if (state.reviewRoute && canReview && !state.reviewDismissed)
+      renderReviewForm(id, d);
     if (["CREATED", "RUNNING", "BLOCKED", "NEEDS_REVIEW"].includes(r.state)) {
       clearInterval(state.detailTimer);
       state.detailTimer = setInterval(
@@ -794,6 +1087,9 @@ function attachDetailActions(id, d) {
   document.querySelectorAll("[data-tab]").forEach(
     (b) =>
       (b.onclick = () => {
+        if (state.editing) return;
+        state.activeRequest?.abort();
+        state.activeRequest = null;
         state.tab = b.dataset.tab;
         const u = new URL(location.href);
         u.searchParams.set("tab", state.tab);
@@ -804,13 +1100,41 @@ function attachDetailActions(id, d) {
   document.querySelectorAll("[data-artifact]").forEach(
     (b) =>
       (b.onclick = async () => {
-        const content = await artifactContent(
-          id,
-          b.dataset.artifact,
-          b.dataset.markdown === "true",
-        );
-        b.insertAdjacentHTML("afterend", content);
-        b.remove();
+        if (b.disabled) return;
+        let current = b;
+        let body = b.closest(".artifact").querySelector(".artifact-body");
+        const findCurrent = () => {
+          current = b.isConnected
+            ? b
+            : [...app.querySelectorAll("[data-artifact]")].find(
+                (el) => el.dataset.cacheKey === b.dataset.cacheKey,
+              );
+          body = current?.closest(".artifact").querySelector(".artifact-body");
+          return !!body;
+        };
+        b.disabled = true;
+        b.textContent = "正在读取…";
+        body.setAttribute("aria-busy", "true");
+        try {
+          const content = await artifactContent(
+            id,
+            b.dataset.artifact,
+            b.dataset.markdown === "true",
+            b.dataset.cacheKey,
+          );
+          if (!findCurrent()) return;
+          body.innerHTML = content;
+          current.hidden = true;
+        } catch (e) {
+          if (!findCurrent()) return;
+          body.innerHTML = `<p class="error">无法读取此内容：${esc(e.message)}</p>`;
+          current.textContent = "重试读取";
+        } finally {
+          if (current?.isConnected) {
+            current.disabled = false;
+            body.removeAttribute("aria-busy");
+          }
+        }
       }),
   );
   const more = document.querySelector("[data-more-events]");
@@ -974,9 +1298,15 @@ function renderReviewForm(id, d) {
   const currentStage = String(d.run?.current_stage || "");
   const targets =
     currentStage === "judge"
-      ? [["statement", "题面与样例"], ["data", "数据生成器与校验器"]]
+      ? [
+          ["statement", "题面与样例"],
+          ["data", "数据生成器与校验器"],
+        ]
       : currentStage === "solution_decision"
-        ? [["solution", "题解"], ["statement", "题面与样例"]]
+        ? [
+            ["solution", "题解"],
+            ["statement", "题面与样例"],
+          ]
         : currentStage === "quality"
           ? [["solution", "题解"]]
           : [[currentStage, `当前阶段（${currentStage}）`]];
@@ -987,8 +1317,13 @@ function renderReviewForm(id, d) {
   panel.insertAdjacentHTML(
     "afterbegin",
     `<form id="review-form" class="inline-form"><h2>人工评审</h2><p>${esc(rv.reason || rv.trigger_reason || "请先查看失败阶段与相关制品，再选择修订目标或其他决定。")}</p><label>评审人<input name="reviewer" required></label><details><summary>补充说明（建议写明报告和失败原因）</summary><label>说明<textarea name="reason" maxlength="4000"></textarea></label></details><label>决定<select name="kind"><option value="REVISE">修复并重做上游阶段</option><option value="RETRY">增加预算后重试当前阶段</option><option value="REJECT">拒绝继续</option></select></label><label>修订目标阶段<select name="revision_target_stage">${targets
-      .map(([stage, label]) => `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(label)}</option>`)
-      .join("")}</select></label><details><summary>预算增加（仅用于重试）</summary><div class="fields">${budgetFields
+      .map(
+        ([stage, label]) =>
+          `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(label)}</option>`,
+      )
+      .join(
+        "",
+      )}</select></label><details><summary>预算增加（仅用于重试）</summary><div class="fields">${budgetFields
       .filter((x) => x[3] !== "hidden")
       .map(
         ([t, n]) =>
@@ -996,11 +1331,12 @@ function renderReviewForm(id, d) {
       )
       .join(
         "",
-      )}</div></details><button data-write type="submit">提交决定</button><button type="button" data-dismiss>返回</button><p role="alert"></p><p>修订会从所选阶段重做并重新运行其后的全部验证；保存后仍需显式继续执行。</p></form>`,
+      )}</div></details><button class="primary" data-write type="submit">提交决定</button><button type="button" data-dismiss>收起评审，查看内容</button><p role="alert"></p><p>修订会从所选阶段重做并重新运行其后的全部验证；保存后仍需显式继续执行。</p></form>`,
   );
   const f = document.querySelector("#review-form");
   f.querySelector("[data-dismiss]").onclick = () => {
     state.editing = false;
+    state.reviewDismissed = true;
     f.remove();
   };
   f.onsubmit = async (e) => {
@@ -1015,7 +1351,8 @@ function renderReviewForm(id, d) {
       return;
     }
     if (kind !== "RETRY" && Object.keys(patch).length) {
-      f.querySelector("[role=alert]").textContent = "修订或拒绝决定不能包含预算增加";
+      f.querySelector("[role=alert]").textContent =
+        "修订或拒绝决定不能包含预算增加";
       return;
     }
     if (kind === "RETRY" && !Object.keys(patch).length) {
@@ -1084,6 +1421,24 @@ async function renderRoute() {
   clearInterval(state.detailTimer);
   const p = location.pathname;
   if (p === "/") return nav("/runs");
+  const reviewPath = p === "/reviews" || /^\/runs\/[^/]+\/review$/.test(p);
+  const section =
+    p === "/settings" ? "/settings" : reviewPath ? "/reviews" : "/runs";
+  document
+    .querySelectorAll('nav[aria-label="主导航"] [data-nav]')
+    .forEach((link) => {
+      if (link.dataset.nav === section)
+        link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+  document.title = `${p === "/runs/new" ? "新建题目" : section === "/settings" ? "环境与配置" : reviewPath ? "待评审" : "生成任务"} · CPGen`;
+  if (app.dataset.route !== p) {
+    app.dataset.route = p;
+    state.reviewDismissed = false;
+    app.innerHTML = '<p class="empty muted" role="status">正在读取工作区…</p>';
+  }
+  const createButton = document.querySelector('header [data-nav="/runs/new"]');
+  if (createButton) createButton.hidden = p === "/runs/new";
   if (p === "/runs/new") {
     state.reviewRoute = false;
     return newPage();
@@ -1094,11 +1449,11 @@ async function renderRoute() {
   }
   if (p === "/reviews") {
     state.reviewRoute = false;
-    state.listFilter = "NEEDS_REVIEW";
     return listPage(true);
   }
   if (p === "/runs" || p === "/runs/") {
     state.reviewRoute = false;
+    state.listFilter = new URL(location.href).searchParams.get("state") || "";
     return listPage(false);
   }
   const parts = p.split("/").filter(Boolean);
@@ -1111,6 +1466,11 @@ async function renderRoute() {
 document.addEventListener("click", (e) => {
   const n = e.target.closest("[data-nav]");
   if (n) {
+    if (
+      n instanceof HTMLAnchorElement &&
+      (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0)
+    )
+      return;
     e.preventDefault();
     nav(n.dataset.nav);
     return;
@@ -1128,9 +1488,9 @@ document.addEventListener("click", async (e) => {
     if (form) {
       form
         .querySelectorAll("input,textarea,select")
-        .forEach((x) => (x.disabled = true));
+        .forEach((x) => (x.disabled = !!state.pendingCreate));
       const submit = form.querySelector("[type=submit]");
-      submit.disabled = false;
+      submit.disabled = form.dataset.sending === "true";
     }
   } catch (err) {
     button.disabled = false;
