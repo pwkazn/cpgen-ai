@@ -45,7 +45,7 @@ Windows 使用 `go build -o cpgen.exe ./cmd/cpgen`，后续命令中的 `./cpgen
 
 ## 生成题目
 
-参考 [请求示例](config/mvp.request.yaml) 设置题目要求和预算，然后运行：
+参考 [请求示例](config/mvp.request.yaml) 设置题目要求。预算只需填写 `max_llm_input_tokens` 和 `max_llm_output_tokens`，分别限制本次任务累计的输入、输出 token，包含重试和重新生成；示例为 150000 / 50000，两项额度独立。然后运行：
 
 ```bash
 ./cpgen --config .local/cpgen.yaml generate --request config/mvp.request.yaml

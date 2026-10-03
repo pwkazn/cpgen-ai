@@ -99,124 +99,153 @@ func TestReviewShowReturnsNotFoundForMissingRun(t *testing.T) {
 }
 
 func TestReviewRetryBudgetPatchUsesSharedPersistentApprovalPath(t *testing.T) {
-	root := t.TempDir()
-	stateRoot := filepath.Join(root, "state")
-	if err := os.WriteFile(filepath.Join(root, "cpgen.yaml"), []byte("storage:\n  state_root: "+filepath.ToSlash(stateRoot)+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.ToSlash(stateRoot) + "\n"))
+	tokenLimits, err := domain.NewTokenBudgetLimits(7000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	effective, err := cfg.EffectiveConfig()
+	splitLimits, err := domain.NewSplitTokenBudgetLimits(7000, 3000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(effective.Paths.Locks, 0700); err != nil {
-		t.Fatal(err)
-	}
-	store, err := sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	for _, test := range []struct {
+		name     string
+		limits   domain.BudgetLimits
+		patch    string
+		value    func(domain.BudgetLimits) [2]int64
+		initial  [2]int64
+		increase [2]int64
+	}{
+		{"legacy", domain.BudgetLimits{MaxSimilarityCostMicroUSD: 7000, MaxActiveTimeMilliseconds: 30000}, `{"max_similarity_cost_micro_usd":100000}`, func(v domain.BudgetLimits) [2]int64 { return [2]int64{v.MaxSimilarityCostMicroUSD, 0} }, [2]int64{7000, 0}, [2]int64{100000, 0}},
+		{"tokens", tokenLimits, "max_llm_tokens: 100000\n", func(v domain.BudgetLimits) [2]int64 { return [2]int64{v.MaxLLMTokens, 0} }, [2]int64{7000, 0}, [2]int64{100000, 0}},
+		{"split", splitLimits, "max_llm_input_tokens: 100000\nmax_llm_output_tokens: 20000\n", cliTokenLimits, [2]int64{7000, 3000}, [2]int64{100000, 20000}},
+		{"split_input_only", splitLimits, `{"max_llm_input_tokens":100000}`, cliTokenLimits, [2]int64{7000, 3000}, [2]int64{100000, 0}},
+		{"split_output_only", splitLimits, "max_llm_output_tokens: 20000\n", cliTokenLimits, [2]int64{7000, 3000}, [2]int64{0, 20000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			stateRoot := filepath.Join(root, "state")
+			if err := os.WriteFile(filepath.Join(root, "cpgen.yaml"), []byte("storage:\n  state_root: "+filepath.ToSlash(stateRoot)+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Decode([]byte("storage:\n  state_root: " + filepath.ToSlash(stateRoot) + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective, err := cfg.EffectiveConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(effective.Paths.Locks, 0700); err != nil {
+				t.Fatal(err)
+			}
+			store, err := sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
 
-	runID := domain.RunID("run_000000000000000000000000000000a1")
-	configJSON, err := cfg.Effective()
-	if err != nil {
-		t.Fatal(err)
-	}
-	configDigest := cfg.EffectiveDigest()
-	limits := domain.BudgetLimits{MaxSimilarityCostMicroUSD: 7000, MaxActiveTimeMilliseconds: 30000}
-	submitted := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: "manual", Brief: "CLI review test", Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en", Difficulty: "easy", TimeLimitMilliseconds: 1000, MemoryLimitMegabytes: 64, SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: limits}
-	raw, err := json.Marshal(submitted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var canonicalValue any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&canonicalValue); err != nil {
-		t.Fatal(err)
-	}
-	raw, err = json.Marshal(canonicalValue)
-	if err != nil {
-		t.Fatal(err)
-	}
-	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	create := domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 7,
-		RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: configDigest, WorkflowRevision: workflow.FakeRevision, SchemaVersion: domain.RequestSchemaV1,
-		WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)), BudgetLimits: limits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: createdAt,
-		IdempotencyKey: "create_000000000000000000000000000000a1"}
-	if _, err := store.CreateRun(context.Background(), create); err != nil {
-		t.Fatalf("CreateRun fixture: %v", err)
-	}
-	input := domain.SumBytes([]byte("CLI review input"))
-	attemptID := domain.AttemptID("attempt_000000000000000000000000000000a1")
-	if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: 1, StageName: "prepare", AttemptID: attemptID, InputDigest: input, IdempotencyKey: "begin_000000000000000000000000000000a1", At: createdAt.Add(time.Second)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.FinishStage(context.Background(), domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &input, ReviewPolicyDigest: &configDigest, IdempotencyKey: "finish_000000000000000000000000000000a1", At: createdAt.Add(2 * time.Second)}); err != nil {
-		t.Fatal(err)
-	}
+			runID := domain.RunID("run_000000000000000000000000000000a1")
+			configJSON, err := cfg.Effective()
+			if err != nil {
+				t.Fatal(err)
+			}
+			configDigest := cfg.EffectiveDigest()
+			limits := test.limits
+			submitted := domain.RunRequest{SchemaVersion: domain.RequestSchemaV1, Mode: "manual", Brief: "CLI review test", Tags: []string{"graphs"}, NormalizedTags: []string{"graphs"}, Language: "en", Difficulty: "easy", TimeLimitMilliseconds: 1000, MemoryLimitMegabytes: 64, SolutionLanguage: "cpp", VerificationProfile: "default", ExportTargets: []string{"internal"}, BudgetLimits: limits}
+			raw, err := json.Marshal(submitted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var canonicalValue any
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber()
+			if err := decoder.Decode(&canonicalValue); err != nil {
+				t.Fatal(err)
+			}
+			raw, err = json.Marshal(canonicalValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			create := domain.CreateRunRequest{RunID: runID, SubmittedRequestJSON: raw, SubmittedRequestDigest: domain.SumBytes(raw), EffectiveSeed: 7,
+				RedactedEffectiveConfigJSON: configJSON, RedactedEffectiveConfigDigest: configDigest, WorkflowRevision: workflow.FakeRevision, SchemaVersion: domain.RequestSchemaV1,
+				WorkflowDigest: domain.SumBytes([]byte(workflow.FakeRevision)), BudgetLimits: limits, StageSequence: []domain.StageName{"prepare", "exercise", "checkpoint"}, CreatedAt: createdAt,
+				IdempotencyKey: "create_000000000000000000000000000000a1"}
+			if _, err := store.CreateRun(context.Background(), create); err != nil {
+				t.Fatalf("CreateRun fixture: %v", err)
+			}
+			input := domain.SumBytes([]byte("CLI review input"))
+			attemptID := domain.AttemptID("attempt_000000000000000000000000000000a1")
+			if _, err := store.BeginStage(context.Background(), domain.BeginStageCommand{RunID: runID, ExpectedRunVersion: 1, StageName: "prepare", AttemptID: attemptID, InputDigest: input, IdempotencyKey: "begin_000000000000000000000000000000a1", At: createdAt.Add(time.Second)}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.FinishStage(context.Background(), domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &input, ReviewPolicyDigest: &configDigest, IdempotencyKey: "finish_000000000000000000000000000000a1", At: createdAt.Add(2 * time.Second)}); err != nil {
+				t.Fatal(err)
+			}
 
-	patchPath := filepath.Join(root, "budget-patch.json")
-	patchJSON, _ := json.Marshal(domain.BudgetLimits{MaxSimilarityCostMicroUSD: 100000})
-	if err := os.WriteFile(patchPath, patchJSON, 0600); err != nil {
-		t.Fatal(err)
+			patchPath := filepath.Join(root, "budget-patch.json")
+			if err := os.WriteFile(patchPath, []byte(test.patch), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := cli.Run([]string{"--config", filepath.Join(root, "cpgen.yaml"), "review", "retry", string(runID), "--reviewer", "cli-test", "--reason", "resume with approved headroom", "--budget-patch", patchPath}, &stdout, &stderr)
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("review retry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var response struct {
+				Status string `json:"status"`
+				Data   struct {
+					BudgetIncrease domain.BudgetLimits `json:"budget_increase"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Status != "PENDING" || test.value(response.Data.BudgetIncrease) != test.increase {
+				t.Fatalf("CLI did not persist the exact budget patch: %+v", response)
+			}
+			store, err = sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending, err := store.PendingReview(context.Background(), runID)
+			if err != nil || pending == nil || test.value(pending.BudgetIncrease) != test.increase {
+				t.Fatalf("persisted CLI review = %+v, %v", pending, err)
+			}
+			account := test.value(readCLIBudgetLimits(t, store, runID))
+			if account != test.initial {
+				t.Fatalf("review creation applied its budget before explicit resume: %v", account)
+			}
+			if _, err := store.GetRun(context.Background(), runID); err != nil {
+				t.Fatalf("run projection invalid before explicit resume: %v (cause: %v)", err, errors.Unwrap(err))
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			code = cli.Run([]string{"--config", filepath.Join(root, "cpgen.yaml"), "run", "resume", string(runID)}, &stdout, &stderr)
+			if code != 0 && code != 6 {
+				t.Fatalf("run resume code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			store, err = sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			want := [2]int64{test.initial[0] + test.increase[0], test.initial[1] + test.increase[1]}
+			if account := test.value(readCLIBudgetLimits(t, store, runID)); account != want {
+				t.Fatalf("CLI resume did not apply approved budget: got %v, want %v", account, want)
+			}
+		})
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := cli.Run([]string{"--config", filepath.Join(root, "cpgen.yaml"), "review", "retry", string(runID), "--reviewer", "cli-test", "--reason", "resume with approved headroom", "--budget-patch", patchPath}, &stdout, &stderr)
-	if code != 0 || stderr.Len() != 0 {
-		t.Fatalf("review retry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	var response struct {
-		Status string `json:"status"`
-		Data   struct {
-			BudgetIncrease domain.BudgetLimits `json:"budget_increase"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Status != "PENDING" || response.Data.BudgetIncrease.MaxSimilarityCostMicroUSD != 100000 {
-		t.Fatalf("CLI did not persist the exact budget patch: %+v", response)
-	}
-	store, err = sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, err := store.PendingReview(context.Background(), runID)
-	if err != nil || pending == nil || pending.BudgetIncrease.MaxSimilarityCostMicroUSD != 100000 {
-		t.Fatalf("persisted CLI review = %+v, %v", pending, err)
-	}
-	account := readCLIBudgetAccount(t, store, runID)
-	if account != 7000 {
-		t.Fatalf("review creation applied its budget before explicit resume: %d", account)
-	}
-	if _, err := store.GetRun(context.Background(), runID); err != nil {
-		t.Fatalf("run projection invalid before explicit resume: %v (cause: %v)", err, errors.Unwrap(err))
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	code = cli.Run([]string{"--config", filepath.Join(root, "cpgen.yaml"), "run", "resume", string(runID)}, &stdout, &stderr)
-	if code != 0 && code != 6 {
-		t.Fatalf("run resume code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	store, err = sqlite.Open(context.Background(), sqlite.Config{Path: effective.Paths.Database, BusyTimeout: time.Second, MaxReaders: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if account := readCLIBudgetAccount(t, store, runID); account != 107000 {
-		t.Fatalf("CLI resume did not apply approved budget: %d", account)
-	}
+}
+
+func cliTokenLimits(limits domain.BudgetLimits) [2]int64 {
+	return [2]int64{limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens}
 }
 
 func TestReviewReviseBindsReviewedEvidenceAndPersistsUpstreamTarget(t *testing.T) {
@@ -332,13 +361,13 @@ func TestReviewReviseBindsReviewedEvidenceAndPersistsUpstreamTarget(t *testing.T
 	}
 }
 
-func readCLIBudgetAccount(t *testing.T, store *sqlite.Store, runID domain.RunID) int64 {
+func readCLIBudgetLimits(t *testing.T, store *sqlite.Store, runID domain.RunID) domain.BudgetLimits {
 	t.Helper()
 	budget, err := store.BudgetSnapshot(context.Background(), runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return budget.Limits.MaxSimilarityCostMicroUSD
+	return budget.Limits
 }
 
 func TestRunEventsReturnsNotFoundForMissingRun(t *testing.T) {

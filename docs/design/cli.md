@@ -40,7 +40,7 @@ cpgen run resume <run-id>
 cpgen run cancel <run-id> --reason "..."
 ~~~
 
-generate 创建 run 并执行编译后的流水线，直到 READY、BLOCKED、NEEDS_REVIEW、FAILED 或 CANCELLED。
+generate 创建 run 并执行编译后的流水线，直到 READY、BLOCKED、NEEDS_REVIEW、FAILED 或 CANCELLED。请求的 `budget_limits` 只需同时填写 `max_llm_input_tokens` 和 `max_llm_output_tokens`，分别约束整个 run 的输入和输出 token，包含重试与内容重新生成；两项额度不能互相借用，其他执行限制采用系统默认值。两项均为 0 时在模型派发前暂停。完整请求见 [mvp.request.yaml](../../config/mvp.request.yaml)。旧版完整多参数预算保持兼容；兼容的总额字段 `max_llm_tokens` 不能与输入、输出上限混用。
 
 run list、show 与 events 是只读的，不获取 run 执行锁。events 按 run 版本排序，并支持稳定分页。
 
@@ -64,7 +64,15 @@ cpgen review reject <run-id> --reviewer NAME --reason TEXT
 
 会改变状态的复核命令仅对 NEEDS_REVIEW 有效，它创建一个不可变的 PENDING ReviewDecision，绑定到期望的 run 版本、工作流 revision、当前阶段输入、证据与策略。`revise --step` 选择当前失败阶段或更早的生产阶段；Resume 从该生产阶段开始，精确失效其后的全部阶段，并使用该阶段原输入和冻结配置。`--patch` 可选；未提供时，目标与理由会组成修订意图摘要。它不会直接继续 run。用户随后执行 run resume。
 
-retry 至少需要 `--budget-patch` 或 `--evidence` 之一。waive 仍受阶段可豁免策略限制，不能越过不可豁免的查重或质量门禁。show 呈现当前复核状态与决定。
+retry 至少需要 `--budget-patch` 或 `--evidence` 之一。token 预算 run 的补丁文件使用以下 JSON：
+
+~~~json
+{"max_llm_input_tokens": 50000, "max_llm_output_tokens": 10000}
+~~~
+
+补丁值表示**增加额度**：输入增加 50000 token，输出增加 10000 token；原上限为 150000 / 50000 时，应用后的上限为 200000 / 60000。也可以只提供其中一项，独立增加输入或输出额度。补丁沿用 run 的预算模式，不混用总额字段 `max_llm_tokens` 与输入、输出上限。提交决定后仍需 `run resume` 才会应用补丁并继续执行。
+
+waive 仍受阶段可豁免策略限制，不能越过不可豁免的查重或质量门禁。show 呈现当前复核状态与决定。
 
 ## 6. 题包命令
 

@@ -325,7 +325,11 @@ function int64String(v, label = "预算") {
   if (n > 9223372036854775807n) throw Error(`${label}超出有符号 64 位范围`);
   return n.toString();
 }
-const budgetFields = [
+const splitTokenBudgetFields = [
+  ["输入 token 上限", "max_llm_input_tokens", "150000"],
+  ["输出 token 上限", "max_llm_output_tokens", "50000"],
+];
+const legacyBudgetFields = [
   ["模型费用上限（USD）", "max_llm_cost_usd", "1.20", "money"],
   ["查重费用上限（USD）", "max_similarity_cost_usd", "0.20", "money"],
   ["模型调用次数", "max_llm_calls", "12"],
@@ -358,11 +362,13 @@ function normalizeTags(v) {
 function newPage() {
   clearInterval(state.detailTimer);
   const d = state.createDraft || state.draft || {};
-  const budgetInput = ([label, name, value, type]) =>
-    `<label>${label}<input name="${name}" inputmode="${type === "money" ? "decimal" : "numeric"}" value="${esc(d[name] ?? value)}" required></label>`;
-  const basics = budgetFields.slice(0, 3).map(budgetInput).join("");
-  const advanced = budgetFields.slice(3, -1).map(budgetInput).join("");
-  const budgetSummary = `模型费用上限 $${esc(d.max_llm_cost_usd ?? "1.20")} · 查重费用上限 $${esc(d.max_similarity_cost_usd ?? "0.20")} · 模型调用 ${esc(d.max_llm_calls ?? "12")} 次`;
+  const tokenInputs = splitTokenBudgetFields
+    .map(
+      ([label, name, value]) =>
+        `<label>${label}<input name="${name}" inputmode="numeric" pattern="[0-9]+" value="${esc(d[name] ?? value)}" required></label>`,
+    )
+    .join("");
+  const budgetSummary = `输入 token 上限 ${esc(d.max_llm_input_tokens ?? "150000")} · 输出 token 上限 ${esc(d.max_llm_output_tokens ?? "50000")}`;
   app.innerHTML = common(
     "新建题目",
     `<form id="create-form" class="form content-form">
@@ -393,8 +399,8 @@ function newPage() {
       <section class="form-section form-section--budget" aria-labelledby="budget-heading">
         <div class="section-heading"><span class="section-number" aria-hidden="true">03</span><h2 id="budget-heading">生成预算</h2></div>
         <p class="field-help">设置本次任务的资源上限；如预算不足，可在任务详情中查看原因与处理方式。</p>
-        <div class="fields create-budget-basics">${basics}</div>
-        <details><summary>完整预算上限</summary><div class="fields">${advanced}</div><p class="field-help">活跃运行时间不包含暂停与等待处理的时间。</p></details>
+        <div class="fields">${tokenInputs}</div>
+        <p class="field-help">输入与输出分别累计，包含重试和重新生成，各自额度独立。</p>
       </section>
       <div class="form-footer">
         <div class="summary"><strong id="budget-summary">${budgetSummary}</strong><p>使用当前工作区配置。开始生成会调用外部服务并消耗预算。</p></div>
@@ -462,7 +468,7 @@ function newPage() {
     document.querySelector("#normalized-tags").textContent =
       normalized.join(", ") || "—";
     document.querySelector("#budget-summary").textContent =
-      `模型费用上限 $${form.elements.max_llm_cost_usd.value} · 查重费用上限 $${form.elements.max_similarity_cost_usd.value} · 模型调用 ${form.elements.max_llm_calls.value} 次`;
+      `输入 token 上限 ${form.elements.max_llm_input_tokens.value} · 输出 token 上限 ${form.elements.max_llm_output_tokens.value}`;
   };
   form.onsubmit = async (e) => {
     e.preventDefault();
@@ -475,24 +481,9 @@ function newPage() {
       let pending = state.pendingCreate;
       if (!pending) {
         const budget = {};
-        for (const [, n, , type] of budgetFields) {
-          validationField = type === "hidden" ? "" : n;
-          let k = n.replace("_mb", "");
-          let v = type === "hidden" ? "0" : get(n);
-          if (type === "money") {
-            moneyToMicro(v);
-            budget[k] = v;
-          } else if (type === "minutes") {
-            budget.max_active_time_milliseconds = int64String(
-              (BigInt(int64String(v)) * 60000n).toString(),
-              "活跃时间",
-            );
-          } else if (type === "mb") {
-            budget[k] = int64String(
-              (BigInt(int64String(v)) * 1048576n).toString(),
-              "容量",
-            );
-          } else budget[k] = int64String(v, "预算");
+        for (const [label, name] of splitTokenBudgetFields) {
+          validationField = name;
+          budget[name] = int64String(get(name), label);
         }
         const seed = get("seed");
         validationField = "seed";
@@ -766,6 +757,59 @@ function detailTab(tab, d, id) {
   return "<p>当前阶段尚未提交内容。</p>";
 }
 function renderBudget(b, used = {}, reserved = {}) {
+  if (!b) return "<p>预算账本不可用</p>";
+  const limits = b.limits || b;
+  if (limits.split_token_budget)
+    return renderSplitTokenBudget(limits, used, reserved);
+  if (!limits.token_budget && limits.max_llm_tokens == null) {
+    return renderLegacyBudget(b, used, reserved);
+  }
+  try {
+    const total = (values) => {
+      if (values.LLM_TOKENS != null) return BigInt(values.LLM_TOKENS);
+      if (values.LLM_INPUT_TOKENS == null || values.LLM_OUTPUT_TOKENS == null)
+        return null;
+      return BigInt(values.LLM_INPUT_TOKENS) + BigInt(values.LLM_OUTPUT_TOKENS);
+    };
+    const tokenUsed = total(used);
+    const tokenReserved = total(reserved);
+    const tokenOccupied =
+      tokenUsed != null && tokenReserved != null
+        ? tokenUsed + tokenReserved
+        : null;
+    const tokenLimit = BigInt(limits.max_llm_tokens ?? 0);
+    const show = (value) => (value == null ? "不可用" : String(value));
+    return `<div class="budget-list"><div class="budget-item"><span>模型 token（已用＋预留 / 上限）</span><strong>${esc(show(tokenOccupied))} / ${esc(tokenLimit)}</strong><small>已用 ${esc(show(tokenUsed))} · 预留 ${esc(show(tokenReserved))}</small></div><details><summary>用量明细</summary><p>输入 ${esc(show(used.LLM_INPUT_TOKENS))} token · 输出 ${esc(show(used.LLM_OUTPUT_TOKENS))} token</p><p>模型调用 ${esc(show(used.LLM_CALLS))} 次</p></details></div>`;
+  } catch {
+    return "<p>预算账本不可用</p>";
+  }
+}
+function renderSplitTokenBudget(limits, used, reserved) {
+  const specs = [
+    ["输入 token", "LLM_INPUT_TOKENS", "max_llm_input_tokens"],
+    ["输出 token", "LLM_OUTPUT_TOKENS", "max_llm_output_tokens"],
+  ];
+  const show = (value) => (value == null ? "不可用" : String(value));
+  try {
+    const rows = specs
+      .map(([label, dimension, limit]) => {
+        const tokenUsed =
+          used[dimension] == null ? null : BigInt(used[dimension]);
+        const tokenReserved =
+          reserved[dimension] == null ? null : BigInt(reserved[dimension]);
+        const occupied =
+          tokenUsed != null && tokenReserved != null
+            ? tokenUsed + tokenReserved
+            : null;
+        return `<div class="budget-item"><span>${label}</span><strong>${esc(show(occupied))} / ${esc(show(limits[limit]))}</strong><small>已用 ${esc(show(tokenUsed))} · 预留 ${esc(show(tokenReserved))}</small></div>`;
+      })
+      .join("");
+    return `<div class="budget-list"><small>已用＋预留 / 各自上限</small>${rows}<details><summary>用量明细</summary><p>模型调用 ${esc(show(used.LLM_CALLS))} 次</p></details></div>`;
+  } catch {
+    return "<p>预算账本不可用</p>";
+  }
+}
+function renderLegacyBudget(b, used = {}, reserved = {}) {
   if (!b) return "<p>预算账本不可用</p>";
   const limits = b.limits || b;
   const specs = [
@@ -1271,9 +1315,9 @@ function bumpStatus(s, error = false) {
     el.classList.toggle("error", error);
   }
 }
-function reviewBudgetPatch(fd) {
+function legacyReviewBudgetPatch(fd) {
   const patch = {};
-  for (const [, name, , type] of budgetFields) {
+  for (const [, name, , type] of legacyBudgetFields) {
     const v = String(fd.get(name) || "").trim();
     if (!v) continue;
     const key = name.replace("_mb", "");
@@ -1294,10 +1338,31 @@ function reviewBudgetPatch(fd) {
   }
   return patch;
 }
+function splitReviewBudgetPatch(fd) {
+  const patch = {};
+  for (const [label, name] of splitTokenBudgetFields) {
+    const value = String(fd.get(name) || "").trim();
+    if (!value) continue;
+    const tokens = int64String(value, label);
+    if (tokens !== "0") patch[name] = tokens;
+  }
+  return patch;
+}
+function reviewBudgetPatch(fd) {
+  const value = String(fd.get("max_llm_tokens") || "").trim();
+  if (!value) return {};
+  const tokens = int64String(value, "增加 token 数");
+  if (tokens === "0") throw Error("增加 token 数必须为正整数");
+  return { max_llm_tokens: tokens };
+}
 function renderReviewForm(id, d) {
   const panel = document.querySelector("#panel-" + state.tab);
   if (document.querySelector("#review-form")) return;
   const rv = d.review || {};
+  const limits = d.budget?.limits || d.budget || {};
+  const splitBudget = !!limits.split_token_budget;
+  const legacyBudget =
+    !splitBudget && !limits.token_budget && limits.max_llm_tokens == null;
   const currentStage = String(d.run?.current_stage || "");
   const targets =
     currentStage === "judge"
@@ -1324,17 +1389,19 @@ function renderReviewForm(id, d) {
         ([stage, label]) =>
           `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(label)}</option>`,
       )
-      .join(
-        "",
-      )}</select></label><details><summary>预算增加（仅用于重试）</summary><div class="fields">${budgetFields
-      .filter((x) => x[3] !== "hidden")
-      .map(
-        ([t, n]) =>
-          `<label>${t}<input name="${n}" placeholder="留空表示不调整"></label>`,
-      )
-      .join(
-        "",
-      )}</div></details><button class="primary" data-write type="submit">提交决定</button><button type="button" data-dismiss>收起评审，查看内容</button><p role="alert"></p><p>修订会从所选阶段重做并重新运行其后的全部验证；保存后仍需显式继续执行。</p></form>`,
+      .join("")}</select></label>${
+      splitBudget
+        ? '<div class="fields"><label>增加输入 token 数（仅用于重试）<input name="max_llm_input_tokens" inputmode="numeric" placeholder="留空表示不调整"></label><label>增加输出 token 数（仅用于重试）<input name="max_llm_output_tokens" inputmode="numeric" placeholder="留空表示不调整"></label></div>'
+        : legacyBudget
+          ? `<details><summary>历史任务预算增加（仅用于重试）</summary><div class="fields">${legacyBudgetFields
+              .filter((field) => field[3] !== "hidden")
+              .map(
+                ([label, name]) =>
+                  `<label>${label}<input name="${name}" placeholder="留空表示不调整"></label>`,
+              )
+              .join("")}</div></details>`
+          : '<label>增加 token 数（仅用于重试）<input name="max_llm_tokens" inputmode="numeric" placeholder="留空表示不调整"></label>'
+    }<button class="primary" data-write type="submit">提交决定</button><button type="button" data-dismiss>收起评审，查看内容</button><p role="alert"></p><p>修订会从所选阶段重做并重新运行其后的全部验证；保存后仍需显式继续执行。</p></form>`,
   );
   const f = document.querySelector("#review-form");
   f.querySelector("[data-dismiss]").onclick = () => {
@@ -1348,7 +1415,11 @@ function renderReviewForm(id, d) {
     const kind = fd.get("kind");
     let patch = {};
     try {
-      patch = reviewBudgetPatch(fd);
+      patch = splitBudget
+        ? splitReviewBudgetPatch(fd)
+        : legacyBudget
+          ? legacyReviewBudgetPatch(fd)
+          : reviewBudgetPatch(fd);
     } catch (err) {
       f.querySelector("[role=alert]").textContent = err.message;
       return;

@@ -45,16 +45,6 @@ artifacts:
   verified_reads: true
   max_single_artifact_bytes: 67108864
 
-budgets:
-  max_llm_calls: 40
-  max_llm_input_tokens: 200000
-  max_llm_output_tokens: 80000
-  max_llm_cost_microunits: 5000000
-  max_similarity_calls: 10
-  max_sandbox_runs: 200
-  max_artifact_bytes: 1073741824
-  max_active_wall_time: 30m
-
 llm:
   adapter: fake
   endpoint: ""
@@ -91,23 +81,32 @@ logging:
 
 ## 3. GenerationRequest
 
+当前请求使用 `cpgen.request/v1`；完整示例见 [mvp.request.yaml](../../config/mvp.request.yaml)。预算在请求中定义，不属于应用配置：
+
 ~~~yaml
-schema_version: 1
-title_hint: ""
-topic_tags: [graphs]
-difficulty:
-  lower: 1800
-  upper: 2200
-constraints:
-  time_limit_ms: 2000
-  memory_limit_mb: 512
-languages: [cpp]
-similarity:
-  required: true
-  threshold: 0.82
-output:
-  format: internal
+schema_version: cpgen.request/v1
+mode: manual
+brief: Generate an ordinary graph traversal problem with a brute-force oracle.
+tags: [graphs]
+normalized_tags: [graphs]
+language: en
+difficulty: hard
+required_features: []
+forbidden_features: []
+time_limit_milliseconds: 2000
+memory_limit_megabytes: 512
+solution_language: cpp
+seed: 9007199254740993
+verification_profile: default
+export_targets: [internal]
+budget_limits:
+  max_llm_input_tokens: 150000
+  max_llm_output_tokens: 50000
 ~~~
+
+`max_llm_input_tokens` 和 `max_llm_output_tokens` 分别限制整个 run 累计的输入和输出 token。新请求必须同时填写两项非负整数；额度独立，不能互相借用。两项均为 0 时禁止派发模型调用。重试、格式修复与内容重新生成均计入各自额度，缓存命中不新增模型 token 消耗。调用前分别预留输入和输出上界，返回可靠用量后结算实际值；无法确认用量时保守结算预留上界。模型身份及输入、输出用量仍单独记录，供后续按各自单价计费。
+
+其他调用、时间、容器和存储上限由系统默认策略提供。旧版完整多参数 `budget_limits` 继续兼容，旧 run 保持原有请求摘要、预算及计量语义。兼容的总额字段 `max_llm_tokens` 不能与输入、输出上限混用。
 
 请求字段严格解码。未知字段、重复键、非法 Unicode、非有限数值、不安全路径、不支持的语言、矛盾区间以及策略违规都会在创建 run 之前被拒绝。
 
@@ -119,7 +118,7 @@ output:
 - 私有目录权限；
 - 数据库、锁、制品、staging、trash 与看门狗路径不会以不安全方式相互别名；
 - 正的时长与有界整数；
-- 预算总量适配 SQLite 的精确整数表示；
+- token 预算为非负整数，适配 SQLite 的精确整数表示；
 - 镜像引用是不可变摘要；
 - 除非显式的本地测试策略另行允许，模型与查重端点使用 HTTPS；
 - 端点主机允许列表与重定向策略；
