@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -16,8 +17,30 @@ func TestGenerationArchiveRoundTripAndTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	verified, err := ReadArchive(ctx, raw)
-	if err != nil || verified.Manifest.PackageID != manifest.PackageID {
+	if err != nil {
 		t.Fatalf("archive read: %v", err)
+	}
+	if !reflect.DeepEqual(verified.Manifest, manifest) {
+		t.Fatal("archive read changed the manifest")
+	}
+	if len(verified.Files) != len(p.Files) {
+		t.Fatal("archive read changed the file count")
+	}
+	for _, want := range p.Files {
+		found := false
+		for _, got := range verified.Files {
+			if got.Entry.Path != want.Path {
+				continue
+			}
+			found = true
+			if got.Entry.Role != want.Role || !bytes.Equal(got.Bytes, want.Data) {
+				t.Fatalf("archive read changed file %s", want.Path)
+			}
+			break
+		}
+		if !found {
+			t.Fatalf("archive read omitted file %s", want.Path)
+		}
 	}
 	again, _, err := BuildArchive(ctx, p)
 	if err != nil || !bytes.Equal(raw, again) {

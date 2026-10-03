@@ -39,12 +39,17 @@ func (s *QualityReader) ReadInput(ctx context.Context, runID domain.RunID) (Qual
 }
 
 func (s *QualityReader) ReadReport(ctx context.Context, runID domain.RunID) (QualityReport, error) {
-	var empty QualityReport
-	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
-		return empty, err
+		return QualityReport{}, err
 	}
+	return s.readReportForInput(ctx, runID, input)
+}
+
+// readReportForInput reuses the current input already verified by ReadInput.
+func (s *QualityReader) readReportForInput(ctx context.Context, runID domain.RunID, input QualityInput) (QualityReport, error) {
+	var empty QualityReport
+	store := s.store
 	digest, err := stableValueDigest(input.JudgeReport)
 	if err != nil {
 		return empty, err
