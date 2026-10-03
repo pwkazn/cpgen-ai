@@ -21,6 +21,7 @@ go run ./cmd/cpgen --config config.yaml serve --listen 127.0.0.1:8080 --capacity
 ```powershell
 cd internal/web/ui
 npm ci
+npm test
 npm run build
 ```
 
