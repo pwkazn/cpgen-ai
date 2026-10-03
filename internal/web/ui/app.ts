@@ -18,6 +18,15 @@ const state = {
   detailTimer: 0,
   listTimer: 0,
   listRequest: 0,
+  listRows: [],
+  listCursor: "",
+  listLoaded: false,
+  listLoading: false,
+  listPolling: false,
+  listPaused: false,
+  listError: "",
+  listErrorMore: false,
+  listReviewOnly: false,
   lastSuccess: 0,
   listFilter: new URL(location.href).searchParams.get("state") || "",
   tab: "statement",
@@ -56,7 +65,10 @@ function apiError(obj, status) {
     field: e.field || "",
   });
 }
-async function api(path, { method = "GET", body, signal } = {}) {
+async function api(
+  path,
+  { method = "GET", body, signal, reportConnection = true } = {},
+) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -97,7 +109,7 @@ async function api(path, { method = "GET", body, signal } = {}) {
     });
   } catch (e) {
     if (pendingKey) state.pendingActions.get(pendingKey).sending = false;
-    if (e.name !== "AbortError") setOnline(false);
+    if (reportConnection && e.name !== "AbortError") setOnline(false);
     throw e;
   }
   if (pendingKey) {
@@ -109,18 +121,18 @@ async function api(path, { method = "GET", body, signal } = {}) {
     try {
       data = await res.json();
     } catch {}
-    setOnline(true);
+    if (reportConnection) setOnline(true);
     throw apiError(data, res.status);
   }
   if (res.headers.get("content-type")?.includes("application/json")) {
     const x = await res.json();
     if (pendingKey) state.pendingActions.delete(pendingKey);
-    state.lastSuccess = Date.now();
+    if (reportConnection) state.lastSuccess = Date.now();
     return x.data ?? x;
   }
   const result = await res.text();
   if (pendingKey) state.pendingActions.delete(pendingKey);
-  state.lastSuccess = Date.now();
+  if (reportConnection) state.lastSuccess = Date.now();
   return result;
 }
 function setOnline(v) {
@@ -191,65 +203,45 @@ function runTitle(r) {
     "未命名任务"
   );
 }
-function filterRuns(rows) {
-  if (!state.listFilter) return rows;
-  const f = state.listFilter;
-  return rows.filter((r) => {
-    const s = r.state;
-    return f === "active"
-      ? ["CREATED", "RUNNING"].includes(s)
-      : f === "ended"
-        ? ["FAILED", "CANCELLED"].includes(s)
-        : f === "blocked"
-          ? s === "BLOCKED"
-          : f === "ready"
-            ? s === "READY"
-            : s === f;
-  });
-}
-async function listPage(reviewOnly = false) {
-  const route = state.route;
-  const request = ++state.listRequest;
-  clearInterval(state.detailTimer);
-  try {
-    const serverState = reviewOnly
-      ? "NEEDS_REVIEW"
-      : ["NEEDS_REVIEW", "BLOCKED", "READY", "FAILED", "CANCELLED"].includes(
-            state.listFilter,
-          )
-        ? state.listFilter
-        : "";
-    const d = await api(
-      "/runs?limit=1000" + (serverState ? "&state=" + serverState : ""),
-    );
-    if (route !== state.route || request !== state.listRequest) return;
-    setOnline(true);
-    const all = Array.isArray(d.runs) ? d.runs : [];
-    const rows = reviewOnly ? all : filterRuns(all);
-    const controls = reviewOnly
-      ? ""
-      : `<div class="filters" aria-label="任务状态筛选">${[
-          ["全部", ""],
-          ["进行中", "active"],
-          ["待评审", "NEEDS_REVIEW"],
-          ["受阻", "blocked"],
-          ["可导出", "ready"],
-          ["已结束", "ended"],
-        ]
-          .map(
-            ([t, v]) =>
-              `<button data-filter="${v}" aria-pressed="${state.listFilter === v}">${t}</button>`,
-          )
-          .join("")}</div>`;
-    const content = `<div class="list-tools">${controls}<div class="list-summary" role="status">显示 ${rows.length} 项<span class="muted"> · 最近 ${all.length} 项${all.length >= (d.limit || 50) ? `（最多 ${esc(d.limit || 50)} 项）` : ""}</span></div></div>${
-      rows.length
-        ? `<div class="table-wrap"><table class="run-table" aria-label="${reviewOnly ? "待评审任务" : "生成任务"}"><thead><tr><th scope="col" class="col-title">题目名称</th><th scope="col" class="col-state">状态</th><th scope="col" class="col-stage">当前阶段</th><th scope="col" class="col-created">创建时间</th><th scope="col" class="col-updated">更新时间</th></tr></thead><tbody>${rows
-            .map((r) => {
-              const id = r.run_id || r.id;
-              const path = idUrl(id) + (reviewOnly ? "/review" : "");
-              return `<tr><td class="col-title"><a class="run-link run-title" href="${path}" data-nav="${path}" title="${esc(runTitle(r))}">${esc(runTitle(r))}</a><div class="mono muted run-id" title="${esc(id)}">${esc(id)}</div></td><td class="col-state">${statusBadge(r.state)}</td><td class="col-stage">${esc(r.current_stage || r.stage || "—")}</td><td class="col-created">${esc(humanDate(r.created_at))}</td><td class="col-updated">${esc(humanDate(r.updated_at))}</td></tr>`;
-            })
-            .join("")}</tbody></table></div>`
+function renderListPage(reviewOnly) {
+  const rows = state.listRows;
+  const controls = reviewOnly
+    ? ""
+    : `<div class="filters" aria-label="任务状态筛选">${[
+        ["全部", ""],
+        ["进行中", "active"],
+        ["待评审", "NEEDS_REVIEW"],
+        ["受阻", "blocked"],
+        ["可导出", "ready"],
+        ["已结束", "ended"],
+      ]
+        .map(
+          ([t, v]) =>
+            `<button data-filter="${v}" aria-pressed="${state.listFilter === v}">${t}</button>`,
+        )
+        .join("")}</div>`;
+  const summary = state.listLoading
+    ? "正在加载…"
+    : !state.listLoaded
+      ? "尚未读取任务"
+      : state.listCursor
+        ? "可加载更多"
+        : "没有更多任务";
+  const content = `<div class="list-tools">${controls}<button data-list-refresh aria-disabled="${state.listLoading}">${state.listError && !state.listErrorMore ? "重试刷新" : "刷新列表"}</button></div>${
+    state.listError
+      ? `<p class="empty error" role="alert">读取任务失败：${esc(state.listError)}。${state.listErrorMore ? "已保留当前任务，可重试加载更多。" : state.listLoaded ? "已保留最近一次成功读取，可重试刷新。" : "请重试刷新。"}</p>`
+      : ""
+  }<div aria-busy="${state.listLoading}">${
+    rows.length
+      ? `<div class="table-wrap"><table class="run-table" aria-label="${reviewOnly ? "待评审任务" : "生成任务"}"><thead><tr><th scope="col" class="col-title">题目名称</th><th scope="col" class="col-state">状态</th><th scope="col" class="col-stage">当前阶段</th><th scope="col" class="col-created">创建时间</th><th scope="col" class="col-updated">更新时间</th></tr></thead><tbody>${rows
+          .map((r) => {
+            const id = r.run_id || r.id;
+            const path = idUrl(id) + (reviewOnly ? "/review" : "");
+            return `<tr><td class="col-title"><a class="run-link run-title" href="${path}" data-nav="${path}" title="${esc(runTitle(r))}">${esc(runTitle(r))}</a><div class="mono muted run-id" title="${esc(id)}">${esc(id)}</div></td><td class="col-state">${statusBadge(r.state)}</td><td class="col-stage">${esc(r.current_stage || r.stage || "—")}</td><td class="col-created">${esc(humanDate(r.created_at))}</td><td class="col-updated">${esc(humanDate(r.updated_at))}</td></tr>`;
+          })
+          .join("")}</tbody></table></div>`
+      : !state.listLoaded
+        ? ""
         : reviewOnly
           ? emptyState(
               "当前没有待评审任务",
@@ -269,46 +261,136 @@ async function listPage(reviewOnly = false) {
                 "从出题要求开始，生成题面、题解与测试数据。",
                 '<button class="primary" data-nav="/runs/new">新建题目</button>',
               )
-    }`;
-    const focused = app.contains(document.activeElement)
-      ? document.activeElement
-      : null;
-    const focusFilter = focused?.dataset.filter;
-    const focusPath = focused?.dataset.nav;
-    app.innerHTML = common(
-      reviewOnly ? "待评审" : "生成任务",
-      content,
-      reviewOnly
-        ? "查看触发原因与运行证据，提交决定后继续执行。"
-        : "跟踪生成进度，审阅内容与核验结果，导出题包。",
+  }</div><div class="list-tools list-pagination"><div class="list-summary" data-list-summary role="status" tabindex="-1">已加载 ${rows.length} 项 · ${summary}${state.listPaused ? " · 自动刷新已暂停；刷新列表可查看最新任务" : ""}</div>${
+    state.listCursor
+      ? `<button data-list-more aria-disabled="${state.listLoading}">${state.listErrorMore ? "重试加载更多" : "加载更多"}</button>`
+      : ""
+  }</div>`;
+  const focused = app.contains(document.activeElement)
+    ? document.activeElement
+    : null;
+  const focusFilter = focused?.dataset.filter;
+  const focusPath = focused?.dataset.nav;
+  const focusMore = focused?.hasAttribute("data-list-more");
+  const focusRefresh = focused?.hasAttribute("data-list-refresh");
+  app.innerHTML = common(
+    reviewOnly ? "待评审" : "生成任务",
+    content,
+    reviewOnly
+      ? "查看触发原因与运行证据，提交决定后继续执行。"
+      : "跟踪生成进度，审阅内容与核验结果，导出题包。",
+  );
+  let focusTarget;
+  if (focusFilter !== undefined) {
+    focusTarget = [...app.querySelectorAll("[data-filter]")].find(
+      (b) => b.dataset.filter === focusFilter,
     );
-    if (focusFilter !== undefined) {
-      [...app.querySelectorAll("[data-filter]")]
-        .find((b) => b.dataset.filter === focusFilter)
-        ?.focus({ preventScroll: true });
-    } else if (focusPath) {
-      [...app.querySelectorAll("[data-nav]")]
-        .find((b) => b.dataset.nav === focusPath)
-        ?.focus({ preventScroll: true });
+  } else if (focusPath) {
+    focusTarget = [...app.querySelectorAll("[data-nav]")].find(
+      (b) => b.dataset.nav === focusPath,
+    );
+  } else if (focusMore) {
+    focusTarget = app.querySelector("[data-list-more]");
+  } else if (focusRefresh) {
+    focusTarget = app.querySelector("[data-list-refresh]");
+  }
+  if (focused)
+    (focusTarget || app.querySelector("[data-list-summary]"))?.focus({
+      preventScroll: true,
+    });
+  app.querySelector("[data-list-refresh]").onclick = () => {
+    if (!state.listLoading || state.listPolling) return listPage(reviewOnly);
+  };
+  const more = app.querySelector("[data-list-more]");
+  if (more) more.onclick = () => listPage(reviewOnly, { more: true });
+  if (!reviewOnly) {
+    app.querySelectorAll("[data-filter]").forEach(
+      (b) =>
+        (b.onclick = () => {
+          state.listFilter = b.dataset.filter;
+          const u = new URL(location.href);
+          if (state.listFilter) u.searchParams.set("state", state.listFilter);
+          else u.searchParams.delete("state");
+          history.pushState({}, "", u);
+          return listPage(false, { reset: true });
+        }),
+    );
+  }
+}
+async function listPage(
+  reviewOnly = false,
+  { more = false, reset = false, poll = false } = {},
+) {
+  if (
+    !reset &&
+    ((state.listLoading && !(state.listPolling && !poll)) ||
+      (more && !state.listCursor))
+  )
+    return;
+  if (reset) {
+    state.listRows = [];
+    state.listCursor = "";
+    state.listLoaded = false;
+    state.listPaused = false;
+  }
+  const route = state.route;
+  const request = ++state.listRequest;
+  const filter = state.listFilter;
+  const cursor = more ? state.listCursor : "";
+  state.listReviewOnly = reviewOnly;
+  state.listLoading = true;
+  state.listPolling = poll;
+  state.listError = "";
+  state.listErrorMore = false;
+  // Paging pauses polling immediately, including while a page is in flight.
+  if (more) state.listPaused = true;
+  clearInterval(state.detailTimer);
+  if (!poll) renderListPage(reviewOnly);
+  const current = () =>
+    route === state.route &&
+    request === state.listRequest &&
+    filter === state.listFilter &&
+    reviewOnly === state.listReviewOnly;
+  try {
+    const serverState = reviewOnly ? "NEEDS_REVIEW" : filter;
+    const d = await api(
+      "/runs?limit=50" +
+        (serverState ? "&state=" + encodeURIComponent(serverState) : "") +
+        (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""),
+      { reportConnection: false },
+    );
+    if (!current()) return;
+    const rows = Array.isArray(d.runs) ? d.runs : [];
+    if (more) {
+      const seen = new Set(state.listRows.map((r) => r.run_id || r.id));
+      state.listRows = [
+        ...state.listRows,
+        ...rows.filter((r) => {
+          const id = r.run_id || r.id;
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        }),
+      ];
+    } else {
+      state.listRows = rows;
+      state.listPaused = false;
     }
-    if (!reviewOnly) {
-      document.querySelectorAll("[data-filter]").forEach(
-        (b) =>
-          (b.onclick = () => {
-            state.listFilter = b.dataset.filter;
-            const u = new URL(location.href);
-            if (state.listFilter) u.searchParams.set("state", state.listFilter);
-            else u.searchParams.delete("state");
-            history.pushState({}, "", u);
-            listPage();
-          }),
-      );
-    }
+    state.listCursor = d.next_cursor || "";
+    state.listLoaded = true;
+    state.lastSuccess = Date.now();
+    setOnline(true);
   } catch (e) {
-    if (route !== state.route || request !== state.listRequest) return;
+    if (!current()) return;
+    state.listError = e.message;
+    state.listErrorMore = more;
     fail(e);
-    if (!app.querySelector(".list-tools"))
-      app.innerHTML = `<div class="empty error" role="alert">读取任务失败：${esc(e.message)} <button data-retry>重试</button></div>`;
+  } finally {
+    if (current()) {
+      state.listLoading = false;
+      state.listPolling = false;
+      renderListPage(reviewOnly);
+    }
   }
 }
 function moneyToMicro(v) {
@@ -1452,19 +1534,19 @@ async function renderRoute() {
   }
   if (p === "/reviews") {
     state.reviewRoute = false;
-    return listPage(true);
+    return listPage(true, { reset: true });
   }
   if (p === "/runs" || p === "/runs/") {
     state.reviewRoute = false;
     state.listFilter = new URL(location.href).searchParams.get("state") || "";
-    return listPage(false);
+    return listPage(false, { reset: true });
   }
   const parts = p.split("/").filter(Boolean);
   if (parts[0] === "runs" && parts[1]) {
     state.reviewRoute = parts[2] === "review";
     return detailPage(decodeURIComponent(parts[1]));
   }
-  return listPage(false);
+  return listPage(false, { reset: true });
 }
 document.addEventListener("click", (e) => {
   const n = e.target.closest("[data-nav]");
@@ -1520,15 +1602,21 @@ document.addEventListener("keydown", (e) => {
     all[j].click();
   }
 });
+function isListRoute() {
+  return ["/runs", "/runs/", "/reviews"].includes(location.pathname);
+}
+function maybeListPoll() {
+  if (
+    !document.hidden &&
+    isListRoute() &&
+    !state.listPaused &&
+    !state.listLoading
+  )
+    return listPage(location.pathname === "/reviews", { poll: true });
+}
 function scheduleListPoll() {
   clearInterval(state.listTimer);
-  state.listTimer = setInterval(
-    () => {
-      if (!document.hidden && ["/runs", "/reviews"].includes(location.pathname))
-        renderRoute();
-    },
-    document.hidden ? 15000 : 5000,
-  );
+  state.listTimer = setInterval(maybeListPoll, document.hidden ? 15000 : 5000);
 }
 window.addEventListener("popstate", () => {
   state.editing = false;
@@ -1536,16 +1624,15 @@ window.addEventListener("popstate", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (state.editing) return;
-  if (
+  if (isListRoute()) {
+    scheduleListPoll();
+    maybeListPoll();
+  } else if (
     location.pathname.startsWith("/runs/") &&
     location.pathname !== "/runs/new" &&
     !state.editing
   )
     renderRoute();
-  else if (["/runs", "/reviews"].includes(location.pathname)) {
-    scheduleListPoll();
-    renderRoute();
-  }
 });
 async function start() {
   const u = new URL(location.href);

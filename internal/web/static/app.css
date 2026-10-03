@@ -74,7 +74,8 @@ button:hover:not(:disabled),
 .button:hover {
   background: var(--soft);
 }
-button:disabled {
+button:disabled,
+button[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.5;
 }
@@ -358,6 +359,9 @@ body > footer {
   background: var(--bg);
   border-bottom: 1px solid var(--line);
   padding-right: 14px;
+}
+.list-pagination {
+  padding: 8px 14px;
 }
 .filters {
   display: flex;
