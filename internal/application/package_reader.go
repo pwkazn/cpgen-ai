@@ -33,7 +33,7 @@ func (s *PackageReader) Assemble(ctx context.Context, view domain.RunView) (pack
 	if err != nil {
 		return empty, QualityReport{}, err
 	}
-	quality, err := s.quality.ReadReport(ctx, view.RunID())
+	quality, err := s.quality.readReportForInput(ctx, view.RunID(), input)
 	if err != nil || !quality.Passed {
 		return empty, quality, errors.Join(err, errors.New("package requires current passing Quality"))
 	}
@@ -216,7 +216,9 @@ func (s *PackageReader) ReadArchive(ctx context.Context, runID domain.RunID) ([]
 	if !bytes.Equal(raw, expected) {
 		return nil, empty, errors.New("committed package bytes differ")
 	}
-	if _, err := packageprobe.ReadArchive(ctx, raw); err != nil {
+	// BuildArchive validated every member and emitted the canonical ZIP. Exact
+	// byte equality above makes another full archive read and re-encode redundant.
+	if err := ctx.Err(); err != nil {
 		return nil, empty, err
 	}
 	return raw, record, nil
