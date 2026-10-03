@@ -44,9 +44,6 @@ type apiError struct {
 type eventHistoryReader interface {
 	EventsBefore(context.Context, domain.RunID, int64, int) ([]domain.RunEvent, error)
 }
-type recentRunReader interface {
-	WorkbenchRecentRuns(context.Context, domain.RunFilter) ([]port.WorkbenchRunSummary, error)
-}
 
 type Server struct {
 	app                  *application.Application
@@ -302,35 +299,32 @@ func (s *Server) list(c *gin.Context) {
 		}
 		limit = n
 	}
-	filter := domain.RunFilter{Limit: limit}
-	if state != "" {
-		v := domain.RunState(state)
-		if !v.Valid() {
-			writeErr(c, 400, "invalid_state", "任务状态无效")
-			return
-		}
-		filter.State = &v
+	query := port.WorkbenchRunQuery{State: state, Limit: limit, Cursor: c.Query("cursor")}
+	if err := query.Validate(); err != nil {
+		writeErr(c, 400, "invalid_state", "任务状态无效")
+		return
 	}
-	reader, ok := s.app.Runtime.(recentRunReader)
+	reader, ok := s.app.Runtime.(port.WorkbenchRunListReader)
 	if !ok {
 		writeErr(c, 500, "unsupported_read", "任务列表读接口不可用")
 		return
 	}
-	rows, err := reader.WorkbenchRecentRuns(c.Request.Context(), filter)
+	page, err := reader.WorkbenchRuns(c.Request.Context(), query)
 	if err != nil {
+		if errors.Is(err, port.ErrInvalidWorkbenchRunQuery) {
+			writeErr(c, 400, "invalid_argument", "分页游标无效或与当前筛选条件不匹配")
+			return
+		}
 		writeError(c, err)
 		return
 	}
-	if rows == nil {
-		rows = []port.WorkbenchRunSummary{}
-	}
-	runRows := make([]runSummaryDTO, 0, len(rows))
-	for _, row := range rows {
+	runRows := make([]runSummaryDTO, 0, len(page.Runs))
+	for _, row := range page.Runs {
 		dto := toRunSummaryDTO(row.RunSummary)
 		dto.Brief = row.Brief
 		runRows = append(runRows, dto)
 	}
-	c.JSON(200, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"runs": runRows, "limit": limit, "scope": "recent"}})
+	c.JSON(200, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"runs": runRows, "limit": limit, "scope": "recent", "next_cursor": page.NextCursor}})
 }
 
 func decodeBody(c *gin.Context, dst any) error {
