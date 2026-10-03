@@ -464,7 +464,7 @@ func prepareReviewMutation(kind string, args []string) (*preparedCommand, *comma
 		flags.StringVar(&options.step, "step", "", "step")
 		flags.StringVar(&options.patchPath, "patch", "", "revision patch")
 	case "retry":
-		flags.StringVar(&options.budgetPath, "budget-patch", "", "budget patch")
+		flags.StringVar(&options.budgetPath, "budget-patch", "", "JSON/YAML input/output token increases")
 		flags.StringVar(&options.evidence, "evidence", "", "evidence digest")
 	case "waive":
 		flags.StringVar(&options.gate, "gate", "", "waivable gate digest")
@@ -559,7 +559,8 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 		if readErr != nil {
 			return writeStateError(stdout, stderr, 2, "budget_invalid", readErr)
 		}
-		if err := json.Unmarshal(data, &request.BudgetIncrease); err != nil {
+		request.BudgetIncrease, err = decodeBudgetPatch(data)
+		if err != nil {
 			return writeStateError(stdout, stderr, 2, "budget_invalid", err)
 		}
 	}
@@ -605,23 +606,7 @@ func loadRequest(path string) (domain.RunRequest, error) {
 	if err != nil {
 		return domain.RunRequest{}, err
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	var node yaml.Node
-	if err := decoder.Decode(&node); err != nil {
-		return domain.RunRequest{}, err
-	}
-	var trailing yaml.Node
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return domain.RunRequest{}, errors.New("request contains trailing YAML document")
-		}
-		return domain.RunRequest{}, err
-	}
-	var value any
-	if err := node.Decode(&value); err != nil {
-		return domain.RunRequest{}, err
-	}
-	jsonBytes, err := json.Marshal(value)
+	jsonBytes, err := decodeYAMLDocument(data)
 	if err != nil {
 		return domain.RunRequest{}, err
 	}
@@ -631,10 +616,103 @@ func loadRequest(path string) (domain.RunRequest, error) {
 	if err := jsonDecoder.Decode(&request); err != nil {
 		return domain.RunRequest{}, err
 	}
+	var fields struct {
+		BudgetLimits json.RawMessage `json:"budget_limits"`
+	}
+	if err := json.Unmarshal(jsonBytes, &fields); err != nil {
+		return domain.RunRequest{}, err
+	}
+	if len(fields.BudgetLimits) != 0 {
+		request.BudgetLimits, err = decodeSubmittedBudget(fields.BudgetLimits, true)
+		if err != nil {
+			return domain.RunRequest{}, fmt.Errorf("budget_limits: %w", err)
+		}
+	}
 	if err := request.Validate(); err != nil {
 		return domain.RunRequest{}, err
 	}
 	return request, nil
+}
+
+// decodeYAMLDocument also accepts JSON and retains integer precision while
+// rejecting duplicate keys and trailing documents before JSON decoding.
+func decodeYAMLDocument(data []byte) ([]byte, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var node yaml.Node
+	if err := decoder.Decode(&node); err != nil {
+		return nil, err
+	}
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("input contains trailing YAML document")
+		}
+		return nil, err
+	}
+	var value any
+	if err := node.Decode(&value); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
+
+func decodeBudgetPatch(data []byte) (domain.BudgetLimits, error) {
+	jsonBytes, err := decodeYAMLDocument(data)
+	if err != nil {
+		return domain.BudgetLimits{}, err
+	}
+	return decodeSubmittedBudget(jsonBytes, false)
+}
+
+// Generation requests receive system execution limits; retry patches contain
+// only approved increases, so applying defaults to a patch would raise unrelated
+// limits. Legacy requests retain their exact limits for persisted identities.
+func decodeSubmittedBudget(data []byte, generation bool) (domain.BudgetLimits, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return domain.BudgetLimits{}, err
+	}
+	for _, marker := range []string{"token_budget", "split_token_budget"} {
+		if _, present := fields[marker]; present {
+			return domain.BudgetLimits{}, fmt.Errorf("%s is internal; use max_llm_input_tokens and max_llm_output_tokens", marker)
+		}
+	}
+	_, tokensPresent := fields["max_llm_tokens"]
+	if tokensPresent {
+		if len(fields) != 1 {
+			return domain.BudgetLimits{}, errors.New("max_llm_tokens cannot be combined with legacy budget fields")
+		}
+	}
+	splitOnly := len(fields) != 0
+	for name := range fields {
+		if name != "max_llm_input_tokens" && name != "max_llm_output_tokens" {
+			splitOnly = false
+		}
+	}
+	if splitOnly && generation && len(fields) != 2 {
+		return domain.BudgetLimits{}, errors.New("max_llm_input_tokens and max_llm_output_tokens are both required")
+	}
+	for _, name := range []string{"max_llm_tokens", "max_llm_input_tokens", "max_llm_output_tokens"} {
+		if bytes.Equal(bytes.TrimSpace(fields[name]), []byte("null")) {
+			return domain.BudgetLimits{}, fmt.Errorf("%s must be a non-negative integer", name)
+		}
+	}
+	var limits domain.BudgetLimits
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&limits); err != nil {
+		return domain.BudgetLimits{}, err
+	}
+	if err := limits.Validate(); err != nil {
+		return domain.BudgetLimits{}, err
+	}
+	if tokensPresent && generation {
+		return domain.NewTokenBudgetLimits(limits.MaxLLMTokens)
+	}
+	if splitOnly && generation {
+		return domain.NewSplitTokenBudgetLimits(limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens)
+	}
+	return limits, nil
 }
 
 func canonicalPath(path string) (string, error) {

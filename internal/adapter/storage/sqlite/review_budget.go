@@ -24,15 +24,24 @@ func insertInitialRunBudgetBaseline(ctx context.Context, tx *immediateTx, runID 
 		// stores always have this table before CreateRun is exposed.
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO run_budget_baselines(
+	tokenColumns, tokenValues := "", ""
+	if limits.UsesTokenBudget() {
+		tokenColumns, tokenValues = ",max_llm_tokens,token_budget", ",?,?"
+	}
+	query := `INSERT INTO run_budget_baselines(
 		run_id,max_llm_calls,max_similarity_calls,max_llm_input_tokens,max_llm_output_tokens,
 		max_llm_cost_micro_usd,max_similarity_cost_micro_usd,max_sandbox_creates,max_artifact_bytes,
-		max_package_bytes,max_mutations_per_stage,max_active_time_ns
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		max_package_bytes,max_mutations_per_stage,max_active_time_ns` + tokenColumns + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?` + tokenValues + `)`
+	args := []any{
 		string(runID), limits.MaxLLMCalls, limits.MaxSimilarityCalls, limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens,
 		limits.MaxLLMCostMicroUSD, limits.MaxSimilarityCostMicroUSD, limits.MaxSandboxCreates, limits.MaxArtifactBytes,
-		limits.MaxPackageBytes, limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds*activeTimeNSPerMillisecond,
-	)
+		limits.MaxPackageBytes, limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds * activeTimeNSPerMillisecond,
+	}
+	if limits.UsesTokenBudget() {
+		args = append(args, limits.MaxLLMTokens, limits.TokenBudget)
+	}
+	_, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert immutable run budget baseline: %w", err)
 	}
@@ -49,6 +58,7 @@ type reviewBudgetField struct {
 
 func reviewBudgetFields(increase domain.BudgetLimits) []reviewBudgetField {
 	fields := []reviewBudgetField{
+		{name: "max_llm_tokens", delta: increase.MaxLLMTokens, runColumn: "max_llm_tokens", factor: 1},
 		{name: "max_llm_calls", delta: increase.MaxLLMCalls, runColumn: "max_llm_calls", dimension: domain.BudgetLLMCalls, factor: 1},
 		{name: "max_similarity_calls", delta: increase.MaxSimilarityCalls, runColumn: "max_similarity_calls", dimension: domain.BudgetSimilarityCalls, factor: 1},
 		{name: "max_llm_input_tokens", delta: increase.MaxLLMInputTokens, runColumn: "max_llm_input_tokens", dimension: domain.BudgetLLMInputTokens, factor: 1},
@@ -70,6 +80,8 @@ func reviewBudgetFields(increase domain.BudgetLimits) []reviewBudgetField {
 }
 
 type runBudgetCaps struct {
+	llmTokens                                                  int64
+	tokenBudget                                                bool
 	llmCalls, similarityCalls, llmInputTokens, llmOutputTokens int64
 	llmCost, similarityCost, sandboxCreates, artifactBytes     int64
 	packageBytes, mutationQuota, activeTimeNS                  int64
@@ -79,16 +91,18 @@ func readRunBudgetCapsTx(ctx context.Context, tx rowQuerier, runID domain.RunID)
 	var caps runBudgetCaps
 	err := tx.QueryRowContext(ctx, `SELECT max_llm_calls,max_similarity_calls,max_llm_input_tokens,max_llm_output_tokens,
 		max_llm_cost_micro_usd,max_similarity_cost_micro_usd,max_sandbox_creates,max_artifact_bytes,
-		max_package_bytes,max_mutations_per_stage,max_active_time_ns FROM runs WHERE run_id=?`, string(runID)).Scan(
+		max_package_bytes,max_mutations_per_stage,max_active_time_ns,max_llm_tokens,token_budget FROM runs WHERE run_id=?`, string(runID)).Scan(
 		&caps.llmCalls, &caps.similarityCalls, &caps.llmInputTokens, &caps.llmOutputTokens,
 		&caps.llmCost, &caps.similarityCost, &caps.sandboxCreates, &caps.artifactBytes,
-		&caps.packageBytes, &caps.mutationQuota, &caps.activeTimeNS,
+		&caps.packageBytes, &caps.mutationQuota, &caps.activeTimeNS, &caps.llmTokens, &caps.tokenBudget,
 	)
 	return caps, err
 }
 
 func budgetCapValue(caps runBudgetCaps, column string) int64 {
 	switch column {
+	case "max_llm_tokens":
+		return caps.llmTokens
 	case "max_llm_calls":
 		return caps.llmCalls
 	case "max_similarity_calls":
@@ -118,6 +132,9 @@ func validateReviewBudgetFitsTx(ctx context.Context, tx rowQuerier, runID domain
 	caps, err := readRunBudgetCapsTx(ctx, tx, runID)
 	if err != nil {
 		return err
+	}
+	if increase.MaxLLMTokens > 0 && !caps.tokenBudget && caps.llmTokens == 0 {
+		return wrap(ErrConsistency, "a shared token increase requires a token-budget run", nil)
 	}
 	var baselineCount int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM run_budget_baselines WHERE run_id=?`, string(runID)).Scan(&baselineCount); err != nil {
@@ -225,11 +242,11 @@ func applyRetryBudgetTx(ctx context.Context, tx *immediateTx, decision domain.Re
 		max_llm_input_tokens=max_llm_input_tokens+?, max_llm_output_tokens=max_llm_output_tokens+?,
 		max_llm_cost_micro_usd=max_llm_cost_micro_usd+?, max_similarity_cost_micro_usd=max_similarity_cost_micro_usd+?,
 		max_sandbox_creates=max_sandbox_creates+?, max_artifact_bytes=max_artifact_bytes+?,
-		max_package_bytes=max_package_bytes+?, max_active_time_ns=max_active_time_ns+?,
+		max_package_bytes=max_package_bytes+?, max_active_time_ns=max_active_time_ns+?, max_llm_tokens=max_llm_tokens+?,
 		state=?,version=?,updated_at=? WHERE run_id=?`,
 		values["max_llm_calls"], values["max_similarity_calls"], values["max_llm_input_tokens"], values["max_llm_output_tokens"],
 		values["max_llm_cost_micro_usd"], values["max_similarity_cost_micro_usd"], values["max_sandbox_creates"], values["max_artifact_bytes"],
-		values["max_package_bytes"], values["max_active_time_ns"], string(state), version, formatTime(at), string(decision.RunID),
+		values["max_package_bytes"], values["max_active_time_ns"], values["max_llm_tokens"], string(state), version, formatTime(at), string(decision.RunID),
 	)
 	if err != nil {
 		return fmt.Errorf("apply retry run budget projection: %w", err)

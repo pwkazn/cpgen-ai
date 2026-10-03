@@ -15,6 +15,9 @@ import (
 type BudgetDimension string
 
 const (
+	// BudgetLLMTokens is a computed projection of the input/output accounts,
+	// never an additional physical reservation or a second usage charge.
+	BudgetLLMTokens                BudgetDimension = "LLM_TOKENS"
 	BudgetLLMCalls                 BudgetDimension = "LLM_CALLS"
 	BudgetLLMInputTokens           BudgetDimension = "LLM_INPUT_TOKENS"
 	BudgetLLMOutputTokens          BudgetDimension = "LLM_OUTPUT_TOKENS"
@@ -28,7 +31,7 @@ const (
 
 func (v BudgetDimension) Valid() bool {
 	switch v {
-	case BudgetLLMCalls, BudgetLLMInputTokens, BudgetLLMOutputTokens, BudgetExternalCostMicroUSD,
+	case BudgetLLMTokens, BudgetLLMCalls, BudgetLLMInputTokens, BudgetLLMOutputTokens, BudgetExternalCostMicroUSD,
 		BudgetSimilarityCalls, BudgetSimilarityCostMicroUSD, BudgetDockerContainerCreates,
 		BudgetArtifactPhysicalNewBytes, BudgetActiveTimeNS:
 		return true

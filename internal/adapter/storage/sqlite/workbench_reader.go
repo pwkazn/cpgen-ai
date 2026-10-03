@@ -73,10 +73,21 @@ func (s *Store) ReadWorkbenchRun(ctx context.Context, runID domain.RunID) (port.
 		return out, err
 	}
 	var extra struct{ MaxPackageBytes, MaxMutationsPerStage int64 }
-	if err := tx.QueryRowContext(ctx, `SELECT max_package_bytes,max_mutations_per_stage FROM runs WHERE run_id=?`, string(runID)).Scan(&extra.MaxPackageBytes, &extra.MaxMutationsPerStage); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max_package_bytes,max_mutations_per_stage,max_llm_tokens,token_budget,
+		COALESCE(json_extract(submitted_request_json,'$.budget_limits.split_token_budget'),0) FROM runs WHERE run_id=?`, string(runID)).Scan(&extra.MaxPackageBytes, &extra.MaxMutationsPerStage, &out.Budget.Limits.MaxLLMTokens, &out.Budget.Limits.TokenBudget, &out.Budget.Limits.SplitTokenBudget); err != nil {
 		return out, err
 	}
 	out.Budget.Limits.MaxPackageBytes, out.Budget.Limits.MaxMutationsPerStage = extra.MaxPackageBytes, extra.MaxMutationsPerStage
+	if out.Budget.Limits.UsesTokenBudget() {
+		remaining, _, err := remainingLLMTokens(ctx, tx, runID)
+		if err != nil {
+			return out, err
+		}
+		out.Budget.Remaining[domain.BudgetLLMTokens] = remaining
+		// remainingLLMTokens validated the sum against an int64 cap.
+		out.BudgetUsed[domain.BudgetLLMTokens] = out.BudgetUsed[domain.BudgetLLMInputTokens] + out.BudgetUsed[domain.BudgetLLMOutputTokens]
+		out.BudgetReserved[domain.BudgetLLMTokens] = out.BudgetReserved[domain.BudgetLLMInputTokens] + out.BudgetReserved[domain.BudgetLLMOutputTokens]
+	}
 	if err := out.Budget.Validate(); err != nil {
 		return out, wrap(ErrConsistency, "budget snapshot invalid", err)
 	}

@@ -405,6 +405,17 @@ func (s *Server) execute(ctx context.Context, id domain.RunID) error {
 }
 
 func parseBudget(b budgetDTO) (domain.BudgetLimits, error) {
+	tokenBudget, err := b.usesTokenBudget()
+	if err != nil {
+		return domain.BudgetLimits{}, err
+	}
+	if tokenBudget {
+		tokens, err := strconv.ParseInt(b.MaxLLMTokens, 10, 64)
+		if err != nil || tokens < 0 {
+			return domain.BudgetLimits{}, errors.New("max_llm_tokens must be non-negative integer string")
+		}
+		return domain.BudgetLimits{MaxLLMTokens: tokens}, nil
+	}
 	parse := func(name, value string) (int64, error) {
 		if value == "" {
 			return 0, nil
@@ -415,8 +426,30 @@ func parseBudget(b budgetDTO) (domain.BudgetLimits, error) {
 		}
 		return n, nil
 	}
+	if b.usesSplitTokenBudget() {
+		var increase domain.BudgetLimits
+		for _, field := range []struct {
+			name, value string
+			dst         *int64
+		}{
+			{"max_llm_input_tokens", b.MaxLLMInputTokens, &increase.MaxLLMInputTokens},
+			{"max_llm_output_tokens", b.MaxLLMOutputTokens, &increase.MaxLLMOutputTokens},
+		} {
+			_, present := b.fields[field.name]
+			if !present && field.value == "" {
+				continue
+			}
+			if field.value == "" {
+				return domain.BudgetLimits{}, errors.New(field.name + " must be non-negative integer string")
+			}
+			*field.dst, err = parse(field.name, field.value)
+			if err != nil {
+				return domain.BudgetLimits{}, err
+			}
+		}
+		return increase, nil
+	}
 	var v domain.BudgetLimits
-	var err error
 	items := []struct {
 		name, value string
 		dst         *int64
