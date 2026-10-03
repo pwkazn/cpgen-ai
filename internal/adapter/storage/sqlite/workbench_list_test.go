@@ -195,7 +195,7 @@ func TestWorkbenchRunsRejectsInvalidQueryAndCursor(t *testing.T) {
 
 func TestWorkbenchRunIndexMigrationPreservesHistory(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "m31.db")
+	path := filepath.Join(t.TempDir(), "m32.db")
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func TestWorkbenchRunIndexMigrationPreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, migration := range migrations[:31] {
+	for _, migration := range migrations[:32] {
 		if _, err := db.ExecContext(ctx, migration.sql); err != nil {
 			t.Fatalf("migration %d: %v", migration.version, err)
 		}
@@ -216,18 +216,94 @@ func TestWorkbenchRunIndexMigrationPreservesHistory(t *testing.T) {
 	}
 	store := &Store{db: db, config: Config{Path: path, BusyTimeout: time.Second, MaxReaders: 1}, clock: clock.NewFake(testNow)}
 	seedWorkbenchRun(t, store, testRunID, domain.RunCreated, testNow)
-	before, err := store.ReadWorkbenchRun(ctx, testRunID)
-	if err != nil {
+	sharedID := domain.RunID("run_00000000000000000000000000000002")
+	limits := totalTokenLimits(t, 10)
+	create := testCreateRunRequest(sharedID, testNow, time.Hour)
+	create.IdempotencyKey = "create_00000000000000000000000000000002"
+	create.BudgetLimits = limits
+	create.SubmittedRequestJSON = canonicalSQLiteRunRequestJSON(limits)
+	create.SubmittedRequestDigest = domain.SumBytes(create.SubmittedRequestJSON)
+	mustCreateRun(t, store, create)
+	attemptID := domain.AttemptID("attempt_00000000000000000000000000000002")
+	mustBeginStage(t, store, sharedID, attemptID, 1, "prepare", domain.SumBytes([]byte("M32 token usage")), testNow, meteringID("begin", "M32 token usage"))
+	f := meteringFixture{store: store, runID: sharedID, attemptID: attemptID, stage: "prepare", now: testNow}
+	record := mustOpenMeteringCall(t, f, 1, domain.CallLLMGenerate)
+	plan := totalTokenPlan(f, record, 1, 3, 2)
+	plan.Calls = append(plan.Calls, llmPhysicalPlan(2, 2, []int64{1, 3, 2, 1}))
+	prepared, err := store.PrepareCalls(ctx, plan)
+	if err != nil || prepared.Failure != nil || len(prepared.PhysicalCalls) != 2 {
+		t.Fatalf("prepare M32 token usage: %+v, %v", prepared, err)
+	}
+	grant := mustBeginDispatch(t, f, record.ID, prepared.PhysicalCalls[0].ID, "M32 token usage")
+	if err := store.MarkSent(ctx, grant, testNow.Add(time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	// Leave the unused retry reserved, so upgrading must preserve both settled
+	// usage and an outstanding reservation in each underlying token account.
+	if err := store.CompletePhysical(ctx, domain.CompletePhysicalRequest{
+		RunID: sharedID, ExpectedRunVersion: 2, StageName: f.stage, AttemptID: attemptID,
+		CallRecordID: record.ID, AttemptCallID: grant.AttemptCallID,
+		State: domain.PhysicalCompleted, Outcome: domain.PhysicalOutcomeSuccess,
+		ProviderRequestID: "M32-token-usage", ResponseDigest: digestPointer("M32 token response"),
+		Usage: []domain.ReservationUsage{
+			{ReservationID: reservationIDFor(t, prepared, grant.AttemptCallID, domain.BudgetLLMInputTokens), Dimension: domain.BudgetLLMInputTokens, Subkey: "input", Value: 2, Verified: true},
+			{ReservationID: reservationIDFor(t, prepared, grant.AttemptCallID, domain.BudgetLLMOutputTokens), Dimension: domain.BudgetLLMOutputTokens, Subkey: "output", Value: 1, Verified: true},
+		},
+		IdempotencyKey: meteringID("complete", "M32 token usage"), At: testNow.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertTotalTokenProjection(t, f, 10, 3, 5, 2)
+	type preservedRun struct {
+		Workbench port.WorkbenchReadSnapshot
+		Caps      runBudgetCaps
+		Baseline  runBudgetCaps
+		Input     domain.BudgetAccount
+		Output    domain.BudgetAccount
+	}
+	readPersisted := func(id domain.RunID) preservedRun {
+		t.Helper()
+		var saved preservedRun
+		var err error
+		saved.Workbench, err = store.ReadWorkbenchRun(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for table, caps := range map[string]*runBudgetCaps{"runs": &saved.Caps, "run_budget_baselines": &saved.Baseline} {
+			if err := db.QueryRowContext(ctx, `SELECT max_llm_calls,max_similarity_calls,max_llm_input_tokens,max_llm_output_tokens,
+				max_llm_cost_micro_usd,max_similarity_cost_micro_usd,max_sandbox_creates,max_artifact_bytes,
+				max_package_bytes,max_mutations_per_stage,max_active_time_ns,max_llm_tokens,token_budget FROM `+table+` WHERE run_id=?`, id).Scan(
+				&caps.llmCalls, &caps.similarityCalls, &caps.llmInputTokens, &caps.llmOutputTokens,
+				&caps.llmCost, &caps.similarityCost, &caps.sandboxCreates, &caps.artifactBytes,
+				&caps.packageBytes, &caps.mutationQuota, &caps.activeTimeNS, &caps.llmTokens, &caps.tokenBudget,
+			); err != nil {
+				t.Fatalf("read %s budget for %s: %v", table, id, err)
+			}
+		}
+		saved.Input = readBudgetAccount(t, store, id, domain.BudgetLLMInputTokens)
+		saved.Output = readBudgetAccount(t, store, id, domain.BudgetLLMOutputTokens)
+		return saved
+	}
+	before := map[domain.RunID]preservedRun{testRunID: readPersisted(testRunID), sharedID: readPersisted(sharedID)}
+	legacy, shared := before[testRunID], before[sharedID]
+	if legacy.Caps.tokenBudget || legacy.Caps.llmTokens != 0 || legacy.Caps != legacy.Baseline {
+		t.Fatalf("legacy budget fixture lost its admitted baseline: %+v", legacy)
+	}
+	if !shared.Caps.tokenBudget || shared.Caps.llmTokens != 10 || shared.Caps != shared.Baseline ||
+		shared.Caps.llmInputTokens != limits.MaxLLMInputTokens || shared.Caps.llmOutputTokens != limits.MaxLLMOutputTokens ||
+		shared.Input.Consumed != 2 || shared.Input.Reserved != 3 || shared.Output.Consumed != 1 || shared.Output.Reserved != 2 {
+		t.Fatalf("shared budget fixture must retain its cap, baseline, usage and reservations: %+v", shared)
 	}
 	if err := store.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	after, err := store.ReadWorkbenchRun(ctx, testRunID)
-	if err != nil || !reflect.DeepEqual(after, before) {
-		t.Fatalf("migration changed persisted run/documents/stages/budgets/events: %v", err)
+	for id, saved := range before {
+		if after := readPersisted(id); !reflect.DeepEqual(after, saved) {
+			t.Fatalf("M33 changed run %s documents/stages/events/budget mode/caps/baseline/token accounts: before=%+v after=%+v", id, saved, after)
+		}
 	}
-	assertMigrationHistory(t, store, 32)
+	assertTotalTokenProjection(t, f, 10, 3, 5, 2)
+	assertMigrationHistory(t, store, 33)
 	assertWorkbenchListPlans(t, store)
 }
 

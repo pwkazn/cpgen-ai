@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -636,7 +637,9 @@ func canonicalSQLiteRunRequestJSONFor(brief, schemaVersion string, limits domain
 		panic(err)
 	}
 	var decoded any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
 		panic(err)
 	}
 	canonical, err := json.Marshal(decoded)

@@ -1,5 +1,5 @@
-# Positive budgets authorize provider requests when generate is invoked.
-# These are illustrative ceilings, not provider prices or quality guarantees.
+# Positive token budgets authorize provider requests when generate is invoked.
+# Input and output have independent limits, including retries and regeneration.
 schema_version: cpgen.request/v1
 mode: manual
 brief: Generate an ordinary graph traversal problem with a tractable brute-force oracle for small cases.
@@ -16,13 +16,5 @@ seed: 9007199254740993
 verification_profile: default
 export_targets: [internal]
 budget_limits:
-  max_llm_calls: 12
-  max_similarity_calls: 2
-  max_llm_input_tokens: 2000000
-  max_llm_output_tokens: 100000
-  max_llm_cost_micro_usd: 1200000
-  max_similarity_cost_micro_usd: 200000
-  max_sandbox_creates: 256
-  max_artifact_bytes: 268435456
-  max_package_bytes: 67108864
-  max_active_time_milliseconds: 900000
+  max_llm_input_tokens: 150000
+  max_llm_output_tokens: 50000

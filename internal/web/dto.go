@@ -36,17 +36,70 @@ type runRequestDTO struct {
 	BudgetLimits          budgetDTO `json:"budget_limits"`
 }
 type budgetDTO struct {
-	MaxLLMCalls               string `json:"max_llm_calls"`
-	MaxSimilarityCalls        string `json:"max_similarity_calls"`
-	MaxLLMInputTokens         string `json:"max_llm_input_tokens"`
-	MaxLLMOutputTokens        string `json:"max_llm_output_tokens"`
-	MaxLLMCostUSD             string `json:"max_llm_cost_usd"`
-	MaxSimilarityCostUSD      string `json:"max_similarity_cost_usd"`
-	MaxSandboxCreates         string `json:"max_sandbox_creates"`
-	MaxArtifactBytes          string `json:"max_artifact_bytes"`
-	MaxPackageBytes           string `json:"max_package_bytes"`
-	MaxMutationsPerStage      string `json:"max_mutations_per_stage"`
-	MaxActiveTimeMilliseconds string `json:"max_active_time_milliseconds"`
+	MaxLLMTokens              string `json:"max_llm_tokens,omitempty"`
+	MaxLLMCalls               string `json:"max_llm_calls,omitempty"`
+	MaxSimilarityCalls        string `json:"max_similarity_calls,omitempty"`
+	MaxLLMInputTokens         string `json:"max_llm_input_tokens,omitempty"`
+	MaxLLMOutputTokens        string `json:"max_llm_output_tokens,omitempty"`
+	MaxLLMCostUSD             string `json:"max_llm_cost_usd,omitempty"`
+	MaxSimilarityCostUSD      string `json:"max_similarity_cost_usd,omitempty"`
+	MaxSandboxCreates         string `json:"max_sandbox_creates,omitempty"`
+	MaxArtifactBytes          string `json:"max_artifact_bytes,omitempty"`
+	MaxPackageBytes           string `json:"max_package_bytes,omitempty"`
+	MaxMutationsPerStage      string `json:"max_mutations_per_stage,omitempty"`
+	MaxActiveTimeMilliseconds string `json:"max_active_time_milliseconds,omitempty"`
+	tokenFieldPresent         bool
+	legacyFieldPresent        bool
+	fields                    map[string]json.RawMessage
+}
+
+func (b *budgetDTO) UnmarshalJSON(raw []byte) error {
+	type plainBudgetDTO budgetDTO
+	var value plainBudgetDTO
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	*b = budgetDTO(value)
+	b.fields = fields
+	_, b.tokenFieldPresent = fields["max_llm_tokens"]
+	b.legacyFieldPresent = len(fields) > 0 && (!b.tokenFieldPresent || len(fields) > 1)
+	return nil
+}
+
+func (b budgetDTO) usesTokenBudget() (bool, error) {
+	tokenBudget := b.tokenFieldPresent || b.MaxLLMTokens != ""
+	legacyBudget := b.legacyFieldPresent || b.MaxLLMCalls != "" || b.MaxSimilarityCalls != "" ||
+		b.MaxLLMInputTokens != "" || b.MaxLLMOutputTokens != "" || b.MaxLLMCostUSD != "" ||
+		b.MaxSimilarityCostUSD != "" || b.MaxSandboxCreates != "" || b.MaxArtifactBytes != "" ||
+		b.MaxPackageBytes != "" || b.MaxMutationsPerStage != "" || b.MaxActiveTimeMilliseconds != ""
+	if tokenBudget && legacyBudget {
+		return false, errors.New("max_llm_tokens cannot be combined with legacy budget limits")
+	}
+	return tokenBudget, nil
+}
+
+func (b budgetDTO) usesSplitTokenBudget() bool {
+	if b.fields != nil {
+		if len(b.fields) == 0 {
+			return false
+		}
+		for name := range b.fields {
+			if name != "max_llm_input_tokens" && name != "max_llm_output_tokens" {
+				return false
+			}
+		}
+		return true
+	}
+	return b.MaxLLMTokens == "" && (b.MaxLLMInputTokens != "" || b.MaxLLMOutputTokens != "") &&
+		b.MaxLLMCalls == "" && b.MaxSimilarityCalls == "" && b.MaxLLMCostUSD == "" &&
+		b.MaxSimilarityCostUSD == "" && b.MaxSandboxCreates == "" && b.MaxArtifactBytes == "" &&
+		b.MaxPackageBytes == "" && b.MaxMutationsPerStage == "" && b.MaxActiveTimeMilliseconds == ""
 }
 
 func decodeRunRequest(raw []byte) (domain.RunRequest, error) {
@@ -98,6 +151,30 @@ func decodeRunRequest(raw []byte) (domain.RunRequest, error) {
 		req.Seed = &n
 	}
 	b := dto.BudgetLimits
+	tokenBudget, err := b.usesTokenBudget()
+	if err != nil {
+		return req, err
+	}
+	if tokenBudget {
+		tokens, err := parse("max_llm_tokens", b.MaxLLMTokens)
+		if err != nil {
+			return req, err
+		}
+		req.BudgetLimits, err = domain.NewTokenBudgetLimits(tokens)
+		return req, err
+	}
+	if b.usesSplitTokenBudget() {
+		input, err := parse("max_llm_input_tokens", b.MaxLLMInputTokens)
+		if err != nil {
+			return req, err
+		}
+		output, err := parse("max_llm_output_tokens", b.MaxLLMOutputTokens)
+		if err != nil {
+			return req, err
+		}
+		req.BudgetLimits, err = domain.NewSplitTokenBudgetLimits(input, output)
+		return req, err
+	}
 	limits := []struct {
 		name, value string
 		dst         *int64

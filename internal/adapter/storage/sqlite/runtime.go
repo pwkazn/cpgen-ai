@@ -77,7 +77,13 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 			return err
 		}
 		limits := request.BudgetLimits
-		_, err = tx.ExecContext(ctx, `
+		// Older migration fixtures still create legacy runs before the shared
+		// token columns exist. Their omitted token fields retain the SQL defaults.
+		tokenColumns, tokenValues := "", ""
+		if limits.UsesTokenBudget() {
+			tokenColumns, tokenValues = ", max_llm_tokens, token_budget", ", ?, ?"
+		}
+		createSQL := `
 			INSERT INTO runs(
 				run_id, submitted_request_json, submitted_request_digest, effective_seed,
 				redacted_effective_config_json, redacted_effective_config_digest, workflow_digest,
@@ -86,17 +92,22 @@ func (s *Store) CreateRun(ctx context.Context, request domain.CreateRunRequest) 
 				max_llm_cost_micro_usd, max_similarity_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
 				max_mutations_per_stage, max_active_time_ns,
 				state, current_stage, current_stage_ordinal, version,
-				create_idempotency_key, create_command_digest, create_result_json, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+				create_idempotency_key, create_command_digest, create_result_json, created_at, updated_at` + tokenColumns + `
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?` + tokenValues + `)`
+		createArgs := []any{
 			string(request.RunID), request.SubmittedRequestJSON, string(request.SubmittedRequestDigest), request.EffectiveSeed,
 			request.RedactedEffectiveConfigJSON, string(request.RedactedEffectiveConfigDigest), string(request.WorkflowDigest),
 			request.WorkflowRevision, string(request.SchemaVersion),
 			limits.MaxLLMCalls, limits.MaxSimilarityCalls, limits.MaxLLMInputTokens, limits.MaxLLMOutputTokens,
 			limits.MaxLLMCostMicroUSD, limits.MaxSimilarityCostMicroUSD, limits.MaxSandboxCreates, limits.MaxArtifactBytes, limits.MaxPackageBytes,
-			limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds*int64(time.Millisecond),
+			limits.MaxMutationsPerStage, limits.MaxActiveTimeMilliseconds * int64(time.Millisecond),
 			string(domain.RunCreated), string(request.StageSequence[0]), 1,
 			request.IdempotencyKey, string(commandDigest), resultJSON, formatTime(request.CreatedAt), formatTime(request.CreatedAt),
-		)
+		}
+		if limits.UsesTokenBudget() {
+			createArgs = append(createArgs, limits.MaxLLMTokens, limits.TokenBudget)
+		}
+		_, err = tx.ExecContext(ctx, createSQL, createArgs...)
 		if err != nil {
 			return fmt.Errorf("insert run: %w", err)
 		}
@@ -1183,7 +1194,8 @@ func validateLegacyCreateRunReplay(ctx context.Context, tx *immediateTx, request
 			workflow_revision, schema_version,
 			max_llm_calls, max_similarity_calls, max_llm_input_tokens, max_llm_output_tokens,
 			max_llm_cost_micro_usd, max_similarity_cost_micro_usd, max_sandbox_creates, max_artifact_bytes, max_package_bytes,
-			max_mutations_per_stage, max_active_time_ns, create_idempotency_key, created_at
+			max_mutations_per_stage, max_active_time_ns, create_idempotency_key, created_at, max_llm_tokens, token_budget,
+			COALESCE(json_extract(submitted_request_json,'$.budget_limits.split_token_budget'),0)
 		FROM runs WHERE create_idempotency_key = ?`, request.IdempotencyKey,
 	).Scan(
 		&storedRunID, &storedRequestJSON, &storedRequestDigest, &storedSeed,
@@ -1192,6 +1204,7 @@ func validateLegacyCreateRunReplay(ctx context.Context, tx *immediateTx, request
 		&storedLimits.MaxLLMCalls, &storedLimits.MaxSimilarityCalls, &storedLimits.MaxLLMInputTokens, &storedLimits.MaxLLMOutputTokens,
 		&storedLimits.MaxLLMCostMicroUSD, &storedLimits.MaxSimilarityCostMicroUSD, &storedLimits.MaxSandboxCreates, &storedLimits.MaxArtifactBytes, &storedLimits.MaxPackageBytes,
 		&storedLimits.MaxMutationsPerStage, &storedLimits.MaxActiveTimeMilliseconds, &storedIdempotencyKey, &storedCreatedAt,
+		&storedLimits.MaxLLMTokens, &storedLimits.TokenBudget, &storedLimits.SplitTokenBudget,
 	)
 	if err != nil {
 		return fmt.Errorf("read legacy create replay bindings: %w", err)

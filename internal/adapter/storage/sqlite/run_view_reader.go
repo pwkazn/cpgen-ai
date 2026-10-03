@@ -24,17 +24,20 @@ func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.
 	defer connection.Close()
 	rows, err := connection.QueryContext(ctx, `
 		SELECT account.request_snapshot_digest, account.dimension, account.limit_value, account.reserved_value, account.consumed_value, account.account_version,
-		       run.max_package_bytes, run.max_mutations_per_stage, run.submitted_request_digest
+		       run.max_package_bytes, run.max_mutations_per_stage, run.submitted_request_digest, run.max_llm_tokens, run.token_budget,
+		       COALESCE(json_extract(run.submitted_request_json,'$.budget_limits.split_token_budget'),0)
 		FROM budget_accounts account JOIN runs run ON run.run_id=account.run_id WHERE account.run_id = ? ORDER BY account.dimension`, string(runID))
 	if err != nil {
 		return domain.BudgetSnapshot{}, err
 	}
 	defer rows.Close()
 	result := domain.BudgetSnapshot{Remaining: make(map[domain.BudgetDimension]int64)}
+	var tokenRemaining int64
+	tokenAccounts := 0
 	for rows.Next() {
 		var requestDigest, submittedDigest, raw string
 		var limit, reserved, consumed, version int64
-		if err := rows.Scan(&requestDigest, &raw, &limit, &reserved, &consumed, &version, &result.Limits.MaxPackageBytes, &result.Limits.MaxMutationsPerStage, &submittedDigest); err != nil {
+		if err := rows.Scan(&requestDigest, &raw, &limit, &reserved, &consumed, &version, &result.Limits.MaxPackageBytes, &result.Limits.MaxMutationsPerStage, &submittedDigest, &result.Limits.MaxLLMTokens, &result.Limits.TokenBudget, &result.Limits.SplitTokenBudget); err != nil {
 			return domain.BudgetSnapshot{}, err
 		}
 		if requestDigest != submittedDigest {
@@ -46,6 +49,18 @@ func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.
 			return domain.BudgetSnapshot{}, fmt.Errorf("budget account %q: %w", dimension, err)
 		}
 		result.Remaining[dimension] = account.Remaining()
+		if result.Limits.UsesTokenBudget() && (dimension == domain.BudgetLLMInputTokens || dimension == domain.BudgetLLMOutputTokens) {
+			if tokenAccounts == 0 {
+				tokenRemaining = result.Limits.MaxLLMTokens
+			}
+			for _, amount := range []int64{reserved, consumed} {
+				if amount > tokenRemaining {
+					return domain.BudgetSnapshot{}, wrap(ErrConsistency, "shared token usage exceeds the run limit", nil)
+				}
+				tokenRemaining -= amount
+			}
+			tokenAccounts++
+		}
 		if version > result.Version {
 			result.Version = version
 		}
@@ -75,6 +90,12 @@ func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.
 	}
 	if result.Version == 0 {
 		return domain.BudgetSnapshot{}, sql.ErrNoRows
+	}
+	if result.Limits.UsesTokenBudget() {
+		if tokenAccounts != 2 {
+			return domain.BudgetSnapshot{}, wrap(ErrConsistency, "shared token budget account is missing", nil)
+		}
+		result.Remaining[domain.BudgetLLMTokens] = tokenRemaining
 	}
 	if err := result.Validate(); err != nil {
 		return domain.BudgetSnapshot{}, err

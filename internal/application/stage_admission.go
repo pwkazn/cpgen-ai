@@ -66,7 +66,10 @@ func (s *StageAdmission) admit(ctx context.Context, view domain.RunView, stage d
 // request remains immutable. The runtime snapshot is authoritative for the
 // currently approved limits; they may only stay equal to or exceed the request.
 func budgetLimitsAtLeast(effective, submitted domain.BudgetLimits) bool {
-	return effective.MaxLLMCalls >= submitted.MaxLLMCalls &&
+	return effective.TokenBudget == submitted.TokenBudget &&
+		effective.SplitTokenBudget == submitted.SplitTokenBudget &&
+		effective.MaxLLMTokens >= submitted.MaxLLMTokens &&
+		effective.MaxLLMCalls >= submitted.MaxLLMCalls &&
 		effective.MaxSimilarityCalls >= submitted.MaxSimilarityCalls &&
 		effective.MaxLLMInputTokens >= submitted.MaxLLMInputTokens &&
 		effective.MaxLLMOutputTokens >= submitted.MaxLLMOutputTokens &&

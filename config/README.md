@@ -12,7 +12,7 @@ ACCEPT 继续进入 Reference/Brute 生成和真实的 Docker 样例检查；
 进入评审；自动变更仍然推迟。独立的 CLI 崩溃恢复、导出和执行重新验证通过；见[题包证据](../docs/evidence/mvp-package-commit-foundation.md)。
 
 在配置好端点、凭据、本地路径和钉定的工具链之后，
-使用 `mvp.request.yaml` 进行一次显式预算的 run：
+使用 `mvp.request.yaml` 进行一次显式 token 预算的 run：
 
 ```powershell
 go run ./cmd/cpgen --config config/mvp.example.yaml generate --request config/mvp.request.yaml
@@ -28,6 +28,18 @@ Windows 路径形式（`D:/...`，以及 Docker 端点的 `npipe://`）；在 Li
 目标目录必须存在并支持硬链接。正的示例
 预算仅在你调用生成时才允许外部调用；没有任何示例
 包含凭据。为 resume/export 保留确切的有效配置。
+
+请求预算只需输入和输出两个参数，新请求必须同时填写：
+
+```yaml
+budget_limits:
+  max_llm_input_tokens: 150000
+  max_llm_output_tokens: 50000
+```
+
+两项分别限制整个 run 累计的输入和输出 token，额度独立，不能互相借用；重试、格式修复与内容重新生成均计入各自额度。调用前分别按输入和输出上界预留，收到可靠用量后按实际值结算；用量无法确认时按预留上界保守结算。命中缓存不会新增模型 token 消耗。每次调用仍保留模型及输入、输出用量明细，供后续按各自价格换算金额。
+
+两项 token 上限均接受非负整数；零预算示例将两项设为 0，在模型调用前暂停。调用次数、查重、容器、时间和存储限制使用系统默认值。旧版完整多参数预算请求仍可读取和执行，已创建的旧 run 保留原预算。兼容的总额字段 `max_llm_tokens` 不能与输入、输出上限混用。
 
 对于任一前向选择器，配置必需的 `sandbox` 映射：
 
@@ -48,10 +60,9 @@ Docker。Bootstrap 在生成之前检查实际的锁摘要、本地 Engine 能�
 
 现有的零预算请求也可以演练该选择器；它在不派发
 提供方调用的情况下停在创意，但 Bootstrap 仍要求已配置的
-本地 Docker 安装。正预算请求必须覆盖分别
-预留的传输尝试、制品和容器创建。一个两样例
-通过的题解目前使用 16 次容器创建。示例是说明性的
-限额，不是提供方价格或普遍的工作量估计。
+本地 Docker 安装。token 预算需要覆盖分别预留的模型传输尝试；
+制品和容器创建由系统执行限制约束。示例额度是说明性的，
+不代表提供方价格或普遍的工作量估计。
 
 `deepseek.example.yaml` 是一个无凭据的集成目标。使用前将其
 `storage.state_root` 替换为私有的绝对目录。
@@ -202,7 +213,7 @@ MVP 示例现在选择工作流 `mvp.idea.statement.similarity.solution.data.jud
 工作流版本保持向后兼容：V1 是原始的固定流程，V2 增加每个 run
 最多两次有界内容重新生成，V3 在此基础上加入独立执行样例定稿。
 V2/V3 每次 run 最多允许两次自动内容重新生成，使用现有的
-调用/token/成本/时间预算。它在绑定/JSON 格式
+输入、输出 token 预算与系统执行限制；旧 run 沿用其冻结的多维预算。它在绑定/JSON 格式
 失败后重新生成草稿，在编译/评测失败后重新生成题解，在样例失败后重新生成
 题面及其下游阶段，在 generator/validator 失败后重新生成数据。
 每次验证都会重新运行；失败的尝试仍可在 SQLite 的
