@@ -1184,6 +1184,7 @@ function attachDetailActions(id, d) {
   const more = document.querySelector("[data-more-events]");
   if (more) {
     more.onclick = async () => {
+      const route = state.route;
       if (!state.eventCursor || state.eventCursor === "0") {
         more.textContent = "没有更早事件";
         more.disabled = true;
@@ -1194,6 +1195,7 @@ function attachDetailActions(id, d) {
         const page = await api(
           `/runs/${encodeURIComponent(id)}/events?before=${encodeURIComponent(state.eventCursor)}&limit=50`,
         );
+        if (route !== state.route || state.eventRunId !== id) return;
         const older = page.events || [];
         const fresh = older.filter((x) => !state.eventIds.has(eventKey(x)));
         fresh.forEach((x) => {
@@ -1229,6 +1231,7 @@ function attachDetailActions(id, d) {
           more.disabled = true;
         }
       } catch (e) {
+        if (route !== state.route || state.eventRunId !== id) return;
         more.disabled = false;
         more.textContent = e.message;
       }
