@@ -163,6 +163,9 @@ func (c Config) validateWorkflowDependencies() error {
 	if c.LLM != nil && c.LLM.DataPromptVersion != "" && (c.Workflow == nil || c.Workflow.Revision != workflow.ExecutedSamplesRevision) {
 		return field("llm.data_prompt_version", errors.New("requires the executed-samples v3 workflow"))
 	}
+	if c.LLM != nil && c.LLM.DraftRetryFeedbackVersion != "" && (c.Workflow == nil || c.Workflow.Revision != workflow.ExecutedSamplesRevision) {
+		return field("llm.draft_retry_feedback_version", errors.New("requires the executed-samples v3 workflow"))
+	}
 	if c.Sandbox != nil {
 		if err := c.Sandbox.Validate(); err != nil {
 			return err

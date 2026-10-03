@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -214,4 +216,50 @@ func containsAll(value string, parts ...string) bool {
 		}
 	}
 	return true
+}
+
+// A current cache occurrence and its source response need not share an
+// attempt. The reader must plan the source request with its historical
+// feedback, even if a later review supplied different feedback to the owner.
+func TestDraftRetryCachedReaderUsesProducerAttemptFeedback(t *testing.T) {
+	at := time.Date(2026, 9, 30, 1, 0, 0, 0, time.UTC)
+	digest := domain.SumBytes([]byte("cached draft"))
+	for _, ordinal := range []int{1, 2} {
+		t.Run(fmt.Sprint(ordinal), func(t *testing.T) {
+			source := domain.StageAttempt{RunID: "run_00000000000000000000000000000041", AttemptID: "attempt_00000000000000000000000000000041", StageName: "idea", Ordinal: ordinal, State: domain.StageAttemptSucceeded, InputDigest: digest, OutputDigest: &digest, StartedAt: at, FinishedAt: &at}
+			current := source
+			current.AttemptID = "attempt_00000000000000000000000000000042"
+			current.Ordinal = ordinal + 1
+			current.StartedAt = at.Add(time.Hour)
+			current.FinishedAt = &current.StartedAt
+			call := domain.CallRecord{ID: "callrec_00000000000000000000000000000041", RunID: source.RunID, StageName: source.StageName, AttemptID: source.AttemptID, Kind: domain.CallLLMGenerate, State: domain.CallRecordTerminal, LogicalOperationID: "historical-source"}
+			store := cachedDraftFeedbackStore{dataPromptReadStore: dataPromptReadStore{stage: port.CommittedLLMStage{StageVersion: 1, Attempt: current, Artifacts: []port.CommittedLLMStageArtifact{{Kind: domain.PendingOccurrenceCacheReuse, ProviderCallRecordID: call.ID}}}, call: call}, source: source, timelineDraftFeedbackReader: timelineDraftFeedbackReader{
+				{at: at.Add(-time.Second), feedback: domain.DraftRetryFeedback{SourceStage: "idea", TargetStage: "idea", Reason: "source feedback"}},
+				{at: at.Add(time.Minute), feedback: domain.DraftRetryFeedback{SourceStage: "idea", TargetStage: "idea", Reason: "consumer feedback"}},
+			}}
+			spy := &dataPromptPlanSpy{}
+			reader := &GenerationReader{store: store, options: GenerationReaderOptions{WorkflowRevision: workflow.ExecutedSamplesRevision, DraftRetryFeedbackVersion: "v1"}}
+			_, _, err := reader.readDraft(context.Background(), source.RunID, "idea", digest, []byte(`{"frozen":"input"}`), spy)
+			if !errors.Is(err, errDataPromptPlanBoundary) || len(spy.requests) != 1 {
+				t.Fatalf("source planning: %v requests=%d", err, len(spy.requests))
+			}
+			variables := string(spy.requests[0].Variables)
+			if strings.Contains(variables, "consumer feedback") || strings.Contains(variables, "source feedback") != (ordinal > 1) {
+				t.Fatalf("used consumer attempt metadata: %s", variables)
+			}
+		})
+	}
+}
+
+type cachedDraftFeedbackStore struct {
+	dataPromptReadStore
+	timelineDraftFeedbackReader
+	source domain.StageAttempt
+}
+
+func (s cachedDraftFeedbackStore) ReadStageAttempt(_ context.Context, runID domain.RunID, stage domain.StageName, attempt domain.AttemptID) (domain.StageAttempt, error) {
+	if runID != s.source.RunID || stage != s.source.StageName || attempt != s.source.AttemptID {
+		return domain.StageAttempt{}, errors.New("unexpected producer scope")
+	}
+	return s.source, nil
 }

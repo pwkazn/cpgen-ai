@@ -24,8 +24,8 @@ const (
 )
 
 // LLMConfig is a credential-free provider policy. Nil Config.LLM means absent,
-// retaining the pre-provider snapshot bytes. Retry is deliberately not a YAML
-// option: durable physical dispatch owns retries, not the provider adapter.
+// retaining the pre-provider snapshot bytes. Provider transport retry is not a
+// YAML option: durable physical dispatch owns retries, not the adapter.
 type LLMConfig struct {
 	BaseURL           string        `json:"base_url" yaml:"base_url"`
 	Model             string        `json:"model" yaml:"model"`
@@ -35,35 +35,40 @@ type LLMConfig struct {
 	MaxResponseBytes  int64         `json:"max_response_bytes" yaml:"max_response_bytes"`
 	MaxFormatRepairs  int64         `json:"max_format_repairs,omitempty" yaml:"max_format_repairs"`
 	DataPromptVersion string        `json:"data_prompt_version,omitempty" yaml:"data_prompt_version,omitempty"`
+	// Empty keeps historical draft calls unchanged; v1 binds retry feedback
+	// and its prompt revisions into newly persisted workflow policy.
+	DraftRetryFeedbackVersion string `json:"draft_retry_feedback_version,omitempty" yaml:"draft_retry_feedback_version,omitempty"`
 }
 
 type EffectiveLLM struct {
-	BaseURL           string `json:"base_url"`
-	Model             string `json:"model"`
-	APIKeyEnv         string `json:"api_key_env"`
-	Timeout           string `json:"timeout"`
-	MaxOutputTokens   int64  `json:"max_output_tokens"`
-	MaxResponseBytes  int64  `json:"max_response_bytes"`
-	MaxFormatRepairs  int64  `json:"max_format_repairs,omitempty"`
-	DataPromptVersion string `json:"data_prompt_version,omitempty"`
+	BaseURL                   string `json:"base_url"`
+	Model                     string `json:"model"`
+	APIKeyEnv                 string `json:"api_key_env"`
+	Timeout                   string `json:"timeout"`
+	MaxOutputTokens           int64  `json:"max_output_tokens"`
+	MaxResponseBytes          int64  `json:"max_response_bytes"`
+	MaxFormatRepairs          int64  `json:"max_format_repairs,omitempty"`
+	DataPromptVersion         string `json:"data_prompt_version,omitempty"`
+	DraftRetryFeedbackVersion string `json:"draft_retry_feedback_version,omitempty"`
 }
 
 type rawLLMConfig struct {
-	BaseURL           string  `yaml:"base_url"`
-	Model             string  `yaml:"model"`
-	APIKeyEnv         string  `yaml:"api_key_env"`
-	Timeout           *string `yaml:"timeout"`
-	MaxOutputTokens   *int64  `yaml:"max_output_tokens"`
-	MaxResponseBytes  *int64  `yaml:"max_response_bytes"`
-	MaxFormatRepairs  *int64  `yaml:"max_format_repairs"`
-	DataPromptVersion string  `yaml:"data_prompt_version"`
+	BaseURL                   string  `yaml:"base_url"`
+	Model                     string  `yaml:"model"`
+	APIKeyEnv                 string  `yaml:"api_key_env"`
+	Timeout                   *string `yaml:"timeout"`
+	MaxOutputTokens           *int64  `yaml:"max_output_tokens"`
+	MaxResponseBytes          *int64  `yaml:"max_response_bytes"`
+	MaxFormatRepairs          *int64  `yaml:"max_format_repairs"`
+	DataPromptVersion         string  `yaml:"data_prompt_version"`
+	DraftRetryFeedbackVersion string  `yaml:"draft_retry_feedback_version"`
 }
 
 func decodeLLM(raw *rawLLMConfig) (*LLMConfig, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	c := &LLMConfig{BaseURL: raw.BaseURL, Model: raw.Model, APIKeyEnv: raw.APIKeyEnv, DataPromptVersion: raw.DataPromptVersion,
+	c := &LLMConfig{BaseURL: raw.BaseURL, Model: raw.Model, APIKeyEnv: raw.APIKeyEnv, DataPromptVersion: raw.DataPromptVersion, DraftRetryFeedbackVersion: raw.DraftRetryFeedbackVersion,
 		Timeout: DefaultLLMTimeout, MaxOutputTokens: DefaultLLMMaxOutputTokens, MaxResponseBytes: DefaultLLMMaxResponseBytes}
 	if raw.Timeout != nil {
 		parsed, err := time.ParseDuration(*raw.Timeout)
@@ -111,6 +116,9 @@ func (c LLMConfig) Validate() error {
 	}
 	if c.DataPromptVersion != "" && c.DataPromptVersion != "v3" && c.DataPromptVersion != "v5" {
 		return field("llm.data_prompt_version", errors.New("must be empty, v3, or v5"))
+	}
+	if c.DraftRetryFeedbackVersion != "" && c.DraftRetryFeedbackVersion != "v1" {
+		return field("llm.draft_retry_feedback_version", errors.New("must be empty or v1"))
 	}
 	return nil
 }
@@ -189,5 +197,5 @@ func effectiveLLM(c *LLMConfig) *EffectiveLLM {
 		return nil
 	}
 	return &EffectiveLLM{BaseURL: c.BaseURL, Model: c.Model, APIKeyEnv: c.APIKeyEnv,
-		Timeout: c.Timeout.String(), MaxOutputTokens: c.MaxOutputTokens, MaxResponseBytes: c.MaxResponseBytes, MaxFormatRepairs: c.MaxFormatRepairs, DataPromptVersion: c.DataPromptVersion}
+		Timeout: c.Timeout.String(), MaxOutputTokens: c.MaxOutputTokens, MaxResponseBytes: c.MaxResponseBytes, MaxFormatRepairs: c.MaxFormatRepairs, DataPromptVersion: c.DataPromptVersion, DraftRetryFeedbackVersion: c.DraftRetryFeedbackVersion}
 }

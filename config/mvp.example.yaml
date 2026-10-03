@@ -23,6 +23,7 @@ llm:
   max_response_bytes: 1048576
   max_format_repairs: 0
   data_prompt_version: v5
+  draft_retry_feedback_version: v1
 similarity:
   endpoint: https://similarity.example.com/search
   api_key_env: CPGEN_SIMILARITY_API_KEY

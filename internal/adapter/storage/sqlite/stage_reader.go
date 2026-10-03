@@ -72,15 +72,37 @@ func (s *Store) CurrentStageAttempt(ctx context.Context, runID domain.RunID, sta
 }
 
 func readLatestStageAttempt(ctx context.Context, queryer rowQuerier, runID domain.RunID, stage domain.StageName) (domain.StageAttempt, error) {
+	return scanStageAttempt(queryer.QueryRowContext(ctx, `
+		SELECT attempt_id, run_id, stage_name, ordinal, state, input_digest, output_digest, cause, blocked_binding_json, started_at, finished_at
+		FROM stage_attempts WHERE run_id = ? AND stage_name = ? ORDER BY ordinal DESC LIMIT 1`, string(runID), string(stage)))
+}
+
+// ReadStageAttempt reads the exact persisted attempt, including historical
+// attempts superseded by content retries or reviews. It grants no write access.
+func (s *Store) ReadStageAttempt(ctx context.Context, runID domain.RunID, stage domain.StageName, attemptID domain.AttemptID) (domain.StageAttempt, error) {
+	for _, err := range []error{runID.Validate(), stage.Validate(), attemptID.Validate()} {
+		if err != nil {
+			return domain.StageAttempt{}, err
+		}
+	}
+	connection, err := s.connection(ctx)
+	if err != nil {
+		return domain.StageAttempt{}, err
+	}
+	defer connection.Close()
+	return scanStageAttempt(connection.QueryRowContext(ctx, `
+		SELECT attempt_id, run_id, stage_name, ordinal, state, input_digest, output_digest, cause, blocked_binding_json, started_at, finished_at
+		FROM stage_attempts WHERE run_id = ? AND stage_name = ? AND attempt_id = ?`, string(runID), string(stage), string(attemptID)))
+}
+
+func scanStageAttempt(row *sql.Row) (domain.StageAttempt, error) {
 	var attempt domain.StageAttempt
 	var state, input, started string
 	var output, cause, blockedBinding, finished sql.NullString
-	err := queryer.QueryRowContext(ctx, `
-		SELECT attempt_id, run_id, stage_name, ordinal, state, input_digest, output_digest, cause, blocked_binding_json, started_at, finished_at
-		FROM stage_attempts WHERE run_id = ? AND stage_name = ? ORDER BY ordinal DESC LIMIT 1`, string(runID), string(stage)).Scan(
+	err := row.Scan(
 		&attempt.AttemptID, &attempt.RunID, &attempt.StageName, &attempt.Ordinal, &state, &input, &output, &cause, &blockedBinding, &started, &finished)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.StageAttempt{}, wrap(ErrNotFound, "stage has no attempt", err)
+		return domain.StageAttempt{}, wrap(ErrNotFound, "stage attempt not found", err)
 	}
 	if err != nil {
 		return domain.StageAttempt{}, err

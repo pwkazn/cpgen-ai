@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"cpgen/internal/adapter/storage/blob"
-	"cpgen/internal/adapter/storage/sqlite"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 	durable "cpgen/internal/execution"
@@ -259,11 +258,6 @@ func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
 
 func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
 	var result generatedDraft
-	feedbackReader, _ := s.config.Store.(port.DraftRetryFeedbackReader)
-	variables, err := addDraftRetryFeedback(ctx, s.config.Content.WorkflowRevision, feedbackReader, view.RunID(), attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
-	if err != nil {
-		return result, err
-	}
 	ledger, err := durable.NewRunLedger(s.config.Store, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err
@@ -276,14 +270,11 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	if err != nil {
 		return result, err
 	}
-	open, request, err := s.draftCall(view.RunID(), view.Version(), attempt, variables)
+	open, request, existing, err := s.resolveDraftCall(ctx, view.RunID(), view.Version(), attempt, variables, service)
 	if err != nil {
 		return result, err
 	}
-	existing, readErr := s.config.Store.ReadLogicalCall(ctx, open.ID)
-	if readErr != nil && !errors.Is(readErr, sqlite.ErrNotFound) {
-		return result, readErr
-	}
+	exists := existing.ID != ""
 	checkpoint, err := s.config.Store.ReadAttemptDependencyCheckpoint(ctx, view.RunID(), attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return result, err
@@ -298,7 +289,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 	// committed draft whose downstream verification just failed. Retain replay
 	// of an existing cache call if the process stopped during its first attempt.
 	bypassCache := (view.WorkflowRevision() == workflow.RetryingGenerationRevision || view.WorkflowRevision() == workflow.ExecutedSamplesRevision) && attempt.Ordinal > 1
-	if checkpoint == nil && (!bypassCache || existing.Kind == domain.CallCacheReuse) && (errors.Is(readErr, sqlite.ErrNotFound) || existing.Kind == domain.CallCacheReuse) {
+	if checkpoint == nil && (!bypassCache || existing.Kind == domain.CallCacheReuse) && (!exists || existing.Kind == domain.CallCacheReuse) {
 		hit, err := cache.Reuse(ctx, open, request)
 		if err != nil {
 			return result, err
@@ -311,7 +302,7 @@ func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, atte
 			}
 			return result, hit.Outcome.Validate()
 		}
-		if readErr == nil {
+		if exists {
 			return result, durable.ErrLLMReplayUnavailable
 		}
 	}
