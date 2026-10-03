@@ -99,26 +99,34 @@ func (s *Server) cancelRun(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	// Reserve before persisting so shutdown cannot strand an accepted request.
+	// The control reservation does not consume generation admission.
+	reservation, err := s.manager.reserveControl()
+	if err != nil {
+		writeManagerError(c, err)
+		return
+	}
+	defer reservation.release()
 	if _, err = s.app.Runtime.RequestCancel(context.Background(), req); err != nil {
 		writeApplicationError(c, err)
 		return
 	}
-	// Active executors observe the durable control request. An idle task gets a
-	// tracked cleanup goroutine, independent of generation capacity and HTTP life.
-	if !s.manager.isActive(id) {
-		reservation, e := s.manager.reserveControl()
-		if e == nil {
-			defer reservation.release()
-			_ = reservation.start(id, func(ctx context.Context) error {
-				app, err := s.executionApp(ctx, id)
-				if err != nil {
-					return err
-				}
-				defer app.Close()
-				_, err = app.Runs.Cancel(ctx, req)
-				return err
-			})
+	// Follow an active executor atomically, including one still bootstrapping.
+	// Its failure or exit must not leave a durable request without an owner.
+	if err = reservation.startControl(id, func(ctx context.Context) error {
+		if _, handled, err := application.TryCancelUnstarted(ctx, s.cfg, s.app.Runtime, s.app.Locks, id); err != nil || handled {
+			return err
 		}
+		app, err := s.executionApp(ctx, id)
+		if err != nil {
+			return err
+		}
+		defer app.Close()
+		_, err = app.Runs.Cancel(ctx, req)
+		return err
+	}); err != nil {
+		writeManagerError(c, err)
+		return
 	}
 	snapshot, err := s.app.Runtime.GetRun(c.Request.Context(), id)
 	if err != nil {
@@ -256,6 +264,11 @@ func (s *Server) executionApp(ctx context.Context, id domain.RunID) (*applicatio
 	return application.Bootstrap(ctx, frozen)
 }
 func (s *Server) executeExpected(ctx context.Context, id domain.RunID, version *int64) error {
+	// A cancellation accepted before the executor starts needs no provider or
+	// Docker initialization when storage proves that no work has begun.
+	if _, handled, err := application.TryCancelUnstarted(ctx, s.cfg, s.app.Runtime, s.app.Locks, id); err != nil || handled {
+		return err
+	}
 	app, err := s.executionApp(ctx, id)
 	if err != nil {
 		return err
