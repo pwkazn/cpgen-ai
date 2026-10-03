@@ -646,6 +646,22 @@ func sortedDimensions(values map[domain.BudgetDimension]int64) []domain.BudgetDi
 }
 
 func budgetWouldExhaust(ctx context.Context, tx *immediateTx, runID domain.RunID, requested map[domain.BudgetDimension]int64) (bool, error) {
+	if requested[domain.BudgetLLMInputTokens] > 0 || requested[domain.BudgetLLMOutputTokens] > 0 {
+		remaining, enabled, err := remainingLLMTokens(ctx, tx, runID)
+		if err != nil {
+			return false, err
+		}
+		if enabled {
+			// Subtract each nonnegative amount separately: adding two valid
+			// int64 reservations first could overflow and admit an oversized plan.
+			for _, dimension := range []domain.BudgetDimension{domain.BudgetLLMInputTokens, domain.BudgetLLMOutputTokens} {
+				if requested[dimension] > remaining {
+					return true, nil
+				}
+				remaining -= requested[dimension]
+			}
+		}
+	}
 	for _, dimension := range sortedDimensions(requested) {
 		var limit, reserved, consumed int64
 		if err := tx.QueryRowContext(ctx, `SELECT limit_value, reserved_value, consumed_value
@@ -657,6 +673,46 @@ func budgetWouldExhaust(ctx context.Context, tx *immediateTx, runID domain.RunID
 		}
 	}
 	return false, nil
+}
+
+// remainingLLMTokens reads the shared cap and both usage accounts inside the
+// caller's transaction. Existing legacy runs retain their separate limits.
+func remainingLLMTokens(ctx context.Context, tx rowQuerier, runID domain.RunID) (int64, bool, error) {
+	// Budget mode belongs to the immutable submitted request. Checking it
+	// first also keeps historical migration fixtures executable on their
+	// original schema before the total-token columns have been introduced.
+	var enabled bool
+	if err := tx.QueryRowContext(ctx, `SELECT
+		COALESCE(json_extract(submitted_request_json,'$.budget_limits.token_budget'),0) <> 0
+		OR COALESCE(json_extract(submitted_request_json,'$.budget_limits.max_llm_tokens'),0) > 0
+		FROM runs WHERE run_id=?`, string(runID)).Scan(&enabled); err != nil {
+		return 0, false, err
+	}
+	if !enabled {
+		return 0, false, nil
+	}
+	var limit int64
+	var tokenBudget bool
+	if err := tx.QueryRowContext(ctx, `SELECT max_llm_tokens,token_budget FROM runs WHERE run_id=?`, string(runID)).Scan(&limit, &tokenBudget); err != nil {
+		return 0, false, err
+	}
+	if !tokenBudget && limit == 0 {
+		return 0, true, wrap(ErrConsistency, "shared token budget mode differs from its submitted request", nil)
+	}
+	remaining := limit
+	for _, dimension := range []domain.BudgetDimension{domain.BudgetLLMInputTokens, domain.BudgetLLMOutputTokens} {
+		var reserved, consumed int64
+		if err := tx.QueryRowContext(ctx, `SELECT reserved_value,consumed_value FROM budget_accounts WHERE run_id=? AND dimension=?`, string(runID), dimension).Scan(&reserved, &consumed); err != nil {
+			return 0, true, wrap(ErrConsistency, "shared token budget account is missing", err)
+		}
+		for _, amount := range []int64{reserved, consumed} {
+			if amount < 0 || amount > remaining {
+				return 0, true, wrap(ErrConsistency, "shared token usage exceeds the run limit", nil)
+			}
+			remaining -= amount
+		}
+	}
+	return remaining, true, nil
 }
 
 func reserveBudget(ctx context.Context, tx *immediateTx, runID domain.RunID, requested map[domain.BudgetDimension]int64) error {

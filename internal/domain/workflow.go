@@ -191,6 +191,13 @@ func (v *StageName) UnmarshalJSON(data []byte) error {
 
 // BudgetLimits is deliberately integer-only so it can be persisted exactly.
 type BudgetLimits struct {
+	// TokenBudget distinguishes an explicit zero total-token budget from
+	// historical requests with separate limits. SplitTokenBudget identifies
+	// independent allowances with system execution limits. Omit policy markers
+	// for old requests to preserve their canonical bytes and evidence digests.
+	MaxLLMTokens              int64 `json:"max_llm_tokens,omitempty"`
+	TokenBudget               bool  `json:"token_budget,omitempty"`
+	SplitTokenBudget          bool  `json:"split_token_budget,omitempty"`
 	MaxLLMCalls               int64 `json:"max_llm_calls"`
 	MaxSimilarityCalls        int64 `json:"max_similarity_calls"`
 	MaxLLMInputTokens         int64 `json:"max_llm_input_tokens"`
@@ -205,10 +212,14 @@ type BudgetLimits struct {
 }
 
 func (v BudgetLimits) Validate() error {
+	if v.SplitTokenBudget && v.UsesTokenBudget() {
+		return errors.New("independent input/output budgets cannot share a total token limit")
+	}
 	for _, field := range []struct {
 		name  string
 		value int64
 	}{
+		{"max llm tokens", v.MaxLLMTokens},
 		{"max llm calls", v.MaxLLMCalls}, {"max similarity calls", v.MaxSimilarityCalls},
 		{"max llm input tokens", v.MaxLLMInputTokens}, {"max llm output tokens", v.MaxLLMOutputTokens},
 		{"max llm cost micro USD", v.MaxLLMCostMicroUSD}, {"max similarity cost micro USD", v.MaxSimilarityCostMicroUSD},
@@ -1335,6 +1346,9 @@ func validateReviewRequestPayload(kind ReviewDecisionKind, edits, waiver, condit
 	if err := budget.Validate(); err != nil {
 		return err
 	}
+	if budget.TokenBudget || budget.SplitTokenBudget {
+		return errors.New("review budget increases cannot change the budget policy")
+	}
 	hasBudget := budget != (BudgetLimits{})
 	switch kind {
 	case ReviewRevise:
@@ -1376,7 +1390,7 @@ func validateReviewDecisionPayload(kind ReviewDecisionKind, edits, waiver, condi
 }
 
 func budgetIncreasePositive(value BudgetLimits) bool {
-	return value.MaxLLMCalls > 0 || value.MaxSimilarityCalls > 0 || value.MaxLLMInputTokens > 0 ||
+	return value.MaxLLMTokens > 0 || value.MaxLLMCalls > 0 || value.MaxSimilarityCalls > 0 || value.MaxLLMInputTokens > 0 ||
 		value.MaxLLMOutputTokens > 0 || value.MaxLLMCostMicroUSD > 0 || value.MaxSimilarityCostMicroUSD > 0 || value.MaxSandboxCreates > 0 ||
 		value.MaxArtifactBytes > 0 || value.MaxPackageBytes > 0 || value.MaxMutationsPerStage > 0 ||
 		value.MaxActiveTimeMilliseconds > 0
