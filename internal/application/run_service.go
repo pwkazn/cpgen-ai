@@ -407,9 +407,10 @@ func convertResult[O any](result domain.AgentResult[O]) domain.AgentResult[any] 
 	return domain.AgentResult[any]{}
 }
 
-// reconcileForTerminal is the sole boundary before a cancellation or budget
-// exhaustion projection is committed. A non-complete report means exact
-// external ownership is still unresolved, so the run remains non-terminal.
+// Executed runs must cross reconcileForTerminal before cancellation or budget
+// exhaustion is committed. Only TryCancelUnstarted's transactional proof of no
+// execution permits cancellation without reconciliation. A non-complete report
+// means exact external ownership remains unresolved and the run non-terminal.
 
 // cleanupEvidenceMatchesRun is deliberately conservative. Exit code 10 is
 // reserved for a report that names this run and contains durable unresolved

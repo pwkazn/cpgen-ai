@@ -20,6 +20,13 @@ type UnsentSandboxRecoveryStore interface {
 	InterruptUnsentSandboxStage(context.Context, domain.InterruptStageCommand) (domain.RunSnapshot, error)
 }
 
+// UnstartedCancellationStore commits an existing cancellation only after
+// proving, in the same transaction, that the CREATED run has no execution or
+// cleanup records. An unproven run is returned unchanged with handled=false.
+type UnstartedCancellationStore interface {
+	TryFinalizeUnstartedCancel(context.Context, domain.CancelUnstartedCommand) (snapshot domain.RunSnapshot, handled bool, err error)
+}
+
 type RuntimeStore interface {
 	CreateRun(context.Context, domain.CreateRunRequest) (domain.RunSnapshot, error)
 	GetRun(context.Context, domain.RunID) (domain.RunSnapshot, error)

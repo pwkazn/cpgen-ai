@@ -1051,6 +1051,23 @@ type FinalizeCancelCommand struct {
 	At                   time.Time        `json:"at"`
 }
 
+// CancelUnstartedCommand requests cancellation only if storage can atomically
+// prove that no execution or cleanup work has ever been recorded for the run.
+type CancelUnstartedCommand struct {
+	RunID              RunID            `json:"run_id"`
+	ExpectedRunVersion int64            `json:"expected_run_version"`
+	ControlRequestID   ControlRequestID `json:"control_request_id"`
+	IdempotencyKey     string           `json:"idempotency_key"`
+	At                 time.Time        `json:"at"`
+}
+
+func (v CancelUnstartedCommand) Validate() error {
+	if err := validateMutation(v.RunID, v.ExpectedRunVersion, v.IdempotencyKey, v.At); err != nil {
+		return err
+	}
+	return v.ControlRequestID.Validate()
+}
+
 func (v FinalizeCancelCommand) Validate() error {
 	if err := validateMutation(v.RunID, v.ExpectedRunVersion, v.IdempotencyKey, v.At); err != nil {
 		return err

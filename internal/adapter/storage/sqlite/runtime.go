@@ -836,53 +836,63 @@ func (s *Store) FinalizeCancel(ctx context.Context, command domain.FinalizeCance
 		if err := domain.ValidateStageTransition(domain.StageState(stageState), domain.StageCancelled); err != nil {
 			return wrap(ErrInvalidTransition, err.Error(), err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE stage_records SET state = 'CANCELLED', version = version + 1,
-				output_digest = NULL, current_attempt_id = NULL,
-				review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL,
-				updated_at = ?
-			WHERE run_id = ? AND stage_name = ?`,
-			formatTime(command.At), string(command.RunID), string(run.CurrentStage),
-		); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE control_requests SET state = 'APPLIED', applied_at = ?
-			WHERE control_id = ? AND run_id = ? AND state = 'PENDING'`,
-			formatTime(command.At), string(command.ControlRequestID), string(command.RunID),
-		); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE review_decisions SET state = 'STALE', applied_at = ?
-			WHERE run_id = ? AND state = 'PENDING'`,
-			formatTime(command.At), string(command.RunID),
-		); err != nil {
-			return err
-		}
-		newVersion := run.Version + 1
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE runs SET state = 'CANCELLED', version = ?, cancel_summary = ?, updated_at = ?
-			WHERE run_id = ?`,
-			newVersion, pending.Reason, formatTime(command.At), string(command.RunID),
-		); err != nil {
-			return err
-		}
-		result, err = readRun(ctx, tx, command.RunID)
-		if err != nil {
-			return err
-		}
-		if err := result.Validate(); err != nil {
-			return wrap(ErrConsistency, "finalized cancellation projection is invalid", err)
-		}
-		resultJSON, err := marshalResult(result)
-		if err != nil {
-			return err
-		}
-		return insertEvent(ctx, tx, command.RunID, newVersion, domain.EventCancelFinalized, run.CurrentStage,
-			command.IdempotencyKey, commandDigest, resultJSON, command.At)
+		result, err = commitCancellationTx(ctx, tx, run, pending, command.IdempotencyKey, commandDigest, command.At)
+		return err
 	})
 	return result, err
+}
+
+// commitCancellationTx shares the terminal mutation after either exact-resource
+// reconciliation or the transactional proof that a run never started.
+func commitCancellationTx(ctx context.Context, tx *immediateTx, run domain.RunSnapshot, pending *domain.ControlRequest, idempotencyKey string, commandDigest domain.Digest, at time.Time) (domain.RunSnapshot, error) {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stage_records SET state = 'CANCELLED', version = version + 1,
+			output_digest = NULL, current_attempt_id = NULL,
+			review_evidence_digest = NULL, review_policy_digest = NULL, review_waivable = NULL,
+			updated_at = ?
+		WHERE run_id = ? AND stage_name = ?`,
+		formatTime(at), string(run.RunID), string(run.CurrentStage),
+	); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE control_requests SET state = 'APPLIED', applied_at = ?
+		WHERE control_id = ? AND run_id = ? AND state = 'PENDING'`,
+		formatTime(at), string(pending.ID), string(run.RunID),
+	); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE review_decisions SET state = 'STALE', applied_at = ?
+		WHERE run_id = ? AND state = 'PENDING'`,
+		formatTime(at), string(run.RunID),
+	); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	newVersion := run.Version + 1
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE runs SET state = 'CANCELLED', version = ?, cancel_summary = ?, updated_at = ?
+		WHERE run_id = ?`,
+		newVersion, pending.Reason, formatTime(at), string(run.RunID),
+	); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	result, err := readRun(ctx, tx, run.RunID)
+	if err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return domain.RunSnapshot{}, wrap(ErrConsistency, "finalized cancellation projection is invalid", err)
+	}
+	resultJSON, err := marshalResult(result)
+	if err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	if err := insertEvent(ctx, tx, run.RunID, newVersion, domain.EventCancelFinalized, run.CurrentStage,
+		idempotencyKey, commandDigest, resultJSON, at); err != nil {
+		return domain.RunSnapshot{}, err
+	}
+	return result, nil
 }
 
 func (s *Store) AccountActiveTime(ctx context.Context, command domain.ActiveTimeCommand) (domain.ActiveTimeResult, error) {
