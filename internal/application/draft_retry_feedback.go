@@ -1,6 +1,7 @@
 package application
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,49 @@ import (
 )
 
 const draftRetryFeedbackField = "retry_feedback"
+
+// Unversioned runs predate both the legacy and feedback protocols. For an
+// already opened call, only its complete bound identity may select between
+// those two compiled contracts. Errors during reconstruction never cause a
+// fallback. Runs with an explicit version have exactly one contract.
+var errDraftProtocolIdentityMismatch = errors.New("no compiled draft protocol matches the persisted call identity")
+
+func resolveDraftRetryVariables(ctx context.Context, options GenerationReaderOptions, reader port.DraftRetryFeedbackReader, attempt domain.StageAttempt, variables []byte, persisted bool, matches func([]byte) (bool, error)) ([]byte, error) {
+	if options.DraftRetryFeedbackVersion != "" && options.DraftRetryFeedbackVersion != "v1" {
+		return nil, errors.New("unsupported frozen draft retry feedback version")
+	}
+	if options.DraftRetryFeedbackVersion == "v1" {
+		return addDraftRetryFeedback(ctx, options.WorkflowRevision, reader, attempt.RunID, attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
+	}
+	if !persisted || options.WorkflowRevision != workflow.ExecutedSamplesRevision || attempt.Ordinal <= 1 {
+		return append([]byte(nil), variables...), nil
+	}
+	feedback, err := addDraftRetryFeedback(ctx, options.WorkflowRevision, reader, attempt.RunID, attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
+	if err != nil {
+		return nil, err
+	}
+	variants := [][]byte{variables}
+	if !bytes.Equal(variables, feedback) {
+		variants = append(variants, feedback)
+	}
+	var selected []byte
+	for _, variant := range variants {
+		ok, err := matches(variant)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if selected != nil {
+				return nil, errors.New("persisted draft call matches multiple compiled protocols")
+			}
+			selected = append([]byte(nil), variant...)
+		}
+	}
+	if selected == nil {
+		return nil, errDraftProtocolIdentityMismatch
+	}
+	return selected, nil
+}
 
 func addDraftRetryFeedback(ctx context.Context, revision string, reader port.DraftRetryFeedbackReader, runID domain.RunID, stage domain.StageName, ordinal int, startedAt time.Time, variables []byte) ([]byte, error) {
 	if revision != workflow.ExecutedSamplesRevision || ordinal <= 1 {

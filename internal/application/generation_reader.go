@@ -8,6 +8,7 @@ import (
 	"cpgen/internal/domain"
 	durable "cpgen/internal/execution"
 	"cpgen/internal/port"
+	"cpgen/internal/workflow"
 )
 
 type GenerationReadStore interface {
@@ -18,14 +19,15 @@ type GenerationReadStore interface {
 // These are frozen stage policy values, shared with the composing executor.
 // Changing them cannot reinterpret already committed model output.
 type GenerationReaderOptions struct {
-	WorkflowRevision     string
-	DataPromptVersion    string
-	IdeaCount            int
-	SelectionPolicy      string
-	StatementRevision    int64
-	ProviderPolicyDigest domain.Digest
-	Sampling             port.SamplingPolicy
-	MaxOutput            port.OutputLimit
+	WorkflowRevision          string
+	DataPromptVersion         string
+	DraftRetryFeedbackVersion string
+	IdeaCount                 int
+	SelectionPolicy           string
+	StatementRevision         int64
+	ProviderPolicyDigest      domain.Digest
+	Sampling                  port.SamplingPolicy
+	MaxOutput                 port.OutputLimit
 }
 
 type GenerationReader struct {
@@ -59,6 +61,9 @@ func NewGenerationReader(store GenerationReadStore, idea, statement durable.Comm
 	}
 	if options.IdeaCount < 2 || options.IdeaCount > 8 || options.StatementRevision <= 0 || (options.SelectionPolicy != domain.SelectionOrdinalPolicyV1 && options.SelectionPolicy != domain.SelectionIdeaIDPolicyV1) || options.MaxOutput.Bytes > 64<<20 {
 		return nil, errors.New("generation reader has an unsupported content policy")
+	}
+	if options.DraftRetryFeedbackVersion != "" && (options.DraftRetryFeedbackVersion != "v1" || options.WorkflowRevision != workflow.ExecutedSamplesRevision) {
+		return nil, errors.New("unsupported frozen draft retry feedback policy")
 	}
 	if _, err := draftPromptVersion("data.draft", options.WorkflowRevision, options.DataPromptVersion); err != nil {
 		return nil, err
@@ -195,10 +200,6 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 		return nil, "", errors.New("committed draft stage differs from the expected typed input")
 	}
 	feedbackReader, _ := r.store.(port.DraftRetryFeedbackReader)
-	variables, err = addDraftRetryFeedback(ctx, r.options.WorkflowRevision, feedbackReader, runID, stage, attempt.Ordinal, attempt.StartedAt, variables)
-	if err != nil {
-		return nil, "", err
-	}
 	var selected port.CommittedLLMStageArtifact
 	var source domain.CallRecord
 	seen := map[domain.CallRecordID]bool{}
@@ -224,6 +225,19 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 	if source.ID == "" {
 		return nil, "", errors.New("committed draft lacks a successful provider response")
 	}
+	// A cache occurrence belongs to the current attempt, but its provider
+	// request belongs to the original producer. Feedback must use that
+	// producer's ordinal and start time, never the consumer's later review.
+	sourceAttempt := attempt
+	if source.AttemptID != attempt.AttemptID {
+		sourceAttempt, err = r.store.ReadStageAttempt(ctx, runID, stage, source.AttemptID)
+		if err != nil {
+			return nil, "", err
+		}
+		if sourceAttempt.Validate() != nil || sourceAttempt.RunID != runID || sourceAttempt.StageName != stage || sourceAttempt.AttemptID != source.AttemptID || sourceAttempt.State != domain.StageAttemptSucceeded || sourceAttempt.InputDigest != inputDigest || sourceAttempt.OutputDigest == nil || *sourceAttempt.OutputDigest != *attempt.OutputDigest {
+			return nil, "", errors.New("cached draft producer differs from committed stage input or output")
+		}
+	}
 	candidates, err := r.store.ReadAttemptLLMCalls(ctx, runID, source.StageName, source.AttemptID)
 	if err != nil {
 		return nil, "", err
@@ -231,25 +245,38 @@ func (r *GenerationReader) readDraft(ctx context.Context, runID domain.RunID, st
 	if len(candidates) > 64 {
 		return nil, "", errors.New("committed draft call history exceeds bound")
 	}
-	prompt, schema, err := buildLLMDraftPromptForVariables(string(stage), r.options.WorkflowRevision, r.options.DataPromptVersion, variables)
-	if err != nil {
-		return nil, "", err
-	}
 	for _, candidate := range candidates {
 		if candidate.RunID != runID || candidate.StageName != stage || candidate.AttemptID != source.AttemptID || candidate.Kind != domain.CallLLMGenerate || candidate.State != domain.CallRecordTerminal {
 			continue
 		}
-		request := port.GenerateRequest{Prompt: prompt, Schema: schema, Variables: append(json.RawMessage(nil), variables...), Sampling: r.options.Sampling, MaxOutput: r.options.MaxOutput, LogicalIdempotencyKey: candidate.LogicalOperationID, ProviderPolicyDigest: r.options.ProviderPolicyDigest, PrivacyClassification: "private"}
-		plan, err := service.PlanGenerate(request)
+		var open domain.OpenCallRequest
+		var request port.GenerateRequest
+		matches := func(input []byte) (bool, error) {
+			var err error
+			request, err = buildDraftRequest(r.options, stage, candidate.LogicalOperationID, input)
+			if err != nil {
+				return false, err
+			}
+			plan, err := service.PlanGenerate(request)
+			if err != nil {
+				return false, err
+			}
+			open = domain.OpenCallRequest{ID: candidate.ID, RunID: candidate.RunID, ExpectedRunVersion: 1, StageName: candidate.StageName, AttemptID: candidate.AttemptID, LogicalOperationID: candidate.LogicalOperationID, Kind: candidate.Kind, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: candidate.RetryPolicy, IdempotencyKey: candidate.IdempotencyKey, At: candidate.OpenedAt}
+			bound, _, err := service.Bind(open, request)
+			return bound.Provider == candidate.Provider && bound.RequestDigest == candidate.RequestDigest && bound.PolicyDigest == candidate.PolicyDigest, err
+		}
+		selectedVariables, err := resolveDraftRetryVariables(ctx, r.options, feedbackReader, sourceAttempt, variables, true, matches)
+		if errors.Is(err, errDraftProtocolIdentityMismatch) {
+			continue
+		}
 		if err != nil {
 			return nil, "", err
 		}
-		open := domain.OpenCallRequest{ID: candidate.ID, RunID: candidate.RunID, ExpectedRunVersion: 1, StageName: candidate.StageName, AttemptID: candidate.AttemptID, LogicalOperationID: candidate.LogicalOperationID, Kind: candidate.Kind, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: candidate.RetryPolicy, IdempotencyKey: candidate.IdempotencyKey, At: candidate.OpenedAt}
-		bound, _, err := service.Bind(open, request)
+		matched, err := matches(selectedVariables)
 		if err != nil {
 			return nil, "", err
 		}
-		if bound.Provider != candidate.Provider || bound.RequestDigest != candidate.RequestDigest || bound.PolicyDigest != candidate.PolicyDigest {
+		if !matched {
 			continue
 		}
 		id, response, err := service.ReadCommitted(ctx, open, request)

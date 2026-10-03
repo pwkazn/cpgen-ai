@@ -58,6 +58,9 @@ flowchart TD
 
 新工作流为 `mvp.idea.statement.similarity.solution.data.judge.package.v3`，新 Solution/Judge 报告为 v2，Statement/Solution 提示词为 v2，导出 manifest 为 `cpgen.package/v3`。Data 默认保留已持久化的 v2 提示；新示例配置显式选择 `llm.data_prompt_version: v5`，保留 generator 的完整 `argv` 示例，并要求计算完整输出字节数后留出 10% 余量。选择进入冻结配置，生成、格式修复、已提交读取及恢复采用同一版本；带重试反馈的 v5 使用 v6 提示。既有 v2/v3/v4 提示字节不变，省略字段的旧配置摘要和提示身份不变。Judge 发现 generated generator OLE 时，现有有界内容重试会回到 Data；已耗尽配额仍进入人工审核，且不调整 1 MiB 沙箱上限。草稿 DTO 仍是 v1 形状；新增 program-context/finalized-statement 为各自 v1。V5 继续使用 V2 的 `content_retries` 有界配额与原有调用、token、成本和时间预算。
 
+草稿重试反馈通过 `llm.draft_retry_feedback_version: v1` 显式启用并写入冻结配置；新示例已启用。省略或留空时，新调用继续使用旧的无反馈协议。对尚未版本化的历史调用，读取与恢复仅通过已持久化的 provider、request digest 和 policy digest 唯一匹配已有的无反馈或带反馈协议，不重发请求，也不在验证失败后降级。缓存来源按原生产 attempt 的序号与开始时间读取反馈。格式修复保留冻结的基础 Data/阶段提示版本与原校验器，反馈仍保留在修复请求的 `original_input` 中；不改写既有调用身份。
+
+
 旧 V1/V2 工作流不会在新语义下自动恢复或导出，旧报告也不会被当作 V3 证据。兼容路径会按旧 run 持久化的 workflow identity 读取旧包；新配置只用于创建独立的 V3 run。不要修改旧 run 的版本、草稿、SQLite 行或历史迁移文件。迁移 `000028` 只把 V3 加入题包准入触发器允许的工作流身份，保留原 Quality/Package/READY 条件，既有数据行不变。
 
 保持原固定阶段顺序、attempt 身份、沙箱请求身份、调用台账、资源回收证明、预算结算和 artifact publication。定稿无网络、无新增模型调用；新增成本是 Judge 对每个样例多执行一次 brute，以及新的制品字节。在当前 Docker direct 协议下每组样例新增两个容器创建，按实际台账扣减，预算不足照常阻断。未提交的报告/答案不具有发布权。

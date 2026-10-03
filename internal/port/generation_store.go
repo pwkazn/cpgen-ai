@@ -12,6 +12,7 @@ import (
 type GenerationStore interface {
 	ReadGenerationSnapshot(context.Context, domain.RunID) (domain.GenerationRequestSnapshotV1, error)
 	ReadCommittedLLMStage(context.Context, domain.RunID, domain.StageName) (CommittedLLMStage, error)
+	ReadStageAttempt(context.Context, domain.RunID, domain.StageName, domain.AttemptID) (domain.StageAttempt, error)
 	ReadAttemptLLMCalls(context.Context, domain.RunID, domain.StageName, domain.AttemptID) ([]domain.CallRecord, error)
 	ReadStageInputDigest(context.Context, domain.RunID, domain.StageName) (domain.Digest, error)
 	ReadAttemptDependencyCheckpoint(context.Context, domain.RunID, domain.StageName, domain.AttemptID) (*domain.BlockedCheckpoint, error)

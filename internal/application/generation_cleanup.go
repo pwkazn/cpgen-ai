@@ -12,18 +12,58 @@ import (
 )
 
 func (s *DraftExecution) draftCall(runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte) (domain.OpenCallRequest, port.GenerateRequest, error) {
-	prompt, schema, err := buildLLMDraftPromptForVariables(string(attempt.StageName), s.config.Content.WorkflowRevision, s.config.Content.DataPromptVersion, variables)
+	logical := durable.MutationID("generation", runID, attempt.AttemptID, attempt.StageName, "draft/v1")
+	request, err := buildDraftRequest(s.config.Content, attempt.StageName, logical, variables)
 	if err != nil {
 		return domain.OpenCallRequest{}, port.GenerateRequest{}, err
 	}
-	logical := durable.MutationID("generation", runID, attempt.AttemptID, attempt.StageName, "draft/v1")
-	request := port.GenerateRequest{Prompt: prompt, Schema: schema, Variables: append(json.RawMessage(nil), variables...), Sampling: s.config.Content.Sampling, MaxOutput: s.config.Content.MaxOutput, LogicalIdempotencyKey: logical, ProviderPolicyDigest: s.config.Content.ProviderPolicyDigest, PrivacyClassification: "private"}
 	plan, err := s.config.LLM.PlanGenerate(request)
 	if err != nil {
 		return domain.OpenCallRequest{}, request, err
 	}
 	open := domain.OpenCallRequest{ID: domain.CallRecordID(durable.MutationID("callrec", logical)), RunID: runID, ExpectedRunVersion: version, StageName: attempt.StageName, AttemptID: attempt.AttemptID, LogicalOperationID: logical, Kind: domain.CallLLMGenerate, Provider: plan.Provider, RequestDigest: plan.RequestDigest, PolicyDigest: request.ProviderPolicyDigest, RetryPolicy: s.config.RetryPolicy, IdempotencyKey: durable.MutationID("open", logical), At: attempt.StartedAt}
 	return open, request, nil
+}
+
+func buildDraftRequest(options GenerationReaderOptions, stage domain.StageName, logical string, variables []byte) (port.GenerateRequest, error) {
+	prompt, schema, err := buildLLMDraftPromptForVariables(string(stage), options.WorkflowRevision, options.DataPromptVersion, variables)
+	if err != nil {
+		return port.GenerateRequest{}, err
+	}
+	return port.GenerateRequest{Prompt: prompt, Schema: schema, Variables: append(json.RawMessage(nil), variables...), Sampling: options.Sampling, MaxOutput: options.MaxOutput, LogicalIdempotencyKey: logical, ProviderPolicyDigest: options.ProviderPolicyDigest, PrivacyClassification: "private"}, nil
+}
+
+// resolveDraftCall identifies an existing unversioned call before replay or
+// reconciliation. It performs planning only; no receipts, cache or transport
+// are consulted until the durable identity is known.
+func (s *DraftExecution) resolveDraftCall(ctx context.Context, runID domain.RunID, version int64, attempt domain.StageAttempt, variables []byte, calls *durable.StructuredLLMCalls) (domain.OpenCallRequest, port.GenerateRequest, domain.CallRecord, error) {
+	logical := durable.MutationID("generation", runID, attempt.AttemptID, attempt.StageName, "draft/v1")
+	existing, err := s.config.Store.ReadLogicalCall(ctx, domain.CallRecordID(durable.MutationID("callrec", logical)))
+	if err != nil && !errors.Is(err, sqlite.ErrNotFound) {
+		return domain.OpenCallRequest{}, port.GenerateRequest{}, existing, err
+	}
+	feedbackReader, _ := s.config.Store.(port.DraftRetryFeedbackReader)
+	variables, err = resolveDraftRetryVariables(ctx, s.config.Content, feedbackReader, attempt, variables, err == nil, func(input []byte) (bool, error) {
+		open, request, err := s.draftCall(runID, version, attempt, input)
+		if err != nil {
+			return false, err
+		}
+		if existing.Kind == domain.CallCacheReuse {
+			cache, err := durable.NewStructuredLLMCache(calls, s.config.Store, s.config.Locks)
+			if err != nil {
+				return false, err
+			}
+			bound, _, key, _, err := cache.Identity(open, request)
+			return existing.Provider == "private-llm-cache" && existing.RequestDigest == key.Digest && existing.PolicyDigest == bound.PolicyDigest, err
+		}
+		bound, _, err := calls.Bind(open, request)
+		return existing.Kind == domain.CallLLMGenerate && existing.Provider == bound.Provider && existing.RequestDigest == bound.RequestDigest && existing.PolicyDigest == bound.PolicyDigest, err
+	})
+	if err != nil {
+		return domain.OpenCallRequest{}, port.GenerateRequest{}, existing, err
+	}
+	open, request, err := s.draftCall(runID, version, attempt, variables)
+	return open, request, existing, err
 }
 
 // reconciliationAttempt deliberately does not require an active interval:
@@ -83,28 +123,16 @@ func (s *GenerationExecutor) ReconcileStage(ctx context.Context, runID domain.Ru
 
 func (s *DraftExecution) reconcileDraftRequest(ctx context.Context, current domain.RunSnapshot, attempt domain.StageAttempt, variables []byte) error {
 	runID := current.RunID
-	feedbackReader, _ := s.config.Store.(port.DraftRetryFeedbackReader)
-	variables, err := addDraftRetryFeedback(ctx, s.config.Content.WorkflowRevision, feedbackReader, runID, attempt.StageName, attempt.Ordinal, attempt.StartedAt, variables)
-	if err != nil {
-		return err
-	}
-	open, request, err := s.draftCall(runID, current.Version, attempt, variables)
-	if err != nil {
-		return err
-	}
-	existing, err := s.config.Store.ReadLogicalCall(ctx, open.ID)
-	if errors.Is(err, sqlite.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
 	ledger, err := durable.NewRunLedger(s.config.Store, runID, attempt.StageName, attempt.AttemptID)
 	if err != nil {
 		return err
 	}
 	calls, err := s.calls(ledger, attempt.StageName)
 	if err != nil {
+		return err
+	}
+	open, request, existing, err := s.resolveDraftCall(ctx, runID, current.Version, attempt, variables, calls)
+	if err != nil || existing.ID == "" {
 		return err
 	}
 	if existing.Kind == domain.CallCacheReuse {

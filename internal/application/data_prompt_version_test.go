@@ -19,7 +19,7 @@ import (
 
 // Exercise each actual request reconstruction path up to its planning boundary.
 // The spy stops before any ledger mutation, receipt read or physical dispatch.
-func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *testing.T) {
+func TestDataPromptVersionUsesFrozenSelectionForGenerationAndReader(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "mvp.example.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -33,15 +33,16 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 	// first one, or config.Decode rejects the example off Windows.
 	root := filepath.ToSlash(t.TempDir())
 	raw = []byte(strings.ReplaceAll(string(raw), "D:/cpgen-private", root))
-	for _, tc := range []struct{ name, revision, selected, want string }{
-		{"legacy-v1", workflow.GenerationRevision, "", "v1"},
-		{"legacy-v2", workflow.RetryingGenerationRevision, "", "v1"},
-		{"existing-v3", workflow.ExecutedSamplesRevision, "", "v2"},
-		{"explicit-v3", workflow.ExecutedSamplesRevision, "v3", "v3"},
-		{"explicit-v5", workflow.ExecutedSamplesRevision, "v5", "v5"},
+	for _, tc := range []struct{ name, revision, selected, feedback, want string }{
+		{"legacy-v1", workflow.GenerationRevision, "", "", "v1"},
+		{"legacy-v2", workflow.RetryingGenerationRevision, "", "", "v1"},
+		{"existing-v3", workflow.ExecutedSamplesRevision, "", "", "v2"},
+		{"explicit-v3", workflow.ExecutedSamplesRevision, "v3", "v1", "v3"},
+		{"explicit-v5", workflow.ExecutedSamplesRevision, "v5", "v1", "v5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := strings.Replace(string(raw), workflow.ExecutedSamplesRevision, tc.revision, 1)
+			input = strings.Replace(input, "  draft_retry_feedback_version: v1\n", "", 1)
 			input = strings.Replace(input, "  data_prompt_version: v5\n", "", 1)
 			input = strings.Replace(input, "  data_prompt_version: v3\n", "", 1)
 			cfg, err := config.Decode([]byte(input))
@@ -49,6 +50,7 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 				t.Fatal(err)
 			}
 			cfg.LLM.DataPromptVersion = tc.selected
+			cfg.LLM.DraftRetryFeedbackVersion = tc.feedback
 			cfg.LLM.MaxFormatRepairs = 1
 			frozenBytes, err := cfg.Effective()
 			if err != nil {
@@ -59,7 +61,7 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 				t.Fatal(err)
 			}
 			content, _, err := BuildGenerationExecutionSettings(frozen)
-			if err != nil || content.DataPromptVersion != tc.selected {
+			if err != nil || content.DataPromptVersion != tc.selected || content.DraftRetryFeedbackVersion != tc.feedback {
 				t.Fatalf("frozen selection missing from execution policy: %+v %v", content, err)
 			}
 			prompt, schema, err := BuildLLMDraftPromptForConfig("data", frozen)
@@ -112,18 +114,14 @@ func TestDataPromptVersionUsesFrozenSelectionForGenerationReaderAndReconcile(t *
 			if !errors.Is(err, errDataPromptPlanBoundary) || generated.Prompt != prompt || generated.Schema != schema {
 				t.Fatalf("generation selected another prompt: %+v %v", generated.Prompt, err)
 			}
-			current := domain.RunSnapshot{RunID: attempt.RunID, Version: 1}
-			if err := drafts.reconcileDraftRequest(context.Background(), current, attempt, variables); !errors.Is(err, errDataPromptPlanBoundary) {
-				t.Fatalf("reconcile did not reach identical planning boundary: %v", err)
-			}
 			call := domain.CallRecord{ID: "callrec_00000000000000000000000000000031", RunID: attempt.RunID, StageName: "data", AttemptID: attempt.AttemptID, Kind: domain.CallLLMGenerate, State: domain.CallRecordTerminal, LogicalOperationID: generated.LogicalIdempotencyKey}
 			store := dataPromptReadStore{stage: port.CommittedLLMStage{StageVersion: 1, Attempt: attempt, Artifacts: []port.CommittedLLMStageArtifact{{ProviderCallRecordID: call.ID}}}, call: call}
 			reader := &GenerationReader{store: store, options: content}
 			if _, _, err := reader.readDraft(context.Background(), attempt.RunID, "data", digest, variables, spy); !errors.Is(err, errDataPromptPlanBoundary) {
 				t.Fatalf("committed reader did not reach planning boundary: %v", err)
 			}
-			if len(spy.requests) != 3 {
-				t.Fatalf("planning calls=%d, want generation, reconcile, reader", len(spy.requests))
+			if len(spy.requests) != 2 {
+				t.Fatalf("planning calls=%d, want generation, reader", len(spy.requests))
 			}
 			for _, request := range spy.requests {
 				if !reflect.DeepEqual(request, generated) {
