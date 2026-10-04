@@ -1092,6 +1092,19 @@ async function detailPage(id, { quiet = false } = {}) {
     });
     if (route !== state.route) return;
     setOnline(true);
+    const r = d.run || {};
+    // Update polling before the quiet-render shortcut, including terminal states.
+    clearInterval(state.detailTimer);
+    state.detailTimer = 0;
+    if (["CREATED", "RUNNING", "BLOCKED", "NEEDS_REVIEW"].includes(r.state)) {
+      state.detailTimer = setInterval(
+        () => {
+          if (route === state.route && !document.hidden)
+            detailPage(id, { quiet: true });
+        },
+        document.hidden ? 15000 : 2000,
+      );
+    }
     const signature = JSON.stringify([
       id,
       d.run?.version,
@@ -1099,7 +1112,6 @@ async function detailPage(id, { quiet = false } = {}) {
       d.execution?.last_error,
     ]);
     if (quiet && signature === state.lastDetail) return;
-    const r = d.run || {};
     const tab = new URL(location.href).searchParams.get("tab") || "statement";
     state.tab = ["statement", "solution", "checks", "events"].includes(tab)
       ? tab
@@ -1199,15 +1211,6 @@ async function detailPage(id, { quiet = false } = {}) {
     }
     if (state.reviewRoute && canReview && !state.reviewDismissed)
       renderReviewForm(id, d);
-    if (["CREATED", "RUNNING", "BLOCKED", "NEEDS_REVIEW"].includes(r.state)) {
-      clearInterval(state.detailTimer);
-      state.detailTimer = setInterval(
-        () => {
-          if (!document.hidden) detailPage(id, { quiet: true });
-        },
-        document.hidden ? 15000 : 2000,
-      );
-    }
   } catch (e) {
     if (route === state.route && e.name !== "AbortError") {
       fail(e);
