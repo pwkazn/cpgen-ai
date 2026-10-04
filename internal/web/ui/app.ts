@@ -1344,19 +1344,25 @@ async function performAction(action, id, d) {
     const f = document.querySelector("#cancel-form");
     f.onsubmit = async (e) => {
       e.preventDefault();
+      const route = state.route;
       try {
         await api(`/runs/${encodeURIComponent(id)}/cancel`, {
           method: "POST",
+          reportConnection: false,
           body: {
             operation_key: crypto.randomUUID(),
             expected_run_version: String(d.run?.version ?? ""),
             reason: "用户在工作台取消任务",
           },
         });
+        if (route !== state.route) return;
+        state.lastSuccess = Date.now();
         state.editing = false;
         f.innerHTML = "<p>已请求取消，等待执行停止与资源清理。</p>";
         detailPage(id);
       } catch (err) {
+        if (route !== state.route) return;
+        if (err.name !== "AbortError") setOnline(!!err.status);
         const alert = f.querySelector("[role=alert]");
         alert.textContent =
           err.status === 409
@@ -1371,17 +1377,23 @@ async function performAction(action, id, d) {
     return;
   }
   if (action === "resume") {
+    const route = state.route;
     bumpStatus("正在提交恢复请求…");
     try {
       await api(`/runs/${encodeURIComponent(id)}/resume`, {
         method: "POST",
+        reportConnection: false,
         body: {
           operation_key: crypto.randomUUID(),
           expected_run_version: String(d.run?.version),
         },
       });
+      if (route !== state.route) return;
+      state.lastSuccess = Date.now();
       await detailPage(id);
     } catch (e) {
+      if (route !== state.route) return;
+      if (e.name !== "AbortError") setOnline(!!e.status);
       bumpStatus(e.message, true);
     }
     return;
@@ -1493,6 +1505,7 @@ function renderReviewForm(id, d) {
   };
   f.onsubmit = async (e) => {
     e.preventDefault();
+    const route = state.route;
     const fd = new FormData(f);
     const kind = fd.get("kind");
     let patch = {};
@@ -1519,6 +1532,7 @@ function renderReviewForm(id, d) {
     try {
       const out = await api(`/runs/${encodeURIComponent(id)}/review`, {
         method: "POST",
+        reportConnection: false,
         body: {
           operation_key: crypto.randomUUID(),
           expected_run_version: String(d.run?.version ?? ""),
@@ -1539,10 +1553,14 @@ function renderReviewForm(id, d) {
           budget_increase: patch,
         },
       });
+      if (route !== state.route) return;
+      state.lastSuccess = Date.now();
       state.editing = false;
       f.innerHTML = `<p>决定 ${esc(out.decision_id || out.id || "已记录")} 已保存，状态：${esc(out.state || "PENDING")}。请显式继续执行。</p>`;
       await detailPage(id);
     } catch (err) {
+      if (route !== state.route) return;
+      if (err.name !== "AbortError") setOnline(!!err.status);
       f.querySelector("[role=alert]").textContent =
         err.status === 409
           ? `${err.message}。已保留填写内容；请关闭表单刷新并核对最新版本后再提交。`
