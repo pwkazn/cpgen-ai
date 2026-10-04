@@ -65,3 +65,55 @@ func TestDefinitionDoesNotExposeMutableCompiledStages(t *testing.T) {
 		t.Fatal("unknown revision acquired execution capabilities")
 	}
 }
+
+func TestManualRevisionTargetsRespectFrozenStagesAndRecommendProducers(t *testing.T) {
+	for _, tc := range []struct {
+		revision  string
+		current   domain.StageName
+		preferred []domain.StageName
+	}{
+		{GenerationRevision, "similarity_decision", []domain.StageName{"idea", "statement"}},
+		{RetryingGenerationRevision, "similarity_decision", []domain.StageName{"idea", "statement"}},
+		{ExecutedSamplesRevision, "similarity_decision", []domain.StageName{"idea", "statement"}},
+		{ExecutedSamplesRevision, "judge", []domain.StageName{"statement", "data"}},
+		{ExecutedSamplesRevision, "solution_decision", []domain.StageName{"solution", "statement"}},
+		{ExecutedSamplesRevision, "quality", []domain.StageName{"solution"}},
+		{ExecutedSamplesRevision, "idea", []domain.StageName{"idea"}},
+		{FakeRevision, "prepare", []domain.StageName{"prepare"}},
+		{FakeRevision, "checkpoint", []domain.StageName{"checkpoint"}},
+		{LegacySimilarityRevision, "similarity", []domain.StageName{"idea", "statement"}},
+		{LegacySimilarityCheckpointRevision, "slice2_checkpoint", []domain.StageName{"idea", "statement"}},
+		{LegacySolutionCheckpointRevision, "solution_checkpoint", []domain.StageName{"solution", "statement"}},
+	} {
+		t.Run(tc.revision+"/"+string(tc.current), func(t *testing.T) {
+			d, err := DefinitionFor(tc.revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets := d.ManualRevisionTargets(tc.current)
+			if len(targets) < len(tc.preferred) || !slices.Equal(targets[:len(tc.preferred)], tc.preferred) {
+				t.Fatalf("recommended targets = %v, want prefix %v", targets, tc.preferred)
+			}
+			stages := d.Stages()
+			current := slices.Index(stages, tc.current)
+			if len(targets) != current+1 {
+				t.Fatalf("targets = %v, want exactly the current stage and its upstream stages", targets)
+			}
+			seen := map[domain.StageName]bool{}
+			for _, target := range targets {
+				index := slices.Index(stages, target)
+				if index < 0 || index > current || seen[target] {
+					t.Fatalf("unavailable or duplicate target %q in %v", target, targets)
+				}
+				seen[target] = true
+			}
+			targets[0] = "mutated"
+			if d.ManualRevisionTargets(tc.current)[0] != tc.preferred[0] {
+				t.Fatal("caller mutated the definition")
+			}
+			if len(d.ManualRevisionTargets("future")) != 0 {
+				t.Fatal("unknown current stage gained revision targets")
+			}
+		})
+	}
+}

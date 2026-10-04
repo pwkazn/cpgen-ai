@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"github.com/gin-gonic/gin"
+	"slices"
 	"strings"
 	"time"
 )
@@ -211,6 +212,10 @@ func (s *Server) review(c *gin.Context) {
 	}
 	if snapshot.State != domain.RunNeedsReview {
 		writeErr(c, 409, "invalid_state", "任务当前不需要评审")
+		return
+	}
+	if body.Kind == domain.ReviewRevise && !slices.Contains(revisionTargets(snapshot), body.RevisionTarget) {
+		writeErr(c, 422, "invalid_revision_target", "修订目标必须是任务工作流中的当前阶段或上游阶段")
 		return
 	}
 	input, evidence, policy, err := store.WorkbenchReviewBinding(c.Request.Context(), id, snapshot.CurrentStage)

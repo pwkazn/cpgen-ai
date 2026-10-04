@@ -966,11 +966,20 @@ function stageLabel(name) {
       idea: "题目构思",
       statement: "题面与样例",
       similarity: "相似度检查",
+      similarity_decision: "查重评审",
       solution: "题解与程序",
+      solution_verify: "题解验证",
+      solution_decision: "题解评审",
       data: "测试数据",
+      data_verify: "数据验证",
       judge: "执行核验",
       quality: "质量检查",
       package: "题包打包",
+      prepare: "准备（本地验证）",
+      exercise: "执行（本地验证）",
+      checkpoint: "评审检查点（本地验证）",
+      slice2_checkpoint: "查重检查点",
+      solution_checkpoint: "题解检查点",
     }[name] ||
     name ||
     "阶段"
@@ -1458,32 +1467,19 @@ function renderReviewForm(id, d) {
   const legacyBudget =
     !splitBudget && !limits.token_budget && limits.max_llm_tokens == null;
   const currentStage = String(d.run?.current_stage || "");
-  const targets =
-    currentStage === "judge"
-      ? [
-          ["statement", "题面与样例"],
-          ["data", "数据生成器与校验器"],
-        ]
-      : currentStage === "solution_decision"
-        ? [
-            ["solution", "题解"],
-            ["statement", "题面与样例"],
-          ]
-        : currentStage === "quality"
-          ? [["solution", "题解"]]
-          : [[currentStage, `当前阶段（${currentStage}）`]];
-  const defaultTarget = targets.some(([stage]) => stage === currentStage)
-    ? currentStage
-    : targets[0]?.[0] || currentStage;
+  const targets = d.revision_targets || [];
+  const defaultTarget = targets[0];
   state.editing = true;
   panel.insertAdjacentHTML(
     "afterbegin",
-    `<form id="review-form" class="inline-form"><h2>人工评审</h2><p>${esc(rv.reason || rv.trigger_reason || "请先查看失败阶段与相关制品，再选择修订目标或其他决定。")}</p><label>评审人<input name="reviewer" required></label><details><summary>补充说明（建议写明报告和失败原因）</summary><label>说明<textarea name="reason" maxlength="4000"></textarea></label></details><label>决定<select name="kind"><option value="REVISE">修复并重做上游阶段</option><option value="RETRY">增加预算后重试当前阶段</option><option value="REJECT">拒绝继续</option></select></label><label>修订目标阶段<select name="revision_target_stage">${targets
+    `<form id="review-form" class="inline-form"><h2>人工评审</h2><p>${esc(rv.reason || rv.trigger_reason || "请先查看失败阶段与相关制品，再选择修订目标或其他决定。")}</p><label>评审人<input name="reviewer" required></label><details><summary>补充说明（建议写明报告和失败原因）</summary><label>说明<textarea name="reason" maxlength="4000"></textarea></label></details><label>决定<select name="kind"><option value="REVISE"${targets.length ? "" : " disabled"}>修复并重做上游阶段</option><option value="RETRY">增加预算后重试当前阶段</option><option value="REJECT">拒绝继续</option></select></label><label>修订目标阶段<select name="revision_target_stage"${targets.length ? "" : " disabled"}>${targets
       .map(
-        ([stage, label]) =>
-          `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(label)}</option>`,
+        (stage) =>
+          `<option value="${esc(stage)}"${stage === defaultTarget ? " selected" : ""}>${esc(stageLabel(stage))}${stage === currentStage ? "（当前阶段）" : ""}</option>`,
       )
-      .join("")}</select></label>${
+      .join(
+        "",
+      )}</select></label>${targets.length ? "" : "<p>当前工作流没有可用的修订目标，请刷新后查看可用决定。</p>"}${
       splitBudget
         ? '<div class="fields"><label>增加输入 token 数（仅用于重试）<input name="max_llm_input_tokens" inputmode="numeric" placeholder="留空表示不调整"></label><label>增加输出 token 数（仅用于重试）<input name="max_llm_output_tokens" inputmode="numeric" placeholder="留空表示不调整"></label></div>'
         : legacyBudget
@@ -1508,6 +1504,14 @@ function renderReviewForm(id, d) {
     const route = state.route;
     const fd = new FormData(f);
     const kind = fd.get("kind");
+    if (
+      kind === "REVISE" &&
+      !targets.includes(fd.get("revision_target_stage"))
+    ) {
+      f.querySelector("[role=alert]").textContent =
+        "请选择服务端提供的修订目标";
+      return;
+    }
     let patch = {};
     try {
       patch = splitBudget
