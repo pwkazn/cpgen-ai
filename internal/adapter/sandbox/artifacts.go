@@ -303,6 +303,19 @@ func (w *sandboxArtifactWriter) Finalize(ctx context.Context) (domain.PendingArt
 		}
 		w.pending = &pending
 	}
+	// Filesystem publication can report zero bytes after a successful link is
+	// retried, or charge a different writer when equal blobs publish out of
+	// seal order. The durable pin assigns the byte charge before publication.
+	pending, err := w.sink.ledger.ReadPendingArtifact(ctx, w.declaration.ID)
+	if err != nil {
+		return domain.PendingArtifact{}, err
+	}
+	reported := *w.pending
+	reported.PhysicalNewBytes = pending.PhysicalNewBytes
+	if !reflect.DeepEqual(reported, pending) {
+		return domain.PendingArtifact{}, errors.New("finalized sandbox artifact differs from its durable receipt")
+	}
+	w.pending = &pending
 	if err := w.sink.complete(ctx, w.declaration, *w.pending); err != nil {
 		return domain.PendingArtifact{}, err
 	}
