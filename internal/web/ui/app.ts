@@ -1362,30 +1362,55 @@ async function performAction(action, id, d) {
     const f = document.querySelector("#cancel-form");
     f.onsubmit = async (e) => {
       e.preventDefault();
+      if (!state.online || f.dataset.sending === "true") return;
       const route = state.route;
+      const current = () =>
+        route === state.route && document.querySelector("#cancel-form") === f;
+      const path = `/runs/${encodeURIComponent(id)}/cancel`;
+      const submit = f.querySelector("[data-write]");
+      f.dataset.sending = "true";
+      submit.disabled = true;
       try {
-        await api(`/runs/${encodeURIComponent(id)}/cancel`, {
+        // An uncertain write must replay its original identity and version,
+        // even if cancellation has already changed the persisted run state.
+        let body = state.pendingActions.get(path)?.body;
+        if (!body) {
+          const latest = await api(`/runs/${encodeURIComponent(id)}`, {
+            reportConnection: false,
+          });
+          if (!current()) return;
+          if (!latest.available_actions?.cancel) {
+            state.editing = false;
+            await detailPage(id);
+            return;
+          }
+          body = {
+            operation_key: crypto.randomUUID(),
+            expected_run_version: String(latest.run?.version ?? ""),
+            reason: "用户在工作台取消任务",
+          };
+        }
+        await api(path, {
           method: "POST",
           reportConnection: false,
-          body: {
-            operation_key: crypto.randomUUID(),
-            expected_run_version: String(d.run?.version ?? ""),
-            reason: "用户在工作台取消任务",
-          },
+          body,
         });
-        if (route !== state.route) return;
+        if (!current()) return;
         state.lastSuccess = Date.now();
         state.editing = false;
         f.innerHTML = "<p>已请求取消，等待执行停止与资源清理。</p>";
         detailPage(id);
       } catch (err) {
-        if (route !== state.route) return;
+        if (!current()) return;
         if (err.name !== "AbortError") setOnline(!!err.status);
         const alert = f.querySelector("[role=alert]");
         alert.textContent =
           err.status === 409
-            ? `${err.message}。请检查当前版本后再决定是否重试。`
+            ? `${err.message}。可再次确认取消；重试前会读取最新任务状态。`
             : err.message;
+      } finally {
+        f.dataset.sending = "false";
+        if (current()) submit.disabled = !state.online;
       }
     };
     f.querySelector("[data-dismiss]").onclick = () => {
