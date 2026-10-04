@@ -67,11 +67,17 @@ func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (dom
 	if input.Value == nil {
 		return empty, errors.New("solution draft has no accepted current source")
 	}
-	variables, err := solutionDraftVariables(s.revision, *input.Value)
+	return s.readDraftForInput(ctx, runID, *input.Value)
+}
+
+// readDraftForInput consumes acceptance verified during the same top-level read.
+func (s *SolutionReader) readDraftForInput(ctx context.Context, runID domain.RunID, input domain.SolutionDraftInputV1) (domain.SolutionContent, error) {
+	var empty domain.SolutionContent
+	variables, err := solutionDraftVariables(s.revision, input)
 	if err != nil {
 		return empty, err
 	}
-	digest, err := input.Value.Digest()
+	digest, err := input.Digest()
 	if err != nil {
 		return empty, err
 	}
@@ -87,7 +93,7 @@ func (s *SolutionReader) ReadDraft(ctx context.Context, runID domain.RunID) (dom
 	if err := validateSolutionDraftForWorkflow(s.revision, draft); err != nil {
 		return empty, err
 	}
-	content, err := draft.Bind(*input.Value)
+	content, err := draft.Bind(input)
 	if err != nil {
 		return empty, err
 	}
@@ -122,7 +128,6 @@ type solutionVerificationReadStore interface {
 // never starts Docker, writes artifacts, or calls either external provider.
 func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunID, config sandboxexec.ReadPolicy) (SolutionVerificationReport, error) {
 	var empty SolutionVerificationReport
-	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -130,10 +135,18 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 	if input.Value == nil {
 		return empty, errors.New("verification has no current accepted input")
 	}
-	content, err := s.ReadDraft(ctx, runID)
+	content, err := s.readDraftForInput(ctx, runID, *input.Value)
 	if err != nil {
 		return empty, err
 	}
+	return s.readVerificationForInput(ctx, runID, config, *input.Value, content)
+}
+
+// readVerificationForInput reuses the current acceptance and draft already
+// verified in this read; the report and all retained execution proof are reread.
+func (s *SolutionReader) readVerificationForInput(ctx context.Context, runID domain.RunID, config sandboxexec.ReadPolicy, input domain.SolutionDraftInputV1, content domain.SolutionContent) (SolutionVerificationReport, error) {
+	var empty SolutionVerificationReport
+	store := s.store
 	stage, err := store.ReadCommittedSandboxStage(ctx, runID, "solution_verify")
 	if err != nil {
 		return empty, err
@@ -187,7 +200,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return empty, errors.New("verification report is not canonical")
 	}
-	if err := report.ValidateFor(*input.Value, content); err != nil {
+	if err := report.ValidateFor(input, content); err != nil {
 		return empty, err
 	}
 	if report.ToolchainLockDigest != lockDigest || report.PolicyDigest != solutionVerificationPolicyDigest(lockDigest, report.SchemaVersion) {
@@ -290,7 +303,7 @@ func (s *SolutionReader) ReadVerification(ctx context.Context, runID domain.RunI
 				return empty, err
 			}
 		}
-		request := port.RunRequest{Role: sample.Role, Program: programs[sample.Role], Stdin: &sample.Input, Limits: port.RunLimits{Time: time.Duration(input.Value.Problem.TimeLimitMS) * time.Millisecond, MemoryBytes: input.Value.Problem.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}}
+		request := port.RunRequest{Role: sample.Role, Program: programs[sample.Role], Stdin: &sample.Input, Limits: port.RunLimits{Time: time.Duration(input.Problem.TimeLimitMS) * time.Millisecond, MemoryBytes: input.Problem.MemoryLimitMB << 20, PIDs: 64, StdoutBytes: 1 << 20, StderrBytes: 1 << 20}}
 		if err := verifyResult(domain.CallSandboxRun, request, sample.Result, func(i docker.PlanIdentity) (port.ContainerPlan, error) {
 			return docker.BuildRunPlan(request, config.Lock, i)
 		}); err != nil {

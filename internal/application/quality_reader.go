@@ -27,7 +27,7 @@ func (s *QualityReader) ReadInput(ctx context.Context, runID domain.RunID) (Qual
 	if err != nil {
 		return empty, err
 	}
-	report, err := s.data.ReadJudgeVerification(ctx, runID)
+	report, err := s.data.readJudgeVerificationForInput(ctx, runID, input)
 	if err != nil {
 		return empty, err
 	}

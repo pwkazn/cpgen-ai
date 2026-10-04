@@ -75,6 +75,7 @@ func TestExecutedSamplesV3DataRunServiceFinalizesDockerSamples(t *testing.T) {
 	if err != nil || !judgeReport.Passed || judgeReport.SchemaVersion != "cpgen.judge-verification/v2" || judgeReport.ValidateFor(judgeInput) != nil {
 		t.Fatalf("v3 Judge report=%+v %v", judgeReport, err)
 	}
+	assertQualityReadsEachCommittedStageOnce(t, ctx, f, base, result.RunID)
 	if len(judgeReport.Cases) < len(input.Value.SolutionInput.Problem.Samples) {
 		t.Fatal("v3 Judge omitted sample cases")
 	}
@@ -388,6 +389,7 @@ func TestDataRunServiceRequiresRealPassingSolutionAndPreservesDraft(t *testing.T
 							t.Fatalf("Judge answers: %+v %v", answers, err)
 						}
 						assertJudgeCommittedReadsRejectSubstitution(t, ctx, f, generationConfig, similarityConfig, base, result.RunID)
+						assertQualityReadsEachCommittedStageOnce(t, ctx, f, base, result.RunID)
 						qualityInput, err := quality.Reader().ReadInput(ctx, result.RunID)
 						if err != nil {
 							t.Fatal(err)
