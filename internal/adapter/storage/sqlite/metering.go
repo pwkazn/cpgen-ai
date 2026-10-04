@@ -101,13 +101,18 @@ func (s *Store) LoadCall(ctx context.Context, recordID domain.CallRecordID) (dom
 	if err := recordID.Validate(); err != nil {
 		return domain.PreparedCalls{}, err
 	}
-	var result domain.PreparedCalls
-	err := s.immediate(ctx, func(tx *immediateTx) error {
-		var err error
-		result, err = readPreparedCalls(ctx, tx, recordID)
-		return err
-	})
-	return result, err
+	// Keep the call, physical calls, reservations, and terminal trace in one
+	// snapshot without reserving SQLite's single writer.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.PreparedCalls{}, err
+	}
+	defer tx.Rollback()
+	result, err := readPreparedCalls(ctx, tx, recordID)
+	if err != nil {
+		return result, err
+	}
+	return result, tx.Commit()
 }
 
 func (s *Store) PrepareCalls(ctx context.Context, request domain.PrepareCallsRequest) (domain.PreparedCalls, error) {
@@ -937,7 +942,12 @@ func failureColumns(failure *domain.PortFailure) (any, any, any, error) {
 	return string(failure.Code), string(failure.Class), encoded, nil
 }
 
-func callTraceForRecord(ctx context.Context, queryer rowQuerier, recordID domain.CallRecordID) (domain.CallTrace, error) {
+type meteringQueryer interface {
+	rowQuerier
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func callTraceForRecord(ctx context.Context, queryer meteringQueryer, recordID domain.CallRecordID) (domain.CallTrace, error) {
 	call, err := readCallRecord(ctx, queryer, recordID)
 	if err != nil {
 		return domain.CallTrace{}, err
@@ -950,7 +960,7 @@ func callTraceForRecord(ctx context.Context, queryer rowQuerier, recordID domain
 		ResultAttemptCallID: call.ResultAttemptCallID, CacheSourceCallRecordID: call.CacheSourceCallRecordID,
 		CacheHitCallRecordID: call.CacheHitCallRecordID,
 	}
-	rows, err := queryer.(*immediateTx).QueryContext(ctx, `SELECT attempt_call_id FROM physical_calls
+	rows, err := queryer.QueryContext(ctx, `SELECT attempt_call_id FROM physical_calls
 		WHERE call_record_id = ? AND (sent_at IS NOT NULL OR state = 'UNKNOWN') ORDER BY ordinal`, recordID)
 	if err != nil {
 		return domain.CallTrace{}, err
@@ -972,7 +982,7 @@ func callTraceForRecord(ctx context.Context, queryer rowQuerier, recordID domain
 	return trace, nil
 }
 
-func readPreparedCalls(ctx context.Context, tx *immediateTx, recordID domain.CallRecordID) (domain.PreparedCalls, error) {
+func readPreparedCalls(ctx context.Context, tx meteringQueryer, recordID domain.CallRecordID) (domain.PreparedCalls, error) {
 	call, err := readCallRecord(ctx, tx, recordID)
 	if err != nil {
 		return domain.PreparedCalls{}, err
