@@ -15,14 +15,37 @@ import (
 )
 
 func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
+	for _, test := range []struct {
+		name, revision string
+		source, target domain.StageName
+		reason         string
+	}{
+		{"sample_WA", workflow.RetryingGenerationRevision, "solution_decision", "statement", "solution_requires_review:sample.2.SOLUTION.WA"},
+		{"sample_invalid_text", workflow.ExecutedSamplesRevision, "quality", "solution", "judge_requires_review:samples/001.in:reference.sample_output.INVALID_TEXT"},
+		{"sample_too_large", workflow.ExecutedSamplesRevision, "quality", "solution", "judge_requires_review:samples/001.in:reference.sample_output.TOO_LARGE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testContentRetryAtomicRewindReplayAndPersistentLimit(t, test.revision, test.source, test.target, test.reason)
+		})
+	}
+}
+
+func testContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T, revision string, source, target domain.StageName, reason string) {
+	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "retry.db")
 	store := openRuntimeStore(t, path, clock.NewFake(testNow))
 	create := testCreateRunRequest(testRunID, testNow, time.Minute)
-	create.WorkflowRevision = workflow.RetryingGenerationRevision
+	create.WorkflowRevision = revision
 	create.WorkflowDigest = domain.SumBytes([]byte(create.WorkflowRevision))
 	definition, _ := workflow.DefinitionFor(create.WorkflowRevision)
 	create.StageSequence = definition.Stages()
+	targetOrdinal := 0
+	for index, stage := range create.StageSequence {
+		if stage == target {
+			targetOrdinal = index + 1
+		}
+	}
 	run := mustCreateRun(t, store, create)
 	now := testNow
 	serial := 0
@@ -45,7 +68,7 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 		return attempt
 	}
 	for round := 0; round < 3; round++ {
-		for run.CurrentStage != "solution_decision" {
+		for run.CurrentStage != source {
 			attempt := begin()
 			digest := domain.SumBytes([]byte(fmt.Sprintf("output-%d", serial)))
 			now = now.Add(time.Second)
@@ -58,7 +81,7 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 		attempt := begin()
 		now = now.Add(time.Second)
 		evidence := domain.SumBytes([]byte(fmt.Sprintf("bad-sample-%d", round)))
-		command := domain.FinishContentRetryCommand{Finish: domain.FinishStageCommand{RunID: run.RunID, ExpectedRunVersion: run.Version, StageName: run.CurrentStage, AttemptID: attempt.AttemptID, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &run.ConfigDigest, At: now, IdempotencyKey: fmt.Sprintf("retry_%032x", round)}, Reason: "solution_requires_review:sample.2.SOLUTION.WA"}
+		command := domain.FinishContentRetryCommand{Finish: domain.FinishStageCommand{RunID: run.RunID, ExpectedRunVersion: run.Version, StageName: run.CurrentStage, AttemptID: attempt.AttemptID, AttemptState: domain.StageAttemptNeedsReview, RunState: domain.RunNeedsReview, ReviewEvidenceDigest: &evidence, ReviewPolicyDigest: &run.ConfigDigest, At: now, IdempotencyKey: fmt.Sprintf("retry_%032x", round)}, Reason: reason}
 		before, err := store.BudgetSnapshot(ctx, run.RunID)
 		if err != nil {
 			t.Fatal(err)
@@ -67,8 +90,8 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		feedback, err := store.ReadLatestDraftRetryFeedback(ctx, run.RunID, "statement")
-		if err != nil || feedback == nil || feedback.SourceStage != "solution_decision" || feedback.TargetStage != "statement" || feedback.Reason != command.Reason {
+		feedback, err := store.ReadLatestDraftRetryFeedback(ctx, run.RunID, target)
+		if err != nil || feedback == nil || feedback.SourceStage != source || feedback.TargetStage != target || feedback.Reason != command.Reason {
 			t.Fatalf("persisted retry feedback = %+v, %v", feedback, err)
 		}
 		unrelated, err := store.ReadLatestDraftRetryFeedback(ctx, run.RunID, "data")
@@ -93,14 +116,14 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 			t.Fatalf("counts retry=%d attempts=%d review=%d", retries, attempts, reviews)
 		}
 		if round < 2 {
-			if run.State != domain.RunRunning || run.CurrentStage != "statement" {
+			if run.State != domain.RunRunning || run.CurrentStage != target {
 				t.Fatalf("retry did not rewind: %+v", run)
 			}
 			var stale int
-			if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM stage_records WHERE ordinal>=2 AND (state<>'PENDING' OR output_digest IS NOT NULL OR current_attempt_id IS NOT NULL OR review_evidence_digest IS NOT NULL)`).Scan(&stale); err != nil || stale != 0 {
+			if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM stage_records WHERE ordinal>=? AND (state<>'PENDING' OR output_digest IS NOT NULL OR current_attempt_id IS NOT NULL OR review_evidence_digest IS NOT NULL)`, targetOrdinal).Scan(&stale); err != nil || stale != 0 {
 				t.Fatalf("suffix not invalidated: %d %v", stale, err)
 			}
-			if _, err := store.ReadCommittedLLMStage(ctx, run.RunID, "statement"); err == nil {
+			if _, err := store.ReadCommittedLLMStage(ctx, run.RunID, target); err == nil {
 				t.Fatal("invalidated draft remained current")
 			}
 			// Restart between failure and regeneration; the next retry must use
@@ -109,7 +132,7 @@ func TestContentRetryAtomicRewindReplayAndPersistentLimit(t *testing.T) {
 				t.Fatal(err)
 			}
 			store = openRuntimeStore(t, path, clock.NewFake(now))
-		} else if run.State != domain.RunNeedsReview || run.CurrentStage != "solution_decision" {
+		} else if run.State != domain.RunNeedsReview || run.CurrentStage != source {
 			t.Fatalf("retry limit did not stop: %+v", run)
 		}
 	}

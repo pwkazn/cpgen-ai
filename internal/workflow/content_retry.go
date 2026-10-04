@@ -49,6 +49,9 @@ func ContentRetryTarget(revision string, stage domain.StageName, reason string) 
 		if strings.HasPrefix(reason, "judge_requires_review:") && hasContentVerdict(reason) {
 			return "solution"
 		}
+		if revision == ExecutedSamplesRevision && strings.HasPrefix(reason, "judge_requires_review:samples/") && hasSuffix(reason, ":reference.sample_output.INVALID_TEXT", ":reference.sample_output.TOO_LARGE") {
+			return "solution"
+		}
 	}
 	return ""
 }

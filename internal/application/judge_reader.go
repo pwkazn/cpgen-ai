@@ -103,6 +103,11 @@ func (s *DataReader) readJudgeVerificationForInput(ctx context.Context, runID do
 				if solutionTokenDigest(raw) != token {
 					return errors.New("Judge token comparison differs from actual output")
 				}
+				if role == port.RoleSolution && report.SchemaVersion == executedJudgeVerificationSchema && check.Input.Origin == "sample" && (check.Answer != nil || check.SamplePublicationFailure != "") {
+					if samplePublicationFailure(raw) != check.SamplePublicationFailure {
+						return errors.New("Judge sample publication verdict differs from actual output")
+					}
+				}
 			}
 			return nil
 		}
