@@ -25,35 +25,43 @@ type DataReader struct {
 }
 
 func (s *DataReader) ReadInput(ctx context.Context, runID domain.RunID) (domain.AgentResult[domain.DataDraftInputV1], error) {
+	input, _, err := s.readInputWithSolutionReport(ctx, runID)
+	return input, err
+}
+
+// Keep the verified Solution report alongside its bound input so Judge can use
+// the same proof. These values are local to a single read, never reader state.
+func (s *DataReader) readInputWithSolutionReport(ctx context.Context, runID domain.RunID) (domain.AgentResult[domain.DataDraftInputV1], SolutionVerificationReport, error) {
 	var empty domain.AgentResult[domain.DataDraftInputV1]
+	var noReport SolutionVerificationReport
 	input, err := s.solution.ReadInput(ctx, runID)
 	if err != nil {
-		return empty, err
+		return empty, noReport, err
 	}
 	if input.Value == nil {
-		return empty, errors.New("data requires current committed acceptance")
+		return empty, noReport, errors.New("data requires current committed acceptance")
 	}
-	content, err := s.solution.ReadDraft(ctx, runID)
+	content, err := s.solution.readDraftForInput(ctx, runID, *input.Value)
 	if err != nil {
-		return empty, err
+		return empty, noReport, err
 	}
-	report, err := s.solution.ReadVerification(ctx, runID, s.sandbox)
+	report, err := s.solution.readVerificationForInput(ctx, runID, s.sandbox, *input.Value, content)
 	if err != nil {
-		return empty, err
+		return empty, noReport, err
 	}
 	raw, err := json.Marshal(report)
 	if err != nil {
-		return empty, err
+		return empty, noReport, err
 	}
 	digest := domain.SumBytes(raw)
 	if !report.Passed {
-		return domain.Review[domain.DataDraftInputV1](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: report.PolicyDigest, Reason: "solution_requires_review:" + report.Reason}), nil
+		return domain.Review[domain.DataDraftInputV1](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: report.PolicyDigest, Reason: "solution_requires_review:" + report.Reason}), report, nil
 	}
 	bound, err := domain.NewDataDraftInput(*input.Value, content, digest)
 	if err != nil {
-		return empty, err
+		return empty, noReport, err
 	}
-	return domain.Success(bound), nil
+	return domain.Success(bound), report, nil
 }
 
 func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.DataContent, error) {
@@ -65,11 +73,17 @@ func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.
 	if input.Value == nil {
 		return empty, errors.New("data draft has no passing current Solution")
 	}
-	variables, err := dataDraftVariables(s.solution.revision, *input.Value)
+	return s.readDraftForInput(ctx, runID, *input.Value)
+}
+
+// readDraftForInput consumes the passing Solution proof verified in this read.
+func (s *DataReader) readDraftForInput(ctx context.Context, runID domain.RunID, input domain.DataDraftInputV1) (domain.DataContent, error) {
+	var empty domain.DataContent
+	variables, err := dataDraftVariables(s.solution.revision, input)
 	if err != nil {
 		return empty, err
 	}
-	digest, err := input.Value.Digest()
+	digest, err := input.Digest()
 	if err != nil {
 		return empty, err
 	}
@@ -82,7 +96,7 @@ func (s *DataReader) ReadDraft(ctx context.Context, runID domain.RunID) (domain.
 	if err := json.Unmarshal(raw, &draft); err != nil {
 		return empty, err
 	}
-	content, err := draft.Bind(*input.Value)
+	content, err := draft.Bind(input)
 	if err != nil {
 		return empty, err
 	}
@@ -101,22 +115,18 @@ func dataDraftVariables(revision string, input domain.DataDraftInputV1) ([]byte,
 
 func (s *DataReader) ReadJudgeInput(ctx context.Context, runID domain.RunID) (JudgeInput, error) {
 	var empty JudgeInput
-	input, err := s.ReadInput(ctx, runID)
+	input, solution, err := s.readInputWithSolutionReport(ctx, runID)
 	if err != nil {
 		return empty, err
 	}
 	if input.Value == nil {
 		return empty, errors.New("Judge requires a current passing Solution")
 	}
-	content, err := s.ReadDraft(ctx, runID)
+	content, err := s.readDraftForInput(ctx, runID, *input.Value)
 	if err != nil {
 		return empty, err
 	}
-	report, err := s.ReadVerification(ctx, runID)
-	if err != nil {
-		return empty, err
-	}
-	solution, err := s.solution.ReadVerification(ctx, runID, s.sandbox)
+	report, err := s.readVerificationForInput(ctx, runID, *input.Value, content)
 	if err != nil {
 		return empty, err
 	}
@@ -131,7 +141,6 @@ func (s *DataReader) ReadJudgeInput(ctx context.Context, runID domain.RunID) (Ju
 // generator/validator request. It performs no Docker execution or publication.
 func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (DataVerificationReport, error) {
 	var empty DataVerificationReport
-	store := s.store
 	input, err := s.ReadInput(ctx, runID)
 	if err != nil {
 		return empty, err
@@ -139,10 +148,18 @@ func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (
 	if input.Value == nil {
 		return empty, errors.New("data verification lost its passing Solution")
 	}
-	content, err := s.ReadDraft(ctx, runID)
+	content, err := s.readDraftForInput(ctx, runID, *input.Value)
 	if err != nil {
 		return empty, err
 	}
+	return s.readVerificationForInput(ctx, runID, *input.Value, content)
+}
+
+// readVerificationForInput reuses input and draft verified during this read,
+// while reconstructing every binding and execution proof of the data report.
+func (s *DataReader) readVerificationForInput(ctx context.Context, runID domain.RunID, input domain.DataDraftInputV1, content domain.DataContent) (DataVerificationReport, error) {
+	var empty DataVerificationReport
+	store := s.store
 	stage, err := store.ReadCommittedSandboxStage(ctx, runID, "data_verify")
 	if err != nil {
 		return empty, err
@@ -185,7 +202,7 @@ func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return empty, errors.New("data report is not canonical")
 	}
-	if err := report.ValidateFor(*input.Value, content); err != nil {
+	if err := report.ValidateFor(input, content); err != nil {
 		return empty, err
 	}
 	lockDigest, err := s.sandbox.Lock.Digest()
@@ -225,7 +242,7 @@ func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (
 		}
 	}
 	for _, sample := range report.Samples {
-		expected := []byte(input.Value.SolutionInput.Problem.Samples[sample.Sample-1].Input)
+		expected := []byte(input.SolutionInput.Problem.Samples[sample.Sample-1].Input)
 		if err := local(domain.SafeRelPath(fmt.Sprintf("data/samples/%03d.in", sample.Sample)), expected, domain.ArtifactInput, "text/plain"); err != nil {
 			return empty, err
 		}
@@ -258,7 +275,7 @@ func (s *DataReader) ReadVerification(ctx context.Context, runID domain.RunID) (
 		}
 	}
 	if report.Passed {
-		manifest, err := report.Dataset(*input.Value, content)
+		manifest, err := report.Dataset(input, content)
 		if err != nil {
 			return empty, err
 		}

@@ -16,11 +16,18 @@ import (
 // execution requests, cleaned resources and answer bytes without dispatching.
 func (s *DataReader) ReadJudgeVerification(ctx context.Context, runID domain.RunID) (JudgeVerificationReport, error) {
 	var empty JudgeVerificationReport
-	store := s.store
 	input, err := s.ReadJudgeInput(ctx, runID)
 	if err != nil {
 		return empty, err
 	}
+	return s.readJudgeVerificationForInput(ctx, runID, input)
+}
+
+// readJudgeVerificationForInput reuses the current Data and Solution proof
+// already verified by ReadJudgeInput during the same top-level read.
+func (s *DataReader) readJudgeVerificationForInput(ctx context.Context, runID domain.RunID, input JudgeInput) (JudgeVerificationReport, error) {
+	var empty JudgeVerificationReport
+	store := s.store
 	digest, err := stableValueDigest(input.DataReport)
 	if err != nil {
 		return empty, err
