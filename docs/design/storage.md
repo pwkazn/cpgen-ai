@@ -404,7 +404,11 @@ verification_receipts(
 
 ## 13. 垃圾回收
 
-GC 是显式的维护命令。有状态的 run 命令持有共享的全局制品锁；GC 取得其独占形式，只选择未被引用的 READY Blob，在短事务中重新检查引用，在事务之外将字节移动到私有回收站，然后记录删除。崩溃恢复可以幂等地还原或完成回收站条目。
+GC 是显式的内部维护 API，目前没有 CLI 子命令。有状态的 run 命令持有共享的全局制品锁；GC 从规划到提交始终持有其独占形式。只有没有 occurrence、缓存引用或 ACTIVE/RELEASABLE pin 的 READY Blob 可被规划为 DELETING；已释放的 writer token、pin 与发布归属记录保留为审计证据。
+
+M34 不再删除这些证据引用的 Blob 父行。维护先在事务之外将字节移入私有 trash，再 unlink 并同步目录，最后在短事务中重新校验引用及发布代次，写入墓碑：`state=STAGING`、`gc_state=NONE`、`verified_at=NULL`、`gc_removed_at` 非空。DELETING 与墓碑均拒绝发布完成、隔离及新增保留引用。规划、rename 或 unlink 后崩溃时，显式对账重新获取独占锁并读取当次 DELETING 项；规范文件与 trash 均缺失表示可以完成删除，不会恢复为 READY。旧规划项不得跨越锁的释放继续操作文件。
+
+同一摘要再次写入时，Seal 在一个短事务中清除墓碑、递增 `publication_generation` 并创建首个 pin，随后按正常流程发布字节。该代首个 pin 的物理新增字节为 Blob 大小，同代后续 pin 为零，SEALED 重放不递增代次或重复计费。发布归属以 `(digest, size, generation)` 只追加保存；迁移将历史归属置于第一代，不改写历史 pin 字节数、预算或其他账本。
 
 ## 14. 测试
 

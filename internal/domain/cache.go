@@ -209,6 +209,7 @@ type CacheCandidate struct {
 type GCItem struct {
 	Ref                   BlobRef `json:"ref"`
 	CanonicalRelativePath string  `json:"canonical_relative_path"`
+	PublicationGeneration int64   `json:"publication_generation"`
 }
 
 type GCCommit string

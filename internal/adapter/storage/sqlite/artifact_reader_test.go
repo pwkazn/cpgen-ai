@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"cpgen/internal/adapter/storage/blob"
-	artifactsession "cpgen/internal/artifact"
 	"cpgen/internal/clock"
 	"cpgen/internal/domain"
 )
@@ -91,26 +89,10 @@ func TestArtifactEarlyReleaseMigrationPreservesReferencedWriters(t *testing.T) {
 		}
 		earlyTokens = append(earlyTokens, token.ID)
 	}
-	decl, prepared := prepareReaderArtifact(t, fixture, 3)
-	blobs, err := blob.NewStore(filepath.Join(t.TempDir(), "private"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := artifactsession.NewPreparedArtifactSession(store, blobs, prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer, err := session.Prepare(ctx, decl.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("retained-response")); err != nil {
-		t.Fatal(err)
-	}
-	pending, err := writer.Finalize(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	decl, _ := prepareReaderArtifact(t, fixture, 3)
+	// Seed the actual M19 publication format. Current writer adapters require
+	// the latest schema and must not be used to manufacture historical rows.
+	pending := seedLegacyReaderArtifact(t, store, decl, []byte("retained-response"))
 	output := domain.SumBytes([]byte("stage-output"))
 	if _, err := store.FinishStage(ctx, domain.FinishStageCommand{RunID: runID, ExpectedRunVersion: 2, StageName: "prepare", AttemptID: attemptID, AttemptState: domain.StageAttemptSucceeded, RunState: domain.RunRunning, OutputDigest: &output, NextStage: "exercise", NextInputDigest: &output, Occurrences: []domain.PendingOccurrence{{Kind: domain.PendingOccurrenceNewWrite, NewWrite: &pending}}, IdempotencyKey: meteringID("finish", "reader-migration"), At: testNow}); err != nil {
 		t.Fatal(err)
@@ -175,4 +157,32 @@ func prepareReaderArtifact(t *testing.T, fixture meteringFixture, ordinal int) (
 		t.Fatal(err)
 	}
 	return decl, prepared
+}
+
+func seedLegacyReaderArtifact(t *testing.T, store *Store, decl domain.ArtifactDeclarationRecord, data []byte) domain.PendingArtifact {
+	t.Helper()
+	ctx := context.Background()
+	_, token, err := store.PrepareArtifact(ctx, decl.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.OpenArtifactWriter(ctx, token.ID); err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.BlobRef{Digest: domain.SumBytes(data), Size: int64(len(data))}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := store.db.ExecContext(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO blobs(digest,size,state,canonical_relative_path,verified_at) VALUES(?,?,'READY',?,?)`, ref.Digest, ref.Size, canonicalRelativePath(ref), formatTime(testNow))
+	exec(`UPDATE artifact_writer_tokens SET state='SEALED',final_digest=?,final_size=?,sealed_at=? WHERE writer_token_id=?`, ref.Digest, ref.Size, formatTime(testNow), token.ID)
+	exec(`INSERT INTO blob_pins(pin_id,writer_token_id,digest,size,state,created_at,physical_new_bytes) VALUES(?,?,?,?,'ACTIVE',?,?)`, token.PinID, token.ID, ref.Digest, ref.Size, formatTime(testNow), ref.Size)
+	exec(`INSERT INTO artifact_blob_publication_owners(digest,size,pin_id) VALUES(?,?,?)`, ref.Digest, ref.Size, token.PinID)
+	exec(`INSERT INTO blob_pin_history(pin_id,ordinal,state,changed_at) VALUES(?,1,'ACTIVE',?)`, token.PinID, formatTime(testNow))
+	exec(`UPDATE artifact_writer_tokens SET state='FINALIZED',finalized_at=? WHERE writer_token_id=?`, formatTime(testNow), token.ID)
+	return domain.PendingArtifact{Blob: ref, MediaType: decl.MediaType, Role: decl.Role, LogicalPath: decl.LogicalPath,
+		CallID: decl.AttemptCallID, ReservationID: decl.ReservationID, WriterTokenID: token.ID, PinID: token.PinID,
+		PhysicalNewBytes: ref.Size, Provenance: decl.Provenance}
 }

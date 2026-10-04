@@ -89,3 +89,66 @@ func TestTrashReferencesRejectsPrivateTrashReplacement(t *testing.T) {
 		t.Fatal("trash scan followed a replacement outside the private root")
 	}
 }
+
+func TestGarbageReplaySyncsRenameAndUnlinkBeforeMetadataCanCommit(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := store.Prepare(ctx, testArtifactDeclaration(), testWriterIdentity("85"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("gc fsync boundary")); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writer.Finalize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSync := syncDirectoryFn
+	t.Cleanup(func() { syncDirectoryFn = originalSync })
+	sentinel := errors.New("injected GC directory fsync failure")
+	calls := 0
+	syncDirectoryFn = func(path string) error {
+		calls++
+		if calls == 3 { // rename happened; its source directory is not synced.
+			return sentinel
+		}
+		return originalSync(path)
+	}
+	if moved, err := store.MoveToTrash(ctx, pending.Blob); !moved || !errors.Is(err, sentinel) {
+		t.Fatalf("rename fsync failure: moved=%v err=%v", moved, err)
+	}
+	var synced []string
+	syncDirectoryFn = func(path string) error {
+		synced = append(synced, path)
+		return originalSync(path)
+	}
+	if moved, err := store.MoveToTrash(ctx, pending.Blob); moved || err != nil {
+		t.Fatalf("rename replay: moved=%v err=%v", moved, err)
+	}
+	if len(synced) != 2 || synced[0] != filepath.Dir(store.canonicalPath(pending.Blob)) || synced[1] != store.trash {
+		t.Fatalf("rename replay did not sync both parents: %v", synced)
+	}
+	syncDirectoryFn = func(string) error { return sentinel }
+	if err := store.RemoveTrash(ctx, pending.Blob); !errors.Is(err, sentinel) {
+		t.Fatalf("unlink fsync failure: %v", err)
+	}
+	if _, err := store.StatTrash(ctx, pending.Blob); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unlink did not happen before fsync: %v", err)
+	}
+	// Even when both files are missing, failure to sync must prevent the
+	// caller from treating absence as a successfully durable removal.
+	if _, err := store.MoveToTrash(ctx, pending.Blob); !errors.Is(err, sentinel) {
+		t.Fatalf("missing-pair replay lost fsync failure: %v", err)
+	}
+	syncDirectoryFn = originalSync
+	if _, err := store.MoveToTrash(ctx, pending.Blob); !errors.Is(err, ErrBlobNotFound) {
+		t.Fatalf("durable missing-pair replay: %v", err)
+	}
+	if err := store.RemoveTrash(ctx, pending.Blob); err != nil {
+		t.Fatal(err)
+	}
+}
