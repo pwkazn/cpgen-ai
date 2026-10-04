@@ -379,7 +379,8 @@ func (s *Store) SealArtifact(ctx context.Context, id domain.ArtifactWriterTokenI
 			// ownership record; do not create a second pin.
 			var pinDigest string
 			var pinSize int64
-			if err := tx.QueryRowContext(ctx, `SELECT digest, size FROM blob_pins WHERE pin_id = ?`, pinID).Scan(&pinDigest, &pinSize); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT pin.digest, pin.size FROM blob_pins pin JOIN blobs blob ON blob.digest = pin.digest AND blob.size = pin.size
+				WHERE pin.pin_id = ? AND pin.state IN ('ACTIVE','RELEASABLE') AND blob.gc_state = 'NONE' AND blob.gc_removed_at IS NULL`, pinID).Scan(&pinDigest, &pinSize); err != nil {
 				return wrap(ErrConsistency, "SEALED artifact writer pin is missing", err)
 			}
 			if pinDigest != string(ref.Digest) || pinSize != ref.Size {
@@ -394,18 +395,28 @@ func (s *Store) SealArtifact(ctx context.Context, id domain.ArtifactWriterTokenI
 			return errors.New("artifact token clock returned zero time")
 		}
 		canonical := canonicalRelativePath(ref)
-		var priorState string
-		priorErr := tx.QueryRowContext(ctx, `SELECT state FROM blobs WHERE digest = ? AND size = ?`, ref.Digest, ref.Size).Scan(&priorState)
+		var priorState, gcState string
+		var removedAt sql.NullString
+		generation := int64(1)
+		priorErr := tx.QueryRowContext(ctx, `SELECT state, gc_state, gc_removed_at, publication_generation FROM blobs WHERE digest = ? AND size = ?`, ref.Digest, ref.Size).Scan(&priorState, &gcState, &removedAt, &generation)
 		if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
 			return priorErr
 		}
+		newPublication := errors.Is(priorErr, sql.ErrNoRows) || removedAt.Valid
 		physicalNewBytes := int64(0)
-		blobWasNew := errors.Is(priorErr, sql.ErrNoRows)
-		if blobWasNew {
+		if newPublication {
 			physicalNewBytes = ref.Size
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO blobs(digest, size, state, canonical_relative_path)
-			VALUES (?, ?, 'STAGING', ?) ON CONFLICT(digest, size) DO UPDATE SET state = CASE WHEN blobs.state = 'READY' THEN 'READY' ELSE 'STAGING' END`, ref.Digest, ref.Size, canonical)
+		var err error
+		switch {
+		case errors.Is(priorErr, sql.ErrNoRows):
+			_, err = tx.ExecContext(ctx, `INSERT INTO blobs(digest, size, state, canonical_relative_path) VALUES (?, ?, 'STAGING', ?)`, ref.Digest, ref.Size, canonical)
+		case gcState != "NONE" || (priorState != "STAGING" && priorState != "READY"):
+			return wrap(ErrConsistency, "artifact blob is unavailable for publication", nil)
+		case removedAt.Valid:
+			generation++
+			_, err = tx.ExecContext(ctx, `UPDATE blobs SET gc_removed_at = NULL, publication_generation = ? WHERE digest = ? AND size = ?`, generation, ref.Digest, ref.Size)
+		}
 		if err != nil {
 			return fmt.Errorf("stage blob ledger row: %w", err)
 		}
@@ -416,13 +427,13 @@ func (s *Store) SealArtifact(ctx context.Context, id domain.ArtifactWriterTokenI
 		if _, err := tx.ExecContext(ctx, `INSERT INTO blob_pins(pin_id, writer_token_id, digest, size, physical_new_bytes, state, created_at) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`, pinID, id, ref.Digest, ref.Size, physicalNewBytes, formatTime(now)); err != nil {
 			return fmt.Errorf("create blob pin: %w", err)
 		}
-		if blobWasNew {
-			// The first pin created for a canonical blob is the immutable
+		if newPublication {
+			// The first pin created for each publication is the immutable
 			// publication owner. Keep this identity separate from wall-clock
 			// timestamps so historical ties and future replay cannot reassign
 			// physical byte ownership.
-			if _, err := tx.ExecContext(ctx, `INSERT INTO artifact_blob_publication_owners(digest, size, pin_id)
-				VALUES (?, ?, ?) ON CONFLICT(digest, size) DO NOTHING`, ref.Digest, ref.Size, pinID); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artifact_blob_publication_owners(digest, size, generation, pin_id)
+				VALUES (?, ?, ?, ?)`, ref.Digest, ref.Size, generation, pinID); err != nil {
 				return fmt.Errorf("record blob publication owner: %w", err)
 			}
 		}
@@ -450,6 +461,13 @@ func (s *Store) FinalizeArtifact(ctx context.Context, id domain.ArtifactWriterTo
 			return wrap(ErrNotFound, "artifact writer token does not exist", err)
 		} else if err != nil {
 			return err
+		}
+		var available bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE digest = ? AND size = ? AND state IN ('STAGING','READY') AND gc_state = 'NONE' AND gc_removed_at IS NULL)`, ref.Digest, ref.Size).Scan(&available); err != nil {
+			return err
+		}
+		if !available {
+			return wrap(ErrConsistency, "artifact blob is unavailable for finalization", nil)
 		}
 		if state == string(domain.ArtifactWriterFinalized) && finalDigest.Valid && finalDigest.String == string(ref.Digest) && finalSize.Valid && finalSize.Int64 == ref.Size {
 			return nil

@@ -37,29 +37,34 @@ func (m *Maintenance) CollectGarbage(ctx context.Context) (domain.GCReport, erro
 	if err != nil {
 		return domain.GCReport{}, err
 	}
+	return m.removeGarbage(ctx, items)
+}
+
+// The exclusive artifact lock is held from the fresh plan/list through unlink
+// and metadata commit. DELETING stays durable until both canonical and trash
+// bytes are gone, so a crash never exposes an old file to a new publication.
+func (m *Maintenance) removeGarbage(ctx context.Context, items []domain.GCItem) (domain.GCReport, error) {
 	report := domain.GCReport{Planned: len(items)}
 	for _, item := range items {
 		moved, moveErr := m.blobs.MoveToTrash(ctx, item.Ref)
-		if moveErr != nil {
-			if errors.Is(moveErr, blob.ErrBlobNotFound) {
-				if repairErr := m.metadata.CommitGarbage(ctx, item, domain.GCCommitRepair); repairErr != nil {
-					return report, repairErr
-				}
-				report.Repaired++
-				continue
-			}
+		if moveErr != nil && !errors.Is(moveErr, blob.ErrBlobNotFound) {
 			return report, moveErr
 		}
 		if moved {
 			report.Moved++
 		}
+		if _, err := m.blobs.StatTrash(ctx, item.Ref); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return report, err
+		}
+		// Missing bytes also complete removal: this is the expected restart
+		// state after unlink succeeded but its metadata commit did not.
+		if err := m.blobs.RemoveTrash(ctx, item.Ref); err != nil {
+			return report, err
+		}
 		if err := m.metadata.CommitGarbage(ctx, item, domain.GCCommitRemoved); err != nil {
 			return report, err
 		}
 		report.Removed++
-		if err := m.blobs.RemoveTrash(ctx, item.Ref); err != nil {
-			return report, err
-		}
 	}
 	return report, nil
 }
@@ -77,37 +82,13 @@ func (m *Maintenance) ReconcileTrash(ctx context.Context) (domain.GCReport, erro
 	if err != nil {
 		return domain.GCReport{}, err
 	}
-	report := domain.GCReport{Planned: len(items)}
+	report, err := m.removeGarbage(ctx, items)
+	if err != nil {
+		return report, err
+	}
 	known := make(map[domain.Digest]struct{}, len(items))
 	for _, item := range items {
 		known[item.Ref.Digest] = struct{}{}
-		moved, moveErr := m.blobs.MoveToTrash(ctx, item.Ref)
-		if moveErr != nil && !errors.Is(moveErr, blob.ErrBlobNotFound) {
-			return report, moveErr
-		}
-		if moved {
-			report.Moved++
-		}
-		// If the canonical file was absent, MoveToTrash returns successfully
-		// only when a deterministic trash copy already exists.  A missing pair
-		// is repaired rather than silently deleting a metadata row.
-		if _, statErr := m.blobs.StatTrash(ctx, item.Ref); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				if repairErr := m.metadata.CommitGarbage(ctx, item, domain.GCCommitRepair); repairErr != nil {
-					return report, repairErr
-				}
-				report.Repaired++
-				continue
-			}
-			return report, statErr
-		}
-		if err := m.metadata.CommitGarbage(ctx, item, domain.GCCommitRemoved); err != nil {
-			return report, err
-		}
-		report.Removed++
-		if err := m.blobs.RemoveTrash(ctx, item.Ref); err != nil {
-			return report, err
-		}
 	}
 	orphans, err := m.blobs.TrashReferences(ctx)
 	if err != nil {

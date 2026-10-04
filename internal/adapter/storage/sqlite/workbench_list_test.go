@@ -303,7 +303,7 @@ func TestWorkbenchRunIndexMigrationPreservesHistory(t *testing.T) {
 		}
 	}
 	assertTotalTokenProjection(t, f, 10, 3, 5, 2)
-	assertMigrationHistory(t, store, 33)
+	assertMigrationHistory(t, store, 34)
 	assertWorkbenchListPlans(t, store)
 }
 

@@ -572,6 +572,7 @@ func TestWorkflowSQLStateConstraintsRejectDirectAttacks(t *testing.T) {
 
 func openRuntimeStore(t *testing.T, path string, source clock.Clock) *Store {
 	t.Helper()
+	seedRuntimeDatabase(t, path)
 	store, err := OpenWithClock(context.Background(), Config{Path: path, BusyTimeout: time.Second, MaxReaders: 3}, source)
 	if err != nil {
 		t.Fatalf("OpenWithClock: %v", err)

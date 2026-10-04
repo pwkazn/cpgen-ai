@@ -35,7 +35,9 @@ func (s *Store) moveToTrash(ctx context.Context, ref domain.BlobRef) (bool, erro
 	if _, err := os.Lstat(trash); err == nil {
 		_, canonicalErr := os.Lstat(canonical)
 		if errors.Is(canonicalErr, os.ErrNotExist) {
-			return false, nil
+			// A previous rename may have failed while syncing its directories.
+			// Re-establish durability before maintenance can commit removal.
+			return false, s.syncGarbageDirectories(ref)
 		}
 		if canonicalErr == nil {
 			return false, errors.New("canonical and trash copies both exist")
@@ -45,6 +47,9 @@ func (s *Store) moveToTrash(ctx context.Context, ref domain.BlobRef) (bool, erro
 		return false, err
 	}
 	if _, err := os.Lstat(canonical); errors.Is(err, os.ErrNotExist) {
+		if syncErr := s.syncGarbageDirectories(ref); syncErr != nil {
+			return false, syncErr
+		}
 		return false, fmt.Errorf("%w: %s", ErrBlobNotFound, ref.Digest)
 	} else if err != nil {
 		return false, err
@@ -70,6 +75,24 @@ func (s *Store) moveToTrash(ctx context.Context, ref domain.BlobRef) (bool, erro
 		return true, err
 	}
 	return true, nil
+}
+
+// Sync even on a replay where rename/unlink already completed. The canonical
+// shard may not exist for a missing blob; syncing the nearest surviving
+// ancestor durably records that absence without creating new directories.
+func (s *Store) syncGarbageDirectories(ref domain.BlobRef) error {
+	parent := filepath.Dir(s.canonicalPath(ref))
+	for {
+		if err := syncDirectoryFn(parent); err != nil {
+			if errors.Is(err, os.ErrNotExist) && parent != s.blobs {
+				parent = filepath.Dir(parent)
+				continue
+			}
+			return err
+		}
+		break
+	}
+	return syncDirectoryFn(s.trash)
 }
 
 // RemoveTrash deletes only a deterministic private trash file. Missing trash

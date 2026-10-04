@@ -18,11 +18,15 @@ func (s *Store) QuarantineBlob(ctx context.Context, ref domain.BlobRef) error {
 		return err
 	}
 	return s.immediate(ctx, func(tx *immediateTx) error {
-		var state string
-		if err := tx.QueryRowContext(ctx, `SELECT state FROM blobs WHERE digest = ? AND size = ?`, ref.Digest, ref.Size).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+		var state, gcState string
+		var removedAt sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT state, gc_state, gc_removed_at FROM blobs WHERE digest = ? AND size = ?`, ref.Digest, ref.Size).Scan(&state, &gcState, &removedAt); errors.Is(err, sql.ErrNoRows) {
 			return wrap(ErrNotFound, "artifact blob does not exist", err)
 		} else if err != nil {
 			return err
+		}
+		if gcState != "NONE" || removedAt.Valid {
+			return wrap(ErrConsistency, "garbage blob cannot be quarantined", nil)
 		}
 		if state == "CORRUPT" {
 			return nil
