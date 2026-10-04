@@ -266,6 +266,63 @@ func TestCallRecordLogicalAndPhysicalIdempotency(t *testing.T) {
 	}
 }
 
+// WAL readers must observe committed call data while another connection owns
+// the writer, rather than waiting for or reading that transaction's changes.
+func TestLoadCallReadsCommittedDataWhileWriterActive(t *testing.T) {
+	ctx := context.Background()
+	fixture := newMeteringFixture(t, "31", testCreateRunRequest(testRunID, testNow, time.Minute).BudgetLimits)
+	record := mustOpenMeteringCall(t, fixture, 1, domain.CallLLMGenerate)
+	prepared, err := fixture.store.PrepareCalls(ctx, prepareOneRequest(
+		fixture, record, 1, domain.PhysicalLLMRequest, domain.BudgetLLMCalls, 1,
+	))
+	if err != nil {
+		t.Fatalf("PrepareCalls: %v", err)
+	}
+	writer, err := fixture.store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire writer: %v", err)
+	}
+	defer writer.Close()
+	if _, err := writer.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer writer.ExecContext(ctx, "ROLLBACK")
+	updatedAt := fixture.now.Add(time.Second)
+	for _, statement := range []string{
+		`UPDATE call_records SET prepared_at = ? WHERE call_record_id = ?`,
+		`UPDATE physical_calls SET prepared_at = ? WHERE call_record_id = ?`,
+		`UPDATE budget_reservations SET created_at = ? WHERE call_record_id = ?`,
+	} {
+		if _, err := writer.ExecContext(ctx, statement, formatTime(updatedAt), record.ID); err != nil {
+			t.Fatalf("update uncommitted call data: %v", err)
+		}
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	loaded, err := fixture.store.LoadCall(readCtx, record.ID)
+	if err != nil {
+		t.Fatalf("LoadCall while writer active: %v", err)
+	}
+	if !reflect.DeepEqual(loaded, prepared) {
+		t.Fatalf("LoadCall observed uncommitted data: got %+v, want %+v", loaded, prepared)
+	}
+	if _, err := writer.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit writer: %v", err)
+	}
+	prepared.Call.PreparedAt = &updatedAt
+	for i := range prepared.PhysicalCalls {
+		prepared.PhysicalCalls[i].PreparedAt = updatedAt
+	}
+	for i := range prepared.Reservations {
+		prepared.Reservations[i].CreatedAt = updatedAt
+	}
+	loaded, err = fixture.store.LoadCall(ctx, record.ID)
+	if err != nil || !reflect.DeepEqual(loaded, prepared) {
+		t.Fatalf("LoadCall after commit = %+v, %v; want %+v", loaded, err, prepared)
+	}
+}
+
 func TestDispatchSettlementStateMachineAndConservativeUsage(t *testing.T) {
 	fixture := newMeteringFixture(t, "40", domain.BudgetLimits{
 		MaxLLMCalls: 2, MaxLLMInputTokens: 10, MaxLLMOutputTokens: 14, MaxLLMCostMicroUSD: 22,
@@ -336,6 +393,14 @@ func TestDispatchSettlementStateMachineAndConservativeUsage(t *testing.T) {
 		PhysicalAttemptCallIDs: []domain.AttemptCallID{firstGrant.AttemptCallID, secondGrant.AttemptCallID}, ResultAttemptCallID: &secondGrant.AttemptCallID}
 	if !trace.Equal(wantTrace) {
 		t.Fatalf("trace = %+v, want %+v", trace, wantTrace)
+	}
+	loaded, err := fixture.store.LoadCall(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("LoadCall terminal dispatched call: %v", err)
+	}
+	if loaded.CallTrace == nil || !loaded.CallTrace.Equal(wantTrace) || loaded.Failure != nil ||
+		len(loaded.PhysicalCalls) != 2 || len(loaded.Reservations) != 8 {
+		t.Fatalf("LoadCall terminal dispatched projection = %+v", loaded)
 	}
 	assertAccountValues(t, fixture.store, fixture.runID, map[domain.BudgetDimension][2]int64{
 		domain.BudgetLLMCalls:             {0, 2},
