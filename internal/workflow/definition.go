@@ -40,6 +40,35 @@ func (d Definition) PreservesAttempt() bool               { return d.preserveAtt
 func (d Definition) HasStage(stage domain.StageName) bool { return slices.Contains(d.stages, stage) }
 func (d Definition) ProducesPackage() bool                { return d.HasStage("package") }
 
+// ManualRevisionTargets lists the current stage and its upstream stages, with
+// likely content producers first. The first entry is the workbench default;
+// every entry still requires the persisted review and suffix checks on apply.
+func (d Definition) ManualRevisionTargets(current domain.StageName) []domain.StageName {
+	index := slices.Index(d.stages, current)
+	if index < 0 {
+		return []domain.StageName{}
+	}
+	preferred := []domain.StageName{current}
+	switch current {
+	case "similarity", "similarity_decision", "slice2_checkpoint":
+		preferred = []domain.StageName{"idea", "statement"}
+	case "solution_decision", "solution_checkpoint":
+		preferred = []domain.StageName{"solution", "statement"}
+	case "judge":
+		preferred = []domain.StageName{"statement", "data"}
+	case "quality":
+		preferred = []domain.StageName{"solution"}
+	}
+	upstream := d.stages[:index+1]
+	targets := make([]domain.StageName, 0, len(upstream))
+	for _, stage := range append(preferred, upstream...) {
+		if slices.Contains(upstream, stage) && !slices.Contains(targets, stage) {
+			targets = append(targets, stage)
+		}
+	}
+	return targets
+}
+
 func SupportsGeneration(revision string) bool {
 	d, err := DefinitionFor(revision)
 	return err == nil && d.UsesGeneration()
