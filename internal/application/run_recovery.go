@@ -77,6 +77,25 @@ func (s *LocalRunService) recover(ctx context.Context, snapshot domain.RunSnapsh
 	return s.runtime.InterruptStage(ctx, domain.InterruptStageCommand{RunID: snapshot.RunID, ExpectedRunVersion: snapshot.Version, StageName: snapshot.CurrentStage, AttemptID: attempt, Cause: domain.CauseRevisionInvalidated, IdempotencyKey: stableServiceID("interrupt", snapshot.RunID, snapshot.Version), At: s.clock.Now().UTC()})
 }
 
+// A second process can accept cancellation between a stage's version read and
+// its next write. That caller leaves completion to the owner while the run lock
+// is busy. Settle its request before releasing our locks when it interrupted the
+// stage with a conflict. Callers must have joined any control/accounting pollers
+// or be resuming before any pollers have started.
+func (s *LocalRunService) finishCancellationConflict(ctx context.Context, snapshot domain.RunSnapshot, executionErr error) (domain.RunSnapshot, error) {
+	if !errors.Is(executionErr, sqlite.ErrVersionConflict) && !errors.Is(executionErr, sqlite.ErrCancelPending) {
+		return snapshot, executionErr
+	}
+	pending, err := s.runtime.PendingCancel(ctx, snapshot.RunID)
+	if err != nil {
+		return snapshot, errors.Join(executionErr, err)
+	}
+	if pending == nil {
+		return snapshot, executionErr
+	}
+	return s.finishCancellation(ctx, snapshot.RunID)
+}
+
 func (s *LocalRunService) finishCancellation(ctx context.Context, runID domain.RunID) (domain.RunSnapshot, error) {
 	snapshot, err := s.runtime.GetRun(ctx, runID)
 	if err != nil {
