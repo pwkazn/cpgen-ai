@@ -99,10 +99,14 @@ func (s *preparedArtifactSession) prepare(ctx context.Context, id domain.Artifac
 		inner, err = s.store.Prepare(ctx, artifact, identity)
 	}
 	if err != nil {
-		_ = s.ledger.ReleaseArtifact(context.Background(), token.ID)
+		// A failed recovery does not revoke the durable SEALED publication.
+		// Keep its pin and staged bytes available for a later retry.
+		if token.State != domain.ArtifactWriterSealed {
+			_ = s.ledger.ReleaseArtifact(context.Background(), token.ID)
+		}
 		return nil, err
 	}
-	wrapper := &sessionWriter{inner: inner, ledger: s.ledger, tokenID: token.ID}
+	wrapper := &sessionWriter{inner: inner, ledger: s.ledger, tokenID: token.ID, sealed: token.State == domain.ArtifactWriterSealed}
 	s.used[id] = struct{}{}
 	s.writers[token.ID] = wrapper
 	return wrapper, nil
