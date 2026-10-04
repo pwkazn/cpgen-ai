@@ -1081,6 +1081,19 @@ function actionButtons(d, r, id) {
     out += `<a class="button primary" href="/api/runs/${encodeURIComponent(id)}/package">下载题包</a>`;
   return out || '<span class="muted">当前没有可执行操作</span>';
 }
+function scheduleDetailPoll(id, runState, route) {
+  clearInterval(state.detailTimer);
+  state.detailTimer = 0;
+  if (["CREATED", "RUNNING", "BLOCKED", "NEEDS_REVIEW"].includes(runState)) {
+    state.detailTimer = setInterval(
+      () => {
+        if (route === state.route && !document.hidden)
+          detailPage(id, { quiet: true });
+      },
+      document.hidden ? 15000 : 2000,
+    );
+  }
+}
 async function detailPage(id, { quiet = false } = {}) {
   if (state.activeRequest || state.editing) return;
   const route = state.route;
@@ -1093,25 +1106,16 @@ async function detailPage(id, { quiet = false } = {}) {
     if (route !== state.route) return;
     setOnline(true);
     const r = d.run || {};
-    // Update polling before the quiet-render shortcut, including terminal states.
-    clearInterval(state.detailTimer);
-    state.detailTimer = 0;
-    if (["CREATED", "RUNNING", "BLOCKED", "NEEDS_REVIEW"].includes(r.state)) {
-      state.detailTimer = setInterval(
-        () => {
-          if (route === state.route && !document.hidden)
-            detailPage(id, { quiet: true });
-        },
-        document.hidden ? 15000 : 2000,
-      );
-    }
     const signature = JSON.stringify([
       id,
       d.run?.version,
       d.execution?.active,
       d.execution?.last_error,
     ]);
-    if (quiet && signature === state.lastDetail) return;
+    if (quiet && signature === state.lastDetail) {
+      scheduleDetailPoll(id, r.state, route);
+      return;
+    }
     const tab = new URL(location.href).searchParams.get("tab") || "statement";
     state.tab = ["statement", "solution", "checks", "events"].includes(tab)
       ? tab
@@ -1211,6 +1215,8 @@ async function detailPage(id, { quiet = false } = {}) {
     }
     if (state.reviewRoute && canReview && !state.reviewDismissed)
       renderReviewForm(id, d);
+    // Retain retries if fetching missing events failed before rendering.
+    scheduleDetailPoll(id, r.state, route);
   } catch (e) {
     if (route === state.route && e.name !== "AbortError") {
       fail(e);

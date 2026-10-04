@@ -48,11 +48,12 @@ function harness() {
         requests.push({
           path,
           signal: options.signal,
-          resolve: (data) =>
+          resolve: (data, status = 200) =>
             resolve({
-              ok: true,
+              ok: status < 400,
+              status,
               headers: { get: () => "application/json" },
-              json: async () => ({ data }),
+              json: async () => (status < 400 ? { data } : data),
             }),
           reject,
         });
@@ -78,8 +79,8 @@ function harness() {
       document.hidden = hidden;
       listeners.get("visibilitychange")();
     },
-    async respond(data) {
-      requests.at(-1).resolve(data);
+    async respond(data, status) {
+      requests.at(-1).resolve(data, status);
       await setImmediate();
     },
   };
@@ -159,6 +160,42 @@ test("a failed poll retains its timer and retries before stopping at a terminal 
   await h.respond(detail("READY", "2"));
   assert.equal(h.state.online, true);
   assert.equal(h.intervals.size, 0);
+});
+
+test("a failed event-gap request retries before a terminal detail stops polling", async () => {
+  const h = harness();
+  const event = (version) => ({ version: String(version), type: "updated" });
+  const initial = h.open();
+  await h.respond({ ...detail("RUNNING"), recent_events: [event(1)] });
+  await initial;
+  const html = h.app.innerHTML;
+  const ready = { ...detail("READY", "100"), recent_events: [event(100)] };
+
+  h.tick();
+  await h.respond(ready);
+  assert.equal(
+    h.requests.at(-1).path,
+    "/api/runs/A/events?before=100&limit=200",
+  );
+  await h.respond({ error: { message: "temporary event failure" } }, 503);
+  assert.equal(h.app.innerHTML, html);
+  assert.equal(h.intervals.size, 1);
+
+  h.tick();
+  assert.equal(h.requests.at(-1).path, "/api/runs/A");
+  await h.respond(ready);
+  assert.equal(
+    h.requests.at(-1).path,
+    "/api/runs/A/events?before=100&limit=200",
+  );
+  await h.respond({
+    events: Array.from({ length: 98 }, (_, i) => event(i + 2)),
+  });
+  assert.match(h.app.innerHTML, /state-ready/);
+  assert.equal(h.state.loadedEvents.length, 100);
+  assert.equal(h.intervals.size, 0);
+  h.tick();
+  assert.equal(h.requests.length, 5);
 });
 
 test("visibility changes preserve hidden polling suppression and terminal timer cleanup", async () => {
