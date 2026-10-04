@@ -103,6 +103,13 @@ func validateOwnerOnlyDirectory(path string) error {
 }
 
 func removeStaleWatchdogControl(directory string) error {
+	// An unbound listener does not mean lifecycle cleanup committed. A
+	// retained envelope may still be the only independent recovery proof.
+	if _, err := os.Lstat(filepath.Join(directory, "control.json")); err == nil {
+		return fmt.Errorf("watchdog control evidence still exists; reconcile its execution before preparing again")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := validateOwnerOnlyDirectory(directory); err != nil {
 		return fmt.Errorf("refusing unsafe stale watchdog directory: %w", err)
 	}

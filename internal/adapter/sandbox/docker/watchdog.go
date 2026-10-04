@@ -51,11 +51,17 @@ func (s *watchdogSession) Cleaned(ctx context.Context) error { return s.client.C
 func (s *watchdogSession) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.client.Close()
-		if s.cleanup != nil {
-			s.closeErr = errors.Join(s.closeErr, s.cleanup())
-		}
 	})
 	return s.closeErr
+}
+
+// ReleaseControl is separate from Close: EOF and protocol acknowledgements do
+// not establish that the owner committed its lifecycle cleanup transaction.
+func (s *watchdogSession) ReleaseControl() error {
+	if s.cleanup != nil {
+		return s.cleanup()
+	}
+	return nil
 }
 
 type dockerWatchdogReconciler struct {
@@ -392,8 +398,13 @@ func (p *detachedWatchdogPreparation) Abort() error {
 			failures = append(failures, err)
 		}
 	}
-	failures = append(failures, cleanupWatchdogControl(p.controlDir, p.controlPath))
+	// Preparation can already be referenced by a committed lifecycle row,
+	// even when starting the child failed. Keep the envelope for recovery.
 	return errors.Join(failures...)
+}
+
+func (p *detachedWatchdogPreparation) ReleaseControl() error {
+	return cleanupWatchdogControl(p.controlDir, p.controlPath)
 }
 
 func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdogprotocol.ControlRecord) (PreparedWatchdog, error) {
@@ -517,18 +528,10 @@ func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogpro
 	return session, nil
 }
 
-func RunWatchdogService(ctx context.Context, controlPath string) (returnErr error) {
-	// The detached child owns the control envelope after the owner process may
-	// disappear. Always remove it when the service exits (including owner EOF),
-	// so a crashed owner cannot leave a reusable nonce/control path behind.
-	defer func() {
-		if filepath.IsAbs(controlPath) {
-			cleanupErr := cleanupWatchdogControl(filepath.Dir(controlPath), controlPath)
-			if cleanupErr != nil {
-				returnErr = errors.Join(returnErr, cleanupErr)
-			}
-		}
-	}()
+func RunWatchdogService(ctx context.Context, controlPath string) error {
+	// The child can stop Engine resources, but cannot commit the owner's
+	// lifecycle ledger. Leave its immutable, owner-only envelope available
+	// until foreground or startup reconciliation records durable cleanup.
 	data, err := secureReadWatchdogControl(controlPath, 1<<20)
 	if err != nil {
 		return err

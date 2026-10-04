@@ -574,10 +574,8 @@ func TestSlice1DockerWatchdogServiceChild(t *testing.T) {
 	marker := os.Getenv("CPGEN_SLICE1_DOCKER_WATCHDOG_MARKER")
 	err := dockersandbox.RunWatchdogService(context.Background(), control)
 	if err == nil {
-		if _, statErr := os.Stat(control); !errors.Is(statErr, os.ErrNotExist) {
-			err = fmt.Errorf("watchdog control file was not cleaned: %v", statErr)
-		} else if _, statErr := os.Stat(filepath.Dir(control)); !errors.Is(statErr, os.ErrNotExist) {
-			err = fmt.Errorf("watchdog control directory was not cleaned: %v", statErr)
+		if _, statErr := os.Stat(control); statErr != nil {
+			err = fmt.Errorf("watchdog recovery evidence was not retained: %v", statErr)
 		}
 	}
 	value := "ok"
