@@ -2,6 +2,7 @@ package watchdog
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -34,7 +36,12 @@ type Observation struct {
 type Reconciler interface {
 	Begin(context.Context, ControlRecord) error
 	Observe(context.Context, port.PlannedResource, map[string]string) (Observation, error)
+	// Stop preserves the exact Engine identity so an unacknowledged create
+	// remains discoverable during startup recovery.
 	Stop(context.Context, Observation) error
+	// Remove releases an owned, stopped resource after RESOURCE_CREATED has
+	// acknowledged that its exact identity was durably persisted by the owner.
+	Remove(context.Context, Observation) error
 	Close() error
 }
 
@@ -387,26 +394,70 @@ func (s Service) reconcile(record ControlRecord, labels map[int]map[string]strin
 	quietSince := s.now()
 	ticker := time.NewTicker(s.PollInterval)
 	defer ticker.Stop()
+	resources := slices.Clone(record.Plan.Resources)
+	priority := func(resource port.PlannedResource) int {
+		if resource.Kind == port.ResourceContainer {
+			if resource.Role == port.ResourceTarget {
+				return 0
+			}
+			return 1
+		}
+		return 2
+	}
+	// Stop the target first, then release every helper's volume references.
+	// Docker retains those references even after a container has exited.
+	slices.SortStableFunc(resources, func(a, b port.PlannedResource) int {
+		if order := cmp.Compare(priority(a), priority(b)); order != 0 {
+			return order
+		}
+		return cmp.Compare(b.Ordinal, a.Ordinal)
+	})
 	for {
 		activity := false
-		for _, resource := range record.Plan.Resources {
+		preservedContainer := false
+		var failures []error
+		for _, resource := range resources {
 			expected := labels[resource.Ordinal]
 			observed, err := reconciler.Observe(ctx, resource, expected)
 			if err != nil {
-				return err
+				failures = append(failures, err)
+				continue
 			}
 			if observed.Foreign || observed.Exists && len(expected) == 0 {
-				return ForeignResourceError{Name: resource.DeterministicName, ID: observed.ID}
+				failures = append(failures, ForeignResourceError{Name: resource.DeterministicName, ID: observed.ID})
+				continue
 			}
-			// Volumes do not have a process state.  Their existence is itself
-			// cleanup work, so the reconciler must remove them even when
-			// Running is false.
-			if observed.Exists && (observed.Running || resource.Kind == port.ResourceVolume) {
-				activity = true
-				if err := reconciler.Stop(ctx, observed); err != nil {
-					return err
+			if observed.Exists {
+				acknowledged := created[resource.Ordinal]
+				if acknowledged != "" && acknowledged != observed.ID {
+					failures = append(failures, ForeignResourceError{Name: resource.DeterministicName, ID: observed.ID})
+					continue
+				}
+				if resource.Kind == port.ResourceContainer {
+					if acknowledged == "" {
+						// PRECREATE may be the last durable boundary the owner
+						// reached. Keep this object for exact-ID recovery even
+						// after stopping it, and retain its volume references.
+						preservedContainer = true
+					}
+					if observed.Running {
+						activity = true
+						if err := reconciler.Stop(ctx, observed); err != nil {
+							failures = append(failures, err)
+							continue
+						}
+					}
+				}
+				if acknowledged != "" && !(resource.Kind == port.ResourceVolume && preservedContainer) {
+					activity = true
+					if err := reconciler.Remove(ctx, observed); err != nil {
+						failures = append(failures, err)
+					}
 				}
 			}
+		}
+		if len(failures) != 0 {
+			return errors.Join(failures...)
 		}
 		if activity {
 			quietSince = s.now()

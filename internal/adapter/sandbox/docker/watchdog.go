@@ -206,6 +206,22 @@ func (r *dockerWatchdogReconciler) Stop(ctx context.Context, observation watchdo
 	}
 	r.mu.Lock()
 	owned := r.owned[observation.ID]
+	r.mu.Unlock()
+	if owned == nil {
+		return fmt.Errorf("watchdog has no exact ownership evidence for %q", observation.ID)
+	}
+	_, err := portableStop(ctx, r.engine, observation.ID, func(result moby.ContainerInspectResult) error {
+		return verifyContainerOwnership(result, owned)
+	})
+	return err
+}
+
+func (r *dockerWatchdogReconciler) Remove(ctx context.Context, observation watchdogprotocol.Observation) error {
+	if !observation.Exists || observation.ID == "" || observation.Foreign {
+		return fmt.Errorf("watchdog refused to remove an unowned observation")
+	}
+	r.mu.Lock()
+	owned := r.owned[observation.ID]
 	volume := r.ownedVolume[observation.ID]
 	r.mu.Unlock()
 	if observation.Kind == port.ResourceVolume || (observation.Kind == "" && volume != nil) {
@@ -232,9 +248,25 @@ func (r *dockerWatchdogReconciler) Stop(ctx context.Context, observation watchdo
 	if owned == nil {
 		return fmt.Errorf("watchdog has no exact ownership evidence for %q", observation.ID)
 	}
-	_, err := portableStop(ctx, r.engine, observation.ID, func(result moby.ContainerInspectResult) error {
-		return verifyContainerOwnership(result, owned)
-	})
+	inspected, err := r.engine.ContainerInspect(ctx, observation.ID, moby.ContainerInspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := verifyContainerOwnership(inspected, owned); err != nil {
+		return err
+	}
+	if inspected.Container.State == nil || inspected.Container.State.Running || inspected.Container.State.Pid != 0 {
+		return fmt.Errorf("watchdog cannot remove container %q before it is proven stopped", observation.ID)
+	}
+	// Stopped containers still hold volume references. Remove the exact
+	// verified container before the watchdog attempts volume cleanup.
+	_, err = r.engine.ContainerRemove(ctx, observation.ID, moby.ContainerRemoveOptions{Force: true})
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
 	return err
 }
 

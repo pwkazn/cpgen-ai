@@ -333,6 +333,9 @@ func TestWatchdogDockerOwnerEOFCanary(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		inspected, inspectErr := engine.ContainerInspect(context.Background(), created.ID, moby.ContainerInspectOptions{})
+		if errdefs.IsNotFound(inspectErr) {
+			return
+		}
 		if inspectErr == nil && inspected.Container.State != nil && !inspected.Container.State.Running && inspected.Container.State.Pid == 0 {
 			if !maps.Equal(inspected.Container.Config.Labels, labels) || !slices.Equal(inspected.Container.Config.Entrypoint, []string{"/bin/sleep", "30"}) {
 				t.Fatal("watchdog stopped a container with drifted identity")
@@ -355,6 +358,9 @@ func (emptyWatchdogReconciler) Observe(context.Context, port.PlannedResource, ma
 }
 func (emptyWatchdogReconciler) Stop(context.Context, watchdogprotocol.Observation) error {
 	return errors.New("unexpected Stop")
+}
+func (emptyWatchdogReconciler) Remove(context.Context, watchdogprotocol.Observation) error {
+	return errors.New("unexpected Remove")
 }
 
 func watchdogRecord(t *testing.T, token domain.Digest, deadline time.Time) watchdogprotocol.ControlRecord {
@@ -452,6 +458,16 @@ func (e *watchdogEngine) ContainerKill(_ context.Context, id string, _ moby.Cont
 		return moby.ContainerKillResult{}, nil
 	}
 	return moby.ContainerKillResult{}, errdefs.ErrNotFound
+}
+func (e *watchdogEngine) ContainerRemove(_ context.Context, id string, _ moby.ContainerRemoveOptions) (moby.ContainerRemoveResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if item := e.containers[id]; item != nil {
+		delete(e.byName, item.name)
+		delete(e.containers, id)
+		return moby.ContainerRemoveResult{}, nil
+	}
+	return moby.ContainerRemoveResult{}, errdefs.ErrNotFound
 }
 func (e *watchdogEngine) ContainerWait(_ context.Context, id string, _ moby.ContainerWaitOptions) moby.ContainerWaitResult {
 	result := make(chan container.WaitResponse, 1)

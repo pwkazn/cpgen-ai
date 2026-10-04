@@ -1,12 +1,14 @@
 package docker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,6 +161,23 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 			return nil, err
 		}
 	}
+	// The persisted plan is in creation order. Stop the target before helpers,
+	// and remove all containers (including exited imports) before their volumes.
+	priority := func(resource domain.SandboxResource) int {
+		if resource.Kind == string(port.ResourceContainer) {
+			if resource.Role == string(port.ResourceTarget) {
+				return 0
+			}
+			return 1
+		}
+		return 2
+	}
+	slices.SortStableFunc(resources, func(a, b domain.SandboxResource) int {
+		if order := cmp.Compare(priority(a), priority(b)); order != 0 {
+			return order
+		}
+		return cmp.Compare(b.PlanOrdinal, a.PlanOrdinal)
+	})
 	for index := range resources {
 		resource := resources[index]
 		if resource.Phase == domain.SandboxResourceCleaned || resource.Phase == domain.SandboxResourceInterrupted {
