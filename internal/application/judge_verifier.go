@@ -174,14 +174,24 @@ func (s *JudgeVerifier) Verify(ctx context.Context, input JudgeInput) (JudgeVeri
 		if err != nil {
 			return empty, err
 		}
+		var raw []byte
+		if failure == "" {
+			raw, err = artifact.ReadVerified(ctx, s.config.Blobs, reference.Stdout.Blob, 1<<20)
+			if err != nil {
+				return empty, err
+			}
+			if executed && item.Origin == "sample" {
+				check.SamplePublicationFailure = samplePublicationFailure(raw)
+				failure, err = judgeCaseFailure(input, check)
+				if err != nil {
+					return empty, err
+				}
+			}
+		}
 		if failure != "" {
 			report.Cases = append(report.Cases, check)
 			report.Reason = judgeCaseReason(check, failure)
 			return finish()
-		}
-		raw, err := artifact.ReadVerified(ctx, s.config.Blobs, reference.Stdout.Blob, 1<<20)
-		if err != nil {
-			return empty, err
 		}
 		answer, err := publish(domain.SafeRelPath("judge/"+string(judgeAnswerPath(item))), "text/plain", raw)
 		if err != nil {
@@ -272,6 +282,8 @@ type JudgeCaseEvidence struct {
 	Brute                *port.RunResult `json:"brute,omitempty"`
 	BruteTokenDigest     domain.Digest   `json:"brute_token_digest,omitempty"`
 	Answer               *domain.BlobRef `json:"answer,omitempty"`
+	// Omitted for passing and historical reports to preserve their canonical bytes.
+	SamplePublicationFailure SamplePublicationFailure `json:"sample_publication_failure,omitempty"`
 }
 
 type JudgeVerificationReport struct {
@@ -343,6 +355,24 @@ func judgeCaseFailure(v JudgeInput, item JudgeCaseEvidence) (string, error) {
 			failure = "reference.WA"
 		}
 	}
+	if item.SamplePublicationFailure != "" {
+		if failure != "" || v.WorkflowRevision != workflow.ExecutedSamplesRevision || item.Input.Origin != "sample" {
+			return "", errors.New("sample publication verdict has no passing executed sample")
+		}
+		switch item.SamplePublicationFailure {
+		case SamplePublicationTooLarge:
+			if item.Reference.Stdout.Blob.Size <= sampleOutputMaxBytes {
+				return "", errors.New("oversized sample verdict differs from stdout size")
+			}
+		case SamplePublicationInvalidText:
+			if item.Reference.Stdout.Blob.Size > sampleOutputMaxBytes {
+				return "", errors.New("sample text verdict omits its size failure")
+			}
+		default:
+			return "", errors.New("unknown sample publication verdict")
+		}
+		failure = "reference.sample_output." + string(item.SamplePublicationFailure)
+	}
 	return failure, nil
 }
 
@@ -369,6 +399,9 @@ func (r JudgeVerificationReport) ValidateFor(v JudgeInput) error {
 		failure, err = judgeCaseFailure(v, item)
 		if err != nil {
 			return err
+		}
+		if failure == "" && r.SchemaVersion == executedJudgeVerificationSchema && item.Input.Origin == "sample" && item.Reference.Stdout.Blob.Size > sampleOutputMaxBytes {
+			return errors.New("oversized executed sample lacks its publication failure")
 		}
 		if failure != "" {
 			failure = string(item.Input.Path) + ":" + failure

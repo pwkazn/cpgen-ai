@@ -68,3 +68,26 @@ func TestManualRevisionCanReturnAmbiguousInvalidSampleToItsProducer(t *testing.T
 		t.Fatal("executed-samples workflow rejected the bounded Judge-to-Data retry")
 	}
 }
+
+func TestSamplePublicationRetryIsLimitedToExecutedSamples(t *testing.T) {
+	for _, revision := range []string{GenerationRevision, RetryingGenerationRevision, ExecutedSamplesRevision} {
+		for _, test := range []struct {
+			reason string
+			retry  bool
+		}{
+			{"judge_requires_review:samples/001.in:reference.sample_output.INVALID_TEXT", true},
+			{"judge_requires_review:samples/001.in:reference.sample_output.TOO_LARGE", true},
+			{"judge_requires_review:generated/001.in:reference.sample_output.INVALID_TEXT", false},
+			{"judge_requires_review:samples/001.in:reference.sample_output.UNKNOWN", false},
+			{"judge_requires_review:samples/001.in:reference.INFRA_ERROR", false},
+		} {
+			want := domain.StageName("")
+			if revision == ExecutedSamplesRevision && test.retry {
+				want = "solution"
+			}
+			if got := ContentRetryTarget(revision, "quality", test.reason); got != want {
+				t.Errorf("%s %s: %s, want %s", revision, test.reason, got, want)
+			}
+		}
+	}
+}

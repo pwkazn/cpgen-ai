@@ -32,10 +32,19 @@ func judgeTestPublisher(t *testing.T, blobs *blob.Store) (coordinatorFixture, *s
 
 func judgeVerifierInput(t *testing.T, blobs *blob.Store, revisions ...string) application.JudgeInput {
 	t.Helper()
+	return judgeVerifierInputWithSampleOutput(t, blobs, nil, revisions...)
+}
+
+func judgeVerifierInputWithSampleOutput(t *testing.T, blobs *blob.Store, output func(string) string, revisions ...string) application.JudgeInput {
+	t.Helper()
 	ctx := context.Background()
 	input, solution := solutionVerifierContent(t)
 	_, publisher := judgeTestPublisher(t, blobs)
-	sandbox := &solutionSandboxFixture{publisher: publisher, mode: "pass", expected: input.Problem.Samples[0].Output, t: t}
+	expected := input.Problem.Samples[0].Output
+	if output != nil {
+		expected = output(expected)
+	}
+	sandbox := &solutionSandboxFixture{publisher: publisher, mode: "pass", expected: expected, t: t}
 	workflowRevision := ""
 	if len(revisions) > 0 {
 		workflowRevision = revisions[0]
@@ -182,11 +191,16 @@ func TestJudgeVerifierExecutedSamplesPublishesFinalizationOnlyOnCompleteProof(t 
 
 type judgeSandboxFixture struct {
 	solutionSandboxFixture
-	input     application.JudgeInput
-	lastTrace domain.CallTrace
+	input        application.JudgeInput
+	lastTrace    domain.CallTrace
+	sampleOutput func(string) string
+	runError     error
 }
 
 func (s *judgeSandboxFixture) Run(ctx context.Context, request port.RunRequest) (domain.MeteredOutcome[port.RunResult], error) {
+	if s.runError != nil {
+		return domain.MeteredOutcome[port.RunResult]{}, s.runError
+	}
 	s.runs++
 	if request.Validate() != nil || request.Stdin == nil || request.Limits.Time.Milliseconds() != 2000 || request.Limits.MemoryBytes != 512<<20 {
 		s.t.Fatal("Judge lost input or resource bounds")
@@ -196,6 +210,9 @@ func (s *judgeSandboxFixture) Run(ctx context.Context, request port.RunRequest) 
 	for _, item := range s.input.DataInput.SolutionInput.Problem.Samples {
 		if request.Stdin.Digest == domain.SumBytes([]byte(item.Input)) {
 			output = []byte(item.Output)
+			if s.sampleOutput != nil {
+				output = []byte(s.sampleOutput(item.Output))
+			}
 			sample = true
 		}
 	}

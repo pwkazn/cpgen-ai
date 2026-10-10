@@ -11,6 +11,27 @@ import (
 	"cpgen/internal/port"
 )
 
+const sampleOutputMaxBytes = 1 << 16
+
+// SamplePublicationFailure describes a deterministic restriction on the
+// reference output displayed in an executed sample. An empty value passes.
+type SamplePublicationFailure string
+
+const (
+	SamplePublicationInvalidText SamplePublicationFailure = "INVALID_TEXT"
+	SamplePublicationTooLarge    SamplePublicationFailure = "TOO_LARGE"
+)
+
+func samplePublicationFailure(raw []byte) SamplePublicationFailure {
+	if len(raw) > sampleOutputMaxBytes {
+		return SamplePublicationTooLarge
+	}
+	if !utf8.Valid(raw) || strings.ContainsAny(string(raw), "\x00\r") {
+		return SamplePublicationInvalidText
+	}
+	return ""
+}
+
 // FinalizeSamples is deterministic and read-only. Callers must first prove the
 // report's committed provenance; structural validation is not that authority.
 func FinalizeSamples(ctx context.Context, blobs port.VerifiedBlobReader, input JudgeInput, report JudgeVerificationReport) (domain.FinalizedStatement, error) {
@@ -35,11 +56,11 @@ func FinalizeSamples(ctx context.Context, blobs port.VerifiedBlobReader, input J
 		if item.Input.Origin != "sample" || item.Input.Ordinal != i+1 || item.Brute == nil || item.Answer == nil {
 			return empty, errors.New("final sample lacks independent execution evidence")
 		}
-		raw, err := artifact.ReadVerified(ctx, blobs, *item.Answer, 1<<16)
+		raw, err := artifact.ReadVerified(ctx, blobs, *item.Answer, sampleOutputMaxBytes)
 		if err != nil {
 			return empty, err
 		}
-		if !utf8.Valid(raw) || strings.ContainsAny(string(raw), "\x00\r") {
+		if samplePublicationFailure(raw) != "" {
 			return empty, errors.New("final sample output must be UTF-8 LF text without NUL")
 		}
 		// No unverified model explanation survives finalization. This bounded
