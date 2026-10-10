@@ -3,6 +3,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +50,14 @@ type WatchdogSession interface {
 type WatchdogSessionEvidence interface {
 	ControlRecordRef() string
 	ControlFileDigest() domain.Digest
+}
+
+// WatchdogControlReleaser retires recovery evidence after FinishCleanup commits,
+// or after proving startup never persisted an execution. Closing a session or
+// aborting startup alone must retain that evidence.
+// This is optional for controllers which do not own filesystem evidence.
+type WatchdogControlReleaser interface {
+	ReleaseControl() error
 }
 
 // WatchdogPreparer is implemented by controllers which can materialize and
@@ -216,6 +225,7 @@ type operation struct {
 	volumes            []*ownedVolume
 	writers            []*preparedArtifact
 	watchdog           WatchdogSession
+	watchdogControl    WatchdogControlReleaser
 	targetPhase        bool
 	targetStopped      bool
 	lifecycleResources map[int]domain.SandboxResource
@@ -421,9 +431,9 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 		if prepared == nil {
 			return fmt.Errorf("watchdog Prepare returned no handle")
 		}
+		op.watchdogControl, _ = prepared.(WatchdogControlReleaser)
 		if err := op.prepareLifecycle(ctx, prepared.ControlRecordRef(), prepared.ControlFileDigest(), record.SafetyDeadlineUTC, cleanupDeadline); err != nil {
-			_ = prepared.Abort()
-			return err
+			return errors.Join(err, prepared.Abort(), op.releaseUnpersistedWatchdogControl())
 		}
 		session, err := prepared.Start(ctx)
 		if err != nil {
@@ -449,16 +459,41 @@ func (op *operation) armWatchdog(ctx context.Context, programLimit time.Duration
 		return fmt.Errorf("watchdog Arm returned no session")
 	}
 	op.watchdog = session
+	op.watchdogControl, _ = session.(WatchdogControlReleaser)
 	evidence, ok := session.(WatchdogSessionEvidence)
 	if !ok {
 		_ = session.Close()
 		return fmt.Errorf("watchdog session did not provide durable control evidence")
 	}
 	if err := op.prepareLifecycle(ctx, evidence.ControlRecordRef(), evidence.ControlFileDigest(), record.SafetyDeadlineUTC, cleanupDeadline); err != nil {
-		_ = session.Close()
-		return err
+		return errors.Join(err, session.Close(), op.releaseUnpersistedWatchdogControl())
 	}
 	return nil
+}
+
+// A prepared envelope has no recovery owner if persistence failed before any
+// execution row committed. Check independently of the failed caller's context
+// before retiring it; a failed lookup or an ambiguous commit retains evidence.
+func (op *operation) releaseUnpersistedWatchdogControl() error {
+	if op.lifecycleVersion != 0 || op.watchdogControl == nil {
+		return nil
+	}
+	reader, ok := op.runner.lifecycle.(port.SandboxLifecycleReader)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
+	defer cancel()
+	_, err := reader.GetSandboxExecution(ctx, op.identity.SandboxExecutionID)
+	if err == nil {
+		return nil
+	}
+	// Unlike replay's compatibility checks, deleting evidence requires the
+	// store's typed no-row proof, never a substring in an arbitrary error.
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("verify unpersisted watchdog preparation: %w", err)
+	}
+	return op.watchdogControl.ReleaseControl()
 }
 
 func (op *operation) lifecycleBeginCreate(ctx context.Context, planned port.PlannedResource, labels map[string]string, callID *domain.AttemptCallID) error {
@@ -1404,6 +1439,7 @@ func (op *operation) callTrace(resultCall domain.AttemptCallID) domain.CallTrace
 }
 
 func (op *operation) finish() error {
+	cleanupCommitted := false
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), op.runner.limits.CleanupTimeout)
 	defer cancel()
 	var failures []error
@@ -1459,6 +1495,8 @@ func (op *operation) finish() error {
 				key := stableSandboxKey("cleanup_finish", string(op.identity.SandboxExecutionID))
 				if _, finishErr := op.runner.lifecycle.FinishCleanup(cleanupCtx, domain.FinishCleanupCommand{ExecutionID: op.identity.SandboxExecutionID, ExpectedVersion: op.lifecycleVersion, ReconciliationDigest: reconciliationDigest(op.lifecycleResources), IdempotencyKey: key, At: stableLifecycleTime(op.lifecycleAt, "finish")}); finishErr != nil {
 					failures = append(failures, finishErr)
+				} else {
+					cleanupCommitted = true
 				}
 			}
 		}
@@ -1483,6 +1521,11 @@ func (op *operation) finish() error {
 		}
 		if err := op.watchdog.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("close watchdog session: %w", err))
+		}
+	}
+	if cleanupCommitted && op.watchdogControl != nil {
+		if err := op.watchdogControl.ReleaseControl(); err != nil {
+			failures = append(failures, fmt.Errorf("release watchdog control: %w", err))
 		}
 	}
 	return errors.Join(failures...)

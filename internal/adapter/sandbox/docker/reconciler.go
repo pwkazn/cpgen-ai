@@ -270,6 +270,11 @@ func (r *sandboxReconciler) reconcileExecution(ctx context.Context, execution do
 		if _, err := r.store.FinishCleanup(ctx, domain.FinishCleanupCommand{ExecutionID: execution.ID, ExpectedVersion: execution.LifecycleVersion, ReconciliationDigest: reconciliationDigest(resourceSnapshot), IdempotencyKey: key, At: stableLifecycleTime(execution.CreatedAt, "finish")}); err != nil {
 			return nil, err
 		}
+		// The independently verified envelope is no longer needed once the
+		// ledger durably records every resource's cleanup proof.
+		if err := cleanupWatchdogControl(filepath.Dir(execution.WatchdogControlRef), execution.WatchdogControlRef); err != nil {
+			return nil, fmt.Errorf("release reconciled watchdog control: %w", err)
+		}
 	}
 	return resources, nil
 }
