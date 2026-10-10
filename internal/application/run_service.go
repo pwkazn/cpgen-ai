@@ -257,16 +257,21 @@ func (s *LocalRunService) resume(ctx context.Context, runID domain.RunID, immedi
 		}
 	}
 	if snapshot.State == domain.RunNeedsReview {
-		snapshot, err = s.applyPendingReview(ctx, snapshot)
-		if err != nil || snapshot.State == domain.RunNeedsReview {
-			return snapshot, err
+		reviewed, reviewErr := s.applyPendingReview(ctx, snapshot)
+		if reviewErr != nil {
+			return s.finishCancellationConflict(ctx, snapshot, reviewErr)
+		}
+		snapshot = reviewed
+		if snapshot.State == domain.RunNeedsReview {
+			return snapshot, nil
 		}
 	}
 	if snapshot.State == domain.RunRunning {
-		snapshot, err = s.recover(ctx, snapshot, s.attemptID(snapshot.RunID), s.graph.definition.PreservesAttempt())
-		if err != nil {
-			return domain.RunSnapshot{}, err
+		recovered, recoveryErr := s.recover(ctx, snapshot, s.attemptID(snapshot.RunID), s.graph.definition.PreservesAttempt())
+		if recoveryErr != nil {
+			return s.finishCancellationConflict(ctx, snapshot, recoveryErr)
 		}
+		snapshot = recovered
 	}
 	// A cancellation request is durable and may have been written by a second
 	// handle just before the owner died. Reconcile it before starting a fresh
@@ -340,7 +345,7 @@ func (s *LocalRunService) executeExisting(ctx context.Context, snapshot domain.R
 	if err := s.validateGraphPersistence(ctx, snapshot); err != nil {
 		return snapshot, err
 	}
-	return s.graph.run(ctx, snapshot, func(ctx context.Context, current domain.RunSnapshot) (domain.RunSnapshot, error) {
+	finished, err := s.graph.run(ctx, snapshot, func(ctx context.Context, current domain.RunSnapshot) (domain.RunSnapshot, error) {
 		if s.graph.definition.UsesGeneration() {
 			next, err := s.stages.readGenerationInput(ctx, current)
 			if err != nil {
@@ -361,6 +366,7 @@ func (s *LocalRunService) executeExisting(ctx context.Context, snapshot domain.R
 		}
 		return s.executeStage(ctx, current, next)
 	})
+	return s.finishCancellationConflict(ctx, finished, err)
 }
 
 func (s *LocalRunService) validateGraphPersistence(ctx context.Context, snapshot domain.RunSnapshot) error {
