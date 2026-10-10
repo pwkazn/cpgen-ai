@@ -17,6 +17,7 @@ function harness() {
   let html = "",
     buttons = [],
     form = null,
+    displayed = null,
     clock = 1000;
   const requests = [];
   const location = new URL("http://localhost/runs/A");
@@ -47,6 +48,7 @@ function harness() {
         querySelector(selector) {
           if (selector === "[role=alert]") return alert;
           if (selector === "[data-dismiss]") return dismiss;
+          if (selector === "[data-write]") return this.submit;
           return null;
         },
         remove() {
@@ -149,8 +151,9 @@ function harness() {
       assert.equal(request.method, "GET");
       return request;
     },
-    async show(id, version = "1") {
-      this.navigate(id).resolve(detail(id, version));
+    async show(id, version = "1", runState = "NEEDS_REVIEW") {
+      displayed = detail(id, version, runState);
+      this.navigate(id).resolve(displayed);
       await setImmediate();
       assert.match(html, new RegExp(`<h1>Task ${id}</h1>`));
     },
@@ -159,10 +162,14 @@ function harness() {
       assert.ok(node, `missing ${action} button`);
       return node.onclick();
     },
-    start(action) {
+    async start(action) {
       const clicked = this.click(action);
       const pending =
         action === "resume" ? clicked : form.onsubmit({ preventDefault() {} });
+      if (action === "cancel" && requests.at(-1).method === "GET") {
+        requests.at(-1).resolve(displayed);
+        await setImmediate();
+      }
       const request = requests.at(-1);
       assert.equal(request.method, "POST");
       assert.equal(request.path, `${location.pathname}/${action}`);
@@ -194,13 +201,13 @@ function harness() {
   };
 }
 
-function detail(id, version = "1") {
+function detail(id, version = "1", runState = "NEEDS_REVIEW") {
   return {
     run: {
       run_id: id,
       title: `Task ${id}`,
       version,
-      state: "NEEDS_REVIEW",
+      state: runState,
       current_stage: "judge",
       workflow_revision: "v3",
     },
@@ -226,7 +233,7 @@ for (const action of ["resume", "cancel", "review"]) {
       test(`${action}: late ${outcome} leaves UI untouched after ${navigation}`, async () => {
         const h = harness();
         await h.show("A");
-        const write = h.start(action);
+        const write = await h.start(action);
         if (navigation === "new detail still loading") h.navigate("B");
         else {
           await h.show("B");
@@ -257,7 +264,7 @@ for (const action of ["resume", "cancel", "review"]) {
   test(`${action}: current success refreshes the same task`, async () => {
     const h = harness();
     await h.show("A");
-    const write = h.start(action);
+    const write = await h.start(action);
     finish(write.request, "success");
     await setImmediate();
     const refresh = h.requests.at(-1);
@@ -276,10 +283,10 @@ for (const action of ["resume", "cancel", "review"]) {
     test(`${action}: current ${outcome} remains visible and preserves form input`, async () => {
       const h = harness();
       await h.show("A");
-      const write = h.start(action);
+      const write = await h.start(action);
       finish(write.request, outcome);
       await write.pending;
-      assert.equal(h.requests.length, 2);
+      assert.equal(h.requests.length, action === "cancel" ? 3 : 2);
       assert.equal(h.state.online, outcome === "conflict");
       const error =
         action === "resume"
@@ -300,7 +307,7 @@ for (const action of ["resume", "cancel", "review"]) {
   test(`${action}: retry after navigation keeps an uncertain write's original identity and version`, async () => {
     const h = harness();
     await h.show("A");
-    const original = h.start(action);
+    const original = await h.start(action);
     await h.show("B");
     // 5xx, like a transport failure, cannot prove whether a write was accepted.
     original.request.resolve(
@@ -309,10 +316,136 @@ for (const action of ["resume", "cancel", "review"]) {
     );
     await original.pending;
     await h.show("A", "2");
-    const retry = h.start(action);
+    const beforeRetry = h.requests.length;
+    const retry = await h.start(action);
+    assert.equal(h.requests.length, beforeRetry + 1);
     assert.deepEqual(retry.request.body, original.request.body);
     assert.equal(retry.request.body.expected_run_version, "1");
     retry.request.resolve({}, 409);
     await retry.pending;
   });
 }
+
+test("cancel: confirmation reads the heartbeat version and suppresses duplicate submits", async () => {
+  const h = harness();
+  await h.show("A", "3", "RUNNING");
+  await h.click("cancel");
+  const form = h.form();
+  const pending = form.onsubmit({ preventDefault() {} });
+  const refresh = h.requests.at(-1);
+  assert.equal(refresh.method, "GET");
+  assert.equal(refresh.path, "/runs/A");
+  assert.equal(form.submit.disabled, true);
+  await form.onsubmit({ preventDefault() {} });
+  assert.equal(h.requests.length, 2);
+
+  refresh.resolve(detail("A", "4", "RUNNING"));
+  await setImmediate();
+  const write = h.requests.at(-1);
+  assert.equal(write.method, "POST");
+  assert.equal(write.body.expected_run_version, "4");
+  await form.onsubmit({ preventDefault() {} });
+  assert.equal(h.requests.length, 3);
+  write.resolve(
+    { error: { code: "version_conflict", message: "version conflict" } },
+    409,
+  );
+  await pending;
+  assert.equal(form.submit.disabled, false);
+});
+
+test("cancel: confirming again after a version conflict reads a new version", async () => {
+  const h = harness();
+  await h.show("A", "3", "RUNNING");
+  const original = await h.start("cancel");
+  original.request.resolve(
+    { error: { code: "version_conflict", message: "version conflict" } },
+    409,
+  );
+  await original.pending;
+  assert.equal(h.form(), original.form);
+  assert.equal(h.state.pendingActions.size, 0);
+  assert.match(h.form().alert.textContent, /再次确认/);
+
+  const pending = h.form().onsubmit({ preventDefault() {} });
+  const refresh = h.requests.at(-1);
+  assert.equal(refresh.method, "GET");
+  refresh.resolve(detail("A", "5", "RUNNING"));
+  await setImmediate();
+  const retry = h.requests.at(-1);
+  assert.equal(retry.method, "POST");
+  assert.equal(retry.body.expected_run_version, "5");
+  assert.notEqual(
+    retry.body.operation_key,
+    original.request.body.operation_key,
+  );
+  retry.resolve({ cancel_requested: true });
+  await pending;
+  h.requests.at(-1).resolve(detail("A", "6", "CANCELLED"));
+  await setImmediate();
+  assert.equal(h.state.editing, false);
+  assert.match(h.app.innerHTML, /state-cancelled/);
+});
+
+for (const runState of ["READY", "CANCELLED", "RUNNING"]) {
+  test(`cancel: skips a new write when cancellation is unavailable in ${runState}`, async () => {
+    const h = harness();
+    await h.show("A", "3", "RUNNING");
+    await h.click("cancel");
+    const pending = h.form().onsubmit({ preventDefault() {} });
+    const latest = {
+      ...detail("A", "5", runState),
+      available_actions: { cancel: false },
+      ...(runState === "RUNNING" ? { pending_cancel: { id: "cancel-A" } } : {}),
+    };
+    h.requests.at(-1).resolve(latest);
+    await setImmediate();
+    assert.equal(h.requests.length, 3);
+    assert.equal(h.requests.at(-1).method, "GET");
+    h.requests.at(-1).resolve(latest);
+    await pending;
+    assert.equal(
+      h.requests.some((request) => request.method === "POST"),
+      false,
+    );
+    assert.equal(h.state.editing, false);
+    assert.equal(h.form(), null);
+  });
+}
+
+for (const outcome of ["success", "network failure", "conflict"]) {
+  test(`cancel: navigation during the version refresh ignores its late ${outcome}`, async () => {
+    const h = harness();
+    await h.show("A", "3", "RUNNING");
+    await h.click("cancel");
+    const pending = h.form().onsubmit({ preventDefault() {} });
+    const refresh = h.requests.at(-1);
+    await h.show("B");
+    const before = h.snapshot();
+    if (outcome === "success") refresh.resolve(detail("A", "4", "RUNNING"));
+    else finish(refresh, outcome);
+    await pending;
+    assert.equal(h.snapshot(), before);
+    assert.equal(
+      h.requests.some((request) => request.method === "POST"),
+      false,
+    );
+  });
+}
+
+test("cancel: dismissing the confirmation during the version refresh prevents a write", async () => {
+  const h = harness();
+  await h.show("A", "3", "RUNNING");
+  await h.click("cancel");
+  const form = h.form();
+  const pending = form.onsubmit({ preventDefault() {} });
+  form.querySelector("[data-dismiss]").onclick();
+  h.requests.at(-1).resolve(detail("A", "4", "RUNNING"));
+  await pending;
+  assert.equal(h.form(), null);
+  assert.equal(h.state.editing, false);
+  assert.equal(
+    h.requests.some((request) => request.method === "POST"),
+    false,
+  );
+});
