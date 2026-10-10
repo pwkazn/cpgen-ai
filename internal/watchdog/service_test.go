@@ -275,6 +275,18 @@ func (r *fakeReconciler) Stop(_ context.Context, observation watchdog.Observatio
 	return errors.New("resource disappeared")
 }
 
+func (r *fakeReconciler) Remove(_ context.Context, observation watchdog.Observation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, item := range r.resources {
+		if item.id == observation.ID {
+			delete(r.resources, name)
+			return nil
+		}
+	}
+	return errors.New("resource disappeared")
+}
+
 func (r *fakeReconciler) create(name, id string, labels map[string]string, running bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
