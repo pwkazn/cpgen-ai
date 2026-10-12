@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"cpgen/internal/adapter/storage/blob"
@@ -19,12 +20,13 @@ type PreparedArtifactSession interface {
 }
 
 type preparedArtifactSession struct {
-	mu       sync.Mutex
-	ledger   port.ArtifactLedger
-	store    *blob.Store
-	prepared domain.PreparedCalls
-	used     map[domain.ArtifactDeclarationID]struct{}
-	writers  map[domain.ArtifactWriterTokenID]*sessionWriter
+	mu            sync.Mutex
+	ledger        port.ArtifactLedger
+	store         *blob.Store
+	physicalCalls []domain.PhysicalCall
+	reservations  []domain.BudgetReservation
+	used          map[domain.ArtifactDeclarationID]struct{}
+	writers       map[domain.ArtifactWriterTokenID]*sessionWriter
 }
 
 func NewPreparedArtifactSession(ledger port.ArtifactLedger, store *blob.Store, prepared domain.PreparedCalls) (PreparedArtifactSession, error) {
@@ -42,7 +44,13 @@ func NewPreparedArtifactSession(ledger port.ArtifactLedger, store *blob.Store, p
 	if prepared.Call.State == domain.CallRecordTerminal {
 		return nil, errors.New("artifact session cannot use a terminal call")
 	}
-	return &preparedArtifactSession{ledger: ledger, store: store, prepared: clonePreparedCalls(prepared), used: map[domain.ArtifactDeclarationID]struct{}{}, writers: map[domain.ArtifactWriterTokenID]*sessionWriter{}}, nil
+	return &preparedArtifactSession{
+		ledger: ledger, store: store,
+		physicalCalls: slices.Clone(prepared.PhysicalCalls),
+		reservations:  slices.Clone(prepared.Reservations),
+		used:          map[domain.ArtifactDeclarationID]struct{}{},
+		writers:       map[domain.ArtifactWriterTokenID]*sessionWriter{},
+	}, nil
 }
 
 func (s *preparedArtifactSession) Prepare(ctx context.Context, id domain.ArtifactDeclarationID) (port.ArtifactWriter, error) {
@@ -114,9 +122,9 @@ func (s *preparedArtifactSession) prepare(ctx context.Context, id domain.Artifac
 
 func (s *preparedArtifactSession) validatePreparedBinding(declaration domain.ArtifactDeclarationRecord, token domain.ArtifactWriterToken, restart bool) error {
 	var foundPhysical *domain.PhysicalCall
-	for index := range s.prepared.PhysicalCalls {
-		if s.prepared.PhysicalCalls[index].ID == declaration.AttemptCallID {
-			foundPhysical = &s.prepared.PhysicalCalls[index]
+	for index := range s.physicalCalls {
+		if s.physicalCalls[index].ID == declaration.AttemptCallID {
+			foundPhysical = &s.physicalCalls[index]
 			break
 		}
 	}
@@ -126,7 +134,7 @@ func (s *preparedArtifactSession) validatePreparedBinding(declaration domain.Art
 	if foundPhysical.State != domain.PhysicalPrepared && !((token.State == domain.ArtifactWriterSealed || (restart && token.State == domain.ArtifactWriterOpen)) && (foundPhysical.State == domain.PhysicalDispatching || foundPhysical.State == domain.PhysicalSent)) {
 		return errors.New("artifact recovery requires a sealed dispatched writer")
 	}
-	for _, reservation := range s.prepared.Reservations {
+	for _, reservation := range s.reservations {
 		if reservation.ID == declaration.ReservationID {
 			if reservation.AttemptCallID != declaration.AttemptCallID || reservation.Dimension != domain.BudgetArtifactPhysicalNewBytes || reservation.State != domain.ReservationReserved {
 				return errors.New("artifact declaration reservation binding is invalid")
@@ -145,7 +153,7 @@ func (s *preparedArtifactSession) ReleaseUnused(ctx context.Context) error {
 		if writer.isFinalized() {
 			continue
 		}
-		if err := writer.abortIfOpen(ctx); err != nil {
+		if err := writer.Abort(ctx); err != nil {
 			joined = errors.Join(joined, err)
 			continue
 		}
@@ -156,27 +164,11 @@ func (s *preparedArtifactSession) ReleaseUnused(ctx context.Context) error {
 	return joined
 }
 
-func clonePreparedCalls(value domain.PreparedCalls) domain.PreparedCalls {
-	value.PhysicalCalls = append([]domain.PhysicalCall(nil), value.PhysicalCalls...)
-	value.Reservations = append([]domain.BudgetReservation(nil), value.Reservations...)
-	if value.CallTrace != nil {
-		trace := *value.CallTrace
-		trace.PhysicalAttemptCallIDs = append([]domain.AttemptCallID(nil), trace.PhysicalAttemptCallIDs...)
-		value.CallTrace = &trace
-	}
-	if value.Failure != nil {
-		failure := *value.Failure
-		value.Failure = &failure
-	}
-	return value
-}
-
 type sessionWriter struct {
 	mu      sync.Mutex
 	inner   port.ArtifactWriter
 	ledger  port.ArtifactLedger
 	tokenID domain.ArtifactWriterTokenID
-	ref     domain.BlobRef
 	closed  bool
 	sealed  bool
 }
@@ -235,7 +227,7 @@ func (w *sessionWriter) Finalize(ctx context.Context) (domain.PendingArtifact, e
 		}
 		return domain.PendingArtifact{}, err
 	}
-	w.ref, w.closed = pending.Blob, true
+	w.closed = true
 	return pending, nil
 }
 
@@ -253,8 +245,6 @@ func (w *sessionWriter) Abort(ctx context.Context) error {
 	w.closed = true
 	return errors.Join(err, releaseErr)
 }
-
-func (w *sessionWriter) abortIfOpen(ctx context.Context) error { return w.Abort(ctx) }
 
 func (w *sessionWriter) isFinalized() bool {
 	w.mu.Lock()

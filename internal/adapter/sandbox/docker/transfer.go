@@ -92,10 +92,10 @@ func (op *operation) runImport(ctx context.Context, group payloadGroup) error {
 	return nil
 }
 
-func (op *operation) startKeeper(ctx context.Context) (*ownedContainer, error) {
+func (op *operation) startKeeper(ctx context.Context) error {
 	output, err := outputVolume(op.plan)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	factory := func(resource port.PlannedResource, callID domain.AttemptCallID) (moby.ContainerCreateOptions, error) {
 		return op.helperCreateOptions(resource, callID, targetUser, []string{transferBinary, "keep"}, false, false, false, []mount.Mount{
@@ -104,12 +104,9 @@ func (op *operation) startKeeper(ctx context.Context) (*ownedContainer, error) {
 	}
 	keeper, _, err := op.createContainer(ctx, port.ContainerKeeper, factory)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := op.startContainer(ctx, keeper); err != nil {
-		return nil, err
-	}
-	return keeper, nil
+	return op.startContainer(ctx, keeper)
 }
 
 func (op *operation) runExport(ctx context.Context, artifacts []*preparedArtifact, maxTotalBytes int64) error {

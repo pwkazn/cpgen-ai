@@ -362,12 +362,15 @@ func (s *Server) create(c *gin.Context) {
 		writeApplicationError(c, err)
 		return
 	}
+	respond := func(snapshot domain.RunSnapshot, replay bool) {
+		dto := toRunDTO(snapshot)
+		c.JSON(202, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"run": dto, "run_id": dto.RunID, "accepted": true, "idempotent_replay": replay}})
+	}
 	if snapshot, exists, lookupErr := application.LookupCreate(c.Request.Context(), s.app, s.cfg, request, body.OperationKey); lookupErr != nil {
 		writeApplicationError(c, lookupErr)
 		return
 	} else if exists {
-		dto := toRunDTO(snapshot)
-		c.JSON(202, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"run": dto, "run_id": dto.RunID, "accepted": true, "idempotent_replay": true}})
+		respond(snapshot, true)
 		return
 	}
 	reservation, err := s.manager.reserve()
@@ -381,17 +384,13 @@ func (s *Server) create(c *gin.Context) {
 		writeApplicationError(c, err)
 		return
 	}
-	if !created {
-		dto := toRunDTO(snapshot)
-		c.JSON(202, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"run": dto, "run_id": dto.RunID, "accepted": true, "idempotent_replay": true}})
-		return
+	if created {
+		if err := reservation.start(snapshot.RunID, func(ctx context.Context) error { return s.execute(ctx, snapshot.RunID) }); err != nil {
+			writeManagerError(c, err)
+			return
+		}
 	}
-	if err := reservation.start(snapshot.RunID, func(ctx context.Context) error { return s.execute(ctx, snapshot.RunID) }); err != nil {
-		writeManagerError(c, err)
-		return
-	}
-	dto := toRunDTO(snapshot)
-	c.JSON(202, envelope{SchemaVersion: "cpgen.web/v1", Data: map[string]any{"run": dto, "run_id": dto.RunID, "accepted": true, "idempotent_replay": false}})
+	respond(snapshot, !created)
 }
 
 func (s *Server) execute(ctx context.Context, id domain.RunID) error {

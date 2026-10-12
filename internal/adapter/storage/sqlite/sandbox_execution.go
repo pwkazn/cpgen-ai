@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"cpgen/internal/domain"
 )
@@ -649,34 +648,7 @@ func (s *Store) SandboxResources(ctx context.Context, executionID domain.Sandbox
 		return nil, err
 	}
 	defer connection.Close()
-	rows, err := connection.QueryContext(ctx, `SELECT resource_id FROM sandbox_resources WHERE sandbox_execution_id=? ORDER BY plan_ordinal`, string(executionID))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []domain.SandboxResourceID
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, domain.SandboxResourceID(id))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	result := make([]domain.SandboxResource, 0, len(ids))
-	for _, id := range ids {
-		var resource domain.SandboxResource
-		if err := readSandboxResource(ctx, connection, executionID, id, &resource); err != nil {
-			return nil, err
-		}
-		result = append(result, resource)
-	}
-	return result, nil
+	return sandboxResourcesTx(ctx, connection, executionID)
 }
 
 type sandboxQueryer interface {
@@ -844,7 +816,7 @@ func sandboxRunGuard(ctx context.Context, tx *immediateTx, runID domain.RunID, s
 		if state != string(domain.RunRunning) || attemptState != string(domain.StageAttemptRunning) {
 			return wrap(ErrInvalidTransition, "sandbox work requires a RUNNING run attempt", nil)
 		}
-		return sandboxCancelGuard(ctx, tx, runID)
+		return ValidateNoPendingCancel(ctx, tx, runID)
 	}
 	// Cleanup is a settlement-only boundary. It must retain the exact current
 	// stage/attempt binding above, but it is deliberately allowed to run after
@@ -856,14 +828,6 @@ func sandboxRunGuard(ctx context.Context, tx *immediateTx, runID domain.RunID, s
 	}
 	return nil
 }
-func sandboxRunCancelGuard(ctx context.Context, tx *immediateTx, executionID domain.SandboxExecutionID) error {
-	var runID string
-	if err := tx.QueryRowContext(ctx, `SELECT run_id FROM sandbox_executions WHERE sandbox_execution_id=?`, string(executionID)).Scan(&runID); err != nil {
-		return err
-	}
-	return sandboxCancelGuard(ctx, tx, domain.RunID(runID))
-}
-
 func sandboxExecutionRunGuard(ctx context.Context, tx *immediateTx, executionID domain.SandboxExecutionID, rejectCancel bool) error {
 	var runID string
 	var stage domain.StageName
@@ -875,58 +839,6 @@ func sandboxExecutionRunGuard(ctx context.Context, tx *immediateTx, executionID 
 		return err
 	}
 	return sandboxRunGuard(ctx, tx, domain.RunID(runID), stage, attempt, rejectCancel)
-}
-func sandboxCancelGuard(ctx context.Context, tx *immediateTx, runID domain.RunID) error {
-	return ValidateNoPendingCancel(ctx, tx, runID)
-}
-
-func validateWatchdogArmed(c domain.WatchdogArmed) error {
-	if err := c.ExecutionID.Validate(); err != nil {
-		return err
-	}
-	if c.ExpectedVersion <= 0 {
-		return errors.New("expected execution version must be positive")
-	}
-	if strings.TrimSpace(c.ControlRecordRef) == "" {
-		return errors.New("control record reference is required")
-	}
-	if err := c.ControlFileDigest.Validate(); err != nil {
-		return err
-	}
-	if err := c.TokenDigest.Validate(); err != nil {
-		return err
-	}
-	if err := domain.ControlRequestID(c.IdempotencyKey).Validate(); err != nil {
-		return err
-	}
-	return validateSandboxTime("command time", c.At)
-}
-func validatePreCreateACK(a domain.PreCreateACK) error {
-	if err := a.ExecutionID.Validate(); err != nil {
-		return err
-	}
-	if err := a.ResourceID.Validate(); err != nil {
-		return err
-	}
-	if a.ResourceVersion <= 0 {
-		return errors.New("resource ACK version must be positive")
-	}
-	if err := a.LabelsDigest.Validate(); err != nil {
-		return err
-	}
-	if strings.TrimSpace(a.WatchdogRecordRef) == "" {
-		return errors.New("watchdog record reference is required")
-	}
-	if err := domain.ControlRequestID(a.IdempotencyKey).Validate(); err != nil {
-		return err
-	}
-	return validateSandboxTime("ACK time", a.At)
-}
-func validateSandboxTime(name string, at time.Time) error {
-	if at.IsZero() || at.Location() != time.UTC {
-		return fmt.Errorf("%s must be a canonical UTC timestamp", name)
-	}
-	return nil
 }
 func allowedSandboxResourceTransition(from, to domain.SandboxResourcePhase) bool {
 	if from == to {

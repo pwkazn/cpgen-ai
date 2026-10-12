@@ -49,6 +49,9 @@ func TestPreparedArtifactSessionSealsBeforePublishing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The caller can reuse its bundle without changing the session's bindings.
+	prepared.PhysicalCalls[0].State = domain.PhysicalAbortedNoDispatch
+	prepared.Reservations[0].State = domain.ReservationReleased
 	writer, err := session.Prepare(context.Background(), declarationID)
 	if err != nil {
 		t.Fatal(err)

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"cpgen/internal/domain"
@@ -1420,5 +1419,3 @@ func pendingCancelTx(ctx context.Context, queryer rowQuerier, runID domain.RunID
 	}
 	return &result, nil
 }
-
-func trimReason(value string) string { return strings.TrimSpace(value) }

@@ -293,13 +293,6 @@ func (o EvidenceOutcome) Validate() error {
 
 // SearchEvidence executes the richer provider-neutral contract.
 func (a *HTTPAdapter) SearchEvidence(ctx context.Context, request Request) (EvidenceOutcome, error) {
-	if a == nil {
-		return EvidenceOutcome{}, &Error{Code: ErrorConfiguration}
-	}
-	return a.searchEvidence(ctx, request, request.Limit)
-}
-
-func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHits int) (EvidenceOutcome, error) {
 	var empty EvidenceOutcome
 	if a == nil || a.client == nil || a.endpoint == nil {
 		return empty, &Error{Code: ErrorConfiguration}
@@ -307,7 +300,7 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 	if err := request.Validate(); err != nil {
 		return empty, &Error{Code: ErrorConfiguration, cause: err}
 	}
-	if maxHits <= 0 || maxHits > a.config.MaxHits {
+	if request.Limit <= 0 || request.Limit > a.config.MaxHits {
 		return empty, &Error{Code: ErrorConfiguration}
 	}
 	if err := ctx.Err(); err != nil {
@@ -340,6 +333,10 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 		if sent {
 			traceIDs = append(traceIDs, physicalID)
 		}
+		responseReceived := err == nil
+		if responseReceived && (status < 200 || status >= 300) {
+			err = &Error{Code: ErrorHTTP, Status: status, RetryAfter: retryAfter}
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				if ctx.Err() != nil && len(traceIDs) > 0 {
@@ -347,7 +344,7 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 				}
 			}
 			adapterErr := asError(err)
-			if adapterErr.ConfirmedNoSend && retryable(adapterErr) && attempt < a.config.MaxAttempts {
+			if (responseReceived || adapterErr.ConfirmedNoSend) && retryable(adapterErr) && attempt < a.config.MaxAttempts {
 				if waitErr := a.waitRetry(ctx, attempt, adapterErr.RetryAfter); waitErr != nil {
 					if len(traceIDs) > 0 {
 						return unknownOutcome(logicalID, traceIDs), nil
@@ -356,22 +353,13 @@ func (a *HTTPAdapter) searchEvidence(ctx context.Context, request Request, maxHi
 				}
 				continue
 			}
-			return a.failureOutcome(logicalID, traceIDs, adapterErr), nil
-		}
-		if status < 200 || status >= 300 {
-			adapterErr := &Error{Code: ErrorHTTP, Status: status, RetryAfter: retryAfter}
-			if retryable(adapterErr) && attempt < a.config.MaxAttempts {
-				if waitErr := a.waitRetry(ctx, attempt, retryAfter); waitErr != nil {
-					if len(traceIDs) > 0 {
-						return unknownOutcome(logicalID, traceIDs), nil
-					}
-					return empty, waitErr
-				}
-				continue
+			outcome := a.failureOutcome(logicalID, traceIDs, adapterErr)
+			if responseReceived {
+				outcome = withHTTPResponseReceipt(outcome, body)
 			}
-			return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, adapterErr), body), nil
+			return outcome, nil
 		}
-		wire, usage, usageSource, parseErr := decodeResponse(body, requestBytes, maxHits)
+		wire, usage, usageSource, parseErr := decodeResponse(body, requestBytes, request.Limit)
 		if parseErr != nil {
 			return withHTTPResponseReceipt(a.failureOutcome(logicalID, traceIDs, parseErr), body), nil
 		}
@@ -434,7 +422,7 @@ func (a *HTTPAdapter) Search(ctx context.Context, request port.SimilaritySearchR
 	if err := richRequest.Validate(); err != nil {
 		return empty, &Error{Code: ErrorConfiguration, cause: err}
 	}
-	outcome, err := a.searchEvidence(ctx, richRequest, request.Limit)
+	outcome, err := a.SearchEvidence(ctx, richRequest)
 	if err != nil {
 		return empty, err
 	}
@@ -530,9 +518,6 @@ func (a *HTTPAdapter) doRequest(ctx context.Context, body []byte, key, logicalID
 		if confirmed {
 			return nil, 0, 0, false, &Error{Code: ErrorTransport, ConfirmedNoSend: true}
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, 0, 0, true, &Error{Code: ErrorTransport, cause: err}
-		}
 		return nil, 0, 0, true, &Error{Code: ErrorTransport, cause: err}
 	}
 	defer response.Body.Close()
@@ -581,9 +566,6 @@ func decodeResponse(raw, requestBytes []byte, maxHits int) (wireResponse, Usage,
 	}
 	if len(response.Hits) > maxHits {
 		return response, Usage{}, "", &Error{Code: ErrorProtocol}
-	}
-	if response.ProviderIdentity == "" && response.Provider == "" {
-		// The adapter supplies configured identity when it is omitted.
 	}
 	usage := Usage{}
 	usageSourceValue := UsageConservativeUpperBound

@@ -177,7 +177,7 @@ func newRunnerFixture(t *testing.T, prefixes ...domain.SafeRelPath) runnerFixtur
 	runner, err := docker.NewRunner(docker.RunnerOptions{
 		Engine: engine,
 		Config: docker.Config{
-			EngineEndpoint: "npipe:////./pipe/docker_engine", APIVersion: docker.RequiredAPIVersion,
+			EngineEndpoint: moby.DefaultDockerHost, APIVersion: docker.RequiredAPIVersion,
 			BuilderImage: string(lock.Builder.ImageID), RuntimeImage: string(lock.Runtime.ImageID), TransferImage: string(lock.Transfer.ImageID),
 			ExecutionProtocol: docker.ExecutionProtocolDockerDirectV2,
 		},

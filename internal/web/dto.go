@@ -274,16 +274,11 @@ func parseUSDmicro(value string) (int64, error) {
 	if len(parts) == 2 {
 		fraction = parts[1]
 	}
-	for len(fraction) < 6 {
-		fraction += "0"
+	minor, ok := new(big.Int).SetString(fraction+strings.Repeat("0", 6-len(fraction)), 10)
+	if !ok {
+		return 0, errors.New("USD budget is invalid")
 	}
-	if fraction != "" {
-		minor, ok := new(big.Int).SetString(fraction, 10)
-		if !ok {
-			return 0, errors.New("USD budget is invalid")
-		}
-		whole.Add(whole, minor)
-	}
+	whole.Add(whole, minor)
 	if !whole.IsInt64() {
 		return 0, errors.New("USD budget overflows micro-USD")
 	}

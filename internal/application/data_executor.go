@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	sandboxexec "cpgen/internal/adapter/sandbox"
@@ -47,27 +46,9 @@ func (s *DataExecutor) CollectDraft(ctx context.Context, view domain.RunView, in
 	if err != nil {
 		return result, err
 	}
-	generated, err := s.drafts.generate(ctx, view, attempt, variables)
-	result = generationResult[domain.DataContent](generated)
-	if err != nil {
-		return result, err
-	}
-	if generated.outcome.Failure != nil {
-		result.Outcome = draftFailure[domain.DataContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated, s.drafts.config.Clock.Now())
-		return result, nil
-	}
-	var draft domain.DataDraftV1
-	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
-		return result, err
-	}
-	content, err := draft.Bind(input)
-	if err != nil {
-		result.Outcome = generationContentReview[domain.DataContent](s.drafts.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "data_binding_rejected")
-		return result, nil
-	}
-	result.Outcome = domain.Success(content)
-	result.Occurrences, result.publication = generated.occurrences, generated.publication
-	return result, nil
+	return collectDraft(s.drafts, ctx, view, attempt, variables, func(draft domain.DataDraftV1) (domain.DataContent, error) {
+		return draft.Bind(input)
+	})
 }
 
 func (s *DataExecutor) ReconcileDraft(ctx context.Context, runID domain.RunID) error {

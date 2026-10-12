@@ -134,7 +134,7 @@ func NewRequest(projection PackageSafeProjection, policyRef string, policyDigest
 		CandidateProjectionDigest: digest,
 		NormalizedTitle:           projection.NormalizedTitle,
 		NormalizedStatement:       projection.NormalizedStatement,
-		NormalizedTags:            copyStrings(projection.NormalizedTags),
+		NormalizedTags:            slices.Clone(projection.NormalizedTags),
 		Language:                  projection.Language,
 		PolicyRef:                 cleanSingleLine(policyRef),
 		PolicyDigest:              policyDigest,
@@ -152,7 +152,7 @@ func (r Request) Projection() PackageSafeProjection {
 		SchemaVersion:       ProjectionSchemaVersion,
 		NormalizedTitle:     r.NormalizedTitle,
 		NormalizedStatement: r.NormalizedStatement,
-		NormalizedTags:      copyStrings(r.NormalizedTags),
+		NormalizedTags:      slices.Clone(r.NormalizedTags),
 		Language:            r.Language,
 	}
 }
@@ -163,9 +163,6 @@ func (r Request) Validate() error {
 	}
 	if err := r.CandidateProjectionDigest.Validate(); err != nil {
 		return fmt.Errorf("candidate projection digest: %w", err)
-	}
-	if err := r.Projection().Validate(); err != nil {
-		return err
 	}
 	computed, err := r.Projection().Digest()
 	if err != nil {
@@ -414,13 +411,13 @@ type Evidence struct {
 }
 
 func NewEvidence(request Request, providerIdentity string, hits []Hit, observedAt time.Time, usage Usage, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
-	return newEvidence(request, providerIdentity, providerIdentity, hits, observedAt, usage, UsageProviderVerified, "", "", cache, trace)
+	return NewEvidenceWithServiceIdentity(request, providerIdentity, providerIdentity, hits, observedAt, usage, UsageProviderVerified, "", "", cache, trace)
 }
 
 // NewEvidenceWithMetadata retains provider usage/index metadata in the
 // auditable evidence without exposing provider-specific wire fields.
 func NewEvidenceWithMetadata(request Request, providerIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
-	return newEvidence(request, providerIdentity, providerIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
+	return NewEvidenceWithServiceIdentity(request, providerIdentity, providerIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
 }
 
 // NewEvidenceWithServiceIdentity records the exact configured service (for
@@ -428,10 +425,6 @@ func NewEvidenceWithMetadata(request Request, providerIdentity string, hits []Hi
 // The service identity is part of the evidence digest and is the durable
 // dependency identity used by workflow checkpoints.
 func NewEvidenceWithServiceIdentity(request Request, providerIdentity, serviceIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
-	return newEvidence(request, providerIdentity, serviceIdentity, hits, observedAt, usage, usageSource, modelVersion, indexVersion, cache, trace)
-}
-
-func newEvidence(request Request, providerIdentity, serviceIdentity string, hits []Hit, observedAt time.Time, usage Usage, usageSource, modelVersion, indexVersion string, cache CacheProvenance, trace domain.CallTrace) (Evidence, error) {
 	if err := request.Validate(); err != nil {
 		return Evidence{}, err
 	}
@@ -797,23 +790,16 @@ func digestPolicy(p DecisionPolicy) domain.Digest { return domain.SumBytes(canon
 // acceptance boundary the result is review, while at the exact rejection
 // boundary it is reject.  A designated source always routes to review.
 func Evaluate(policy DecisionPolicy, evidence Evidence) Decision {
+	policyErr := policy.validateWithoutDigest()
 	policyDigest := policy.PolicyDigest
-	if policyDigest == "" {
-		if policy.validateWithoutDigest() == nil {
-			policyDigest = digestPolicy(policy)
-		}
+	if policyDigest == "" && policyErr == nil {
+		policyDigest = digestPolicy(policy)
 	}
 	decision := Decision{SchemaVersion: DecisionSchemaVersion, Kind: DecisionBlocked, RuleID: "similarity-policy-v1", PolicyDigest: policyDigest, ExplanationCode: ExplanationInvalidEvidence}
-	if err := policy.validateWithoutDigest(); err != nil || policyDigest == "" {
-		decision.ExplanationCode = ExplanationInvalidEvidence
-		return decision
-	}
-	if policy.PolicyDigest != "" && policy.PolicyDigest != policyDigest {
-		decision.ExplanationCode = ExplanationInvalidEvidence
+	if policyErr != nil || policyDigest == "" {
 		return decision
 	}
 	if err := evidence.Validate(); err != nil {
-		decision.ExplanationCode = ExplanationInvalidEvidence
 		return decision
 	}
 	decision.EvidenceDigest = evidence.EvidenceDigest
@@ -843,10 +829,8 @@ func Evaluate(policy DecisionPolicy, evidence Evidence) Decision {
 		decision.Kind, decision.ExplanationCode = DecisionReject, ExplanationAtRejection
 	case score < policy.AcceptanceThreshold:
 		decision.Kind, decision.ExplanationCode = DecisionAccept, ExplanationBelowAcceptance
-	case score >= policy.ReviewBandLower && score <= policy.ReviewBandUpper:
-		decision.Kind, decision.ExplanationCode = DecisionNeedsReview, ExplanationReviewBand
 	default:
-		// A gap outside the configured band is ambiguous; fail closed.
+		// Scores in the review band and ambiguous gaps both fail closed.
 		decision.Kind, decision.ExplanationCode = DecisionNeedsReview, ExplanationReviewBand
 	}
 	return decision
@@ -885,28 +869,16 @@ func cleanStatement(value string) string {
 func cleanLanguage(value string) string { return strings.ToLower(cleanSingleLine(value)) }
 
 func cleanTags(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = cleanSingleLine(value)
 		if value == "" {
 			continue
 		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
 		result = append(result, value)
 	}
 	slices.Sort(result)
-	return result
-}
-
-func copyStrings(values []string) []string {
-	if values == nil {
-		return nil
-	}
-	return append([]string{}, values...)
+	return slices.Compact(result)
 }
 
 func sanitizeURL(raw string) (string, error) {

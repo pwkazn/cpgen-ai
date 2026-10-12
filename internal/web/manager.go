@@ -24,7 +24,6 @@ var (
 
 type taskEntry struct {
 	cancel  context.CancelFunc
-	done    chan struct{}
 	control bool
 }
 type controlTask struct {
@@ -139,7 +138,7 @@ func (r *slotReservation) startTask(id domain.RunID, fn func(context.Context) er
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	entry := taskEntry{cancel: cancel, done: make(chan struct{}), control: r.control}
+	entry := taskEntry{cancel: cancel, control: r.control}
 	if alreadyActive {
 		m.pendingControl[id] = controlTask{id: id, ctx: ctx, entry: entry, fn: fn}
 		m.signalLocked()
@@ -210,7 +209,6 @@ func (m *taskManager) execute(id domain.RunID, ctx context.Context, entry taskEn
 				m.startNextControlLocked()
 			}
 		}
-		close(entry.done)
 		m.signalLocked()
 		m.mu.Unlock()
 	}()
@@ -262,15 +260,6 @@ func (m *taskManager) reserveControl() (*slotReservation, error) {
 	m.controlReserved++
 	m.signalLocked()
 	return &slotReservation{manager: m, control: true}, nil
-}
-func (m *taskManager) cancel(id domain.RunID) bool {
-	m.mu.Lock()
-	entry, ok := m.active[id]
-	m.mu.Unlock()
-	if ok {
-		entry.cancel()
-	}
-	return ok
 }
 func (m *taskManager) isActive(id domain.RunID) bool {
 	m.mu.Lock()

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"cpgen/internal/domain"
 )
@@ -413,8 +412,6 @@ func readCacheCandidate(ctx context.Context, queryer interface {
 	}
 	return candidate, nil
 }
-
-func parseCacheTime(value string) (time.Time, error) { return parseTime(value) }
 
 func isConstraint(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "constraint")

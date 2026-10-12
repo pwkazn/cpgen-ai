@@ -768,36 +768,12 @@ func (r *Runner) Compile(ctx context.Context, auth port.SandboxDispatchAuthoriza
 			return result, err
 		}
 	}
-	keeper, err := op.startKeeper(ctx)
+	if err := op.startKeeper(ctx); err != nil {
+		return result, err
+	}
+	execution, targetCall, err := op.runTarget(ctx, CompileTarget(request), request.Limits.Time, nil, processArtifacts)
 	if err != nil {
 		return result, err
-	}
-	_ = keeper
-	targetOptions := func(_ port.PlannedResource, callID domain.AttemptCallID) (moby.ContainerCreateOptions, error) {
-		return TargetCreateOptions(CompileTarget(request), r.lock, op.identity, op.plan, callID)
-	}
-	target, targetCall, err := op.createContainer(ctx, port.ContainerTarget, targetOptions)
-	if err != nil {
-		return result, err
-	}
-	inspected, err := r.engine.ContainerInspect(ctx, target.id, moby.ContainerInspectOptions{})
-	if err != nil {
-		return result, err
-	}
-	expectedTarget, _ := targetOptions(target.resource, targetCall)
-	if err := VerifyTargetInspect(expectedTarget, inspected); err != nil {
-		return result, err
-	}
-	stdout, stderr, err := processArtifacts.limiters()
-	if err != nil {
-		return result, err
-	}
-	execution, executeErr := op.executeTarget(ctx, target, targetCall, request.Limits.Time, nil, stdout, stderr)
-	if execution.Record.SchemaVersion != "" {
-		executeErr = errors.Join(executeErr, finalizeProcessArtifacts(processArtifacts, execution.Record, r.limits.CleanupTimeout))
-	}
-	if executeErr != nil {
-		return result, executeErr
 	}
 	result = port.CompileResult{
 		CallTrace: op.callTrace(targetCall), Outcome: domain.CompileInfraError,
@@ -859,35 +835,13 @@ func (r *Runner) Run(ctx context.Context, auth port.SandboxDispatchAuthorization
 		}
 	}
 	if len(outputs) != 0 {
-		if _, err := op.startKeeper(ctx); err != nil {
+		if err := op.startKeeper(ctx); err != nil {
 			return result, err
 		}
 	}
-	targetOptions := func(_ port.PlannedResource, callID domain.AttemptCallID) (moby.ContainerCreateOptions, error) {
-		return TargetCreateOptions(RunTarget(request), r.lock, op.identity, op.plan, callID)
-	}
-	target, targetCall, err := op.createContainer(ctx, port.ContainerTarget, targetOptions)
+	execution, targetCall, err := op.runTarget(ctx, RunTarget(request), request.Limits.Time, stdin, processArtifacts)
 	if err != nil {
 		return result, err
-	}
-	inspected, err := r.engine.ContainerInspect(ctx, target.id, moby.ContainerInspectOptions{})
-	if err != nil {
-		return result, err
-	}
-	expectedTarget, _ := targetOptions(target.resource, targetCall)
-	if err := VerifyTargetInspect(expectedTarget, inspected); err != nil {
-		return result, err
-	}
-	stdout, stderr, err := processArtifacts.limiters()
-	if err != nil {
-		return result, err
-	}
-	execution, executeErr := op.executeTarget(ctx, target, targetCall, request.Limits.Time, stdin, stdout, stderr)
-	if execution.Record.SchemaVersion != "" {
-		executeErr = errors.Join(executeErr, finalizeProcessArtifacts(processArtifacts, execution.Record, r.limits.CleanupTimeout))
-	}
-	if executeErr != nil {
-		return result, executeErr
 	}
 	if execution.Outcome == domain.ProcessExited && execution.Record.ExitCode != nil && *execution.Record.ExitCode == 0 && len(outputs) != 0 {
 		if err := op.runExport(ctx, outputs, outputTotal); err != nil {
@@ -910,6 +864,34 @@ func (r *Runner) Run(ctx context.Context, auth port.SandboxDispatchAuthorization
 		Stdout:  &processArtifacts.stdout.pending, Stderr: &processArtifacts.stderr.pending, Execution: &processArtifacts.execution.pending,
 		Outputs: artifacts,
 	}, nil
+}
+
+func (op *operation) runTarget(ctx context.Context, workload TargetWorkload, limit time.Duration, stdin *[]byte, artifacts *processArtifacts) (processExecution, domain.AttemptCallID, error) {
+	r := op.runner
+	targetOptions := func(_ port.PlannedResource, callID domain.AttemptCallID) (moby.ContainerCreateOptions, error) {
+		return TargetCreateOptions(workload, r.lock, op.identity, op.plan, callID)
+	}
+	target, targetCall, err := op.createContainer(ctx, port.ContainerTarget, targetOptions)
+	if err != nil {
+		return processExecution{}, targetCall, err
+	}
+	inspected, err := r.engine.ContainerInspect(ctx, target.id, moby.ContainerInspectOptions{})
+	if err != nil {
+		return processExecution{}, targetCall, err
+	}
+	expectedTarget, _ := targetOptions(target.resource, targetCall)
+	if err := VerifyTargetInspect(expectedTarget, inspected); err != nil {
+		return processExecution{}, targetCall, err
+	}
+	stdout, stderr, err := artifacts.limiters()
+	if err != nil {
+		return processExecution{}, targetCall, err
+	}
+	execution, err := op.executeTarget(ctx, target, targetCall, limit, stdin, stdout, stderr)
+	if execution.Record.SchemaVersion != "" {
+		err = errors.Join(err, finalizeProcessArtifacts(artifacts, execution.Record, r.limits.CleanupTimeout))
+	}
+	return execution, targetCall, err
 }
 
 func (r *Runner) Probe(ctx context.Context, auth port.SandboxDispatchAuthorization, request port.DockerProbeRequest) (port.DockerProbeResult, error) {

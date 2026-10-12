@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -629,13 +628,16 @@ func (v PrepareCallsRequest) Validate() error {
 			return check
 		}
 	}
-	if len(v.Calls) == 0 {
+	return validatePhysicalCallPlans(v.Calls)
+}
+
+func validatePhysicalCallPlans(calls []PhysicalCallPlan) error {
+	if len(calls) == 0 {
 		return errors.New("prepared call bundle must not be empty")
 	}
-	seenIDs := make(map[AttemptCallID]struct{}, len(v.Calls))
-	seenOrdinals := make(map[int64]struct{}, len(v.Calls))
-	retryOrdinals := make([]int64, 0, len(v.Calls))
-	for _, call := range v.Calls {
+	seenIDs := make(map[AttemptCallID]struct{}, len(calls))
+	seenOrdinals := make(map[int64]struct{}, len(calls))
+	for _, call := range calls {
 		if err := call.Validate(); err != nil {
 			return err
 		}
@@ -649,17 +651,10 @@ func (v PrepareCallsRequest) Validate() error {
 			return errors.New("call bundle contains duplicate physical ordinal")
 		}
 		seenIDs[call.ID], seenOrdinals[call.Ordinal] = struct{}{}, struct{}{}
-		retryOrdinals = append(retryOrdinals, call.RetryOrdinal)
 	}
-	ordinals := make([]int64, 0, len(seenOrdinals))
+	// Distinct positive ordinals form 1..N exactly when none exceeds N.
 	for ordinal := range seenOrdinals {
-		ordinals = append(ordinals, ordinal)
-	}
-	slices.Sort(ordinals)
-	slices.Sort(retryOrdinals)
-	for index := range ordinals {
-		want := int64(index + 1)
-		if ordinals[index] != want || retryOrdinals[index] != want {
+		if ordinal > int64(len(calls)) {
 			return errors.New("physical and retry ordinals must form one global contiguous sequence")
 		}
 	}
@@ -921,13 +916,7 @@ func (v CallPlan) Validate(policy RetryPolicy) error {
 	if err := v.Digest.Validate(); err != nil {
 		return err
 	}
-	request := PrepareCallsRequest{
-		RunID: "run_00000000000000000000000000000000", ExpectedRunVersion: 1,
-		StageName: "plan", AttemptID: "attempt_00000000000000000000000000000000",
-		CallRecordID: "callrec_00000000000000000000000000000000", PlanDigest: v.Digest,
-		Calls: v.Calls, IdempotencyKey: "plan_00000000000000000000000000000000", At: time.Unix(1, 0).UTC(),
-	}
-	if err := request.Validate(); err != nil {
+	if err := validatePhysicalCallPlans(v.Calls); err != nil {
 		return err
 	}
 	if int64(len(v.Calls)) > policy.MaxAttempts {

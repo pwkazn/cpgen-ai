@@ -12,6 +12,7 @@ import (
 	"cpgen/internal/adapter/sandbox/docker"
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
+	moby "github.com/moby/moby/client"
 )
 
 func TestRunnerCapturesBoundedAttachAndHostExecutionEvidence(t *testing.T) {
@@ -135,7 +136,7 @@ func TestWatchdogRunnerUsesProtocolACKsForEveryCreateAndTargetPhase(t *testing.T
 	runner, err := docker.NewRunner(docker.RunnerOptions{
 		Engine: fixture.engine,
 		Config: docker.Config{
-			EngineEndpoint: "npipe:////./pipe/docker_engine", APIVersion: docker.RequiredAPIVersion,
+			EngineEndpoint: moby.DefaultDockerHost, APIVersion: docker.RequiredAPIVersion,
 			BuilderImage: string(lock.Builder.ImageID), RuntimeImage: string(lock.Runtime.ImageID), TransferImage: string(lock.Transfer.ImageID),
 			ExecutionProtocol: docker.ExecutionProtocolDockerDirectV2,
 		},
@@ -215,7 +216,7 @@ func newRunFixture(t *testing.T) runFixture {
 	runner, err := docker.NewRunner(docker.RunnerOptions{
 		Engine: engine,
 		Config: docker.Config{
-			EngineEndpoint: "npipe:////./pipe/docker_engine", APIVersion: docker.RequiredAPIVersion,
+			EngineEndpoint: moby.DefaultDockerHost, APIVersion: docker.RequiredAPIVersion,
 			BuilderImage: string(lock.Builder.ImageID), RuntimeImage: string(lock.Runtime.ImageID), TransferImage: string(lock.Transfer.ImageID),
 			ExecutionProtocol: docker.ExecutionProtocolDockerDirectV2,
 		},

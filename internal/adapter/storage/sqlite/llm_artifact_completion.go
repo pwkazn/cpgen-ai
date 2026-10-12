@@ -22,20 +22,8 @@ func finishAttachedLLMResponseCalls(ctx context.Context, tx *immediateTx, comman
 	if err != nil {
 		return err
 	}
-	var ids []domain.CallRecordID
-	for rows.Next() {
-		var id domain.CallRecordID
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
+	ids, err := collectCallRecordIDs(rows)
+	if err != nil {
 		return err
 	}
 	for _, id := range ids {
@@ -146,20 +134,8 @@ func finishDiscardedLLMResponses(ctx context.Context, tx *immediateTx, runID dom
 	if err != nil {
 		return err
 	}
-	var ids []domain.CallRecordID
-	for rows.Next() {
-		var id domain.CallRecordID
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
+	ids, err := collectCallRecordIDs(rows)
+	if err != nil {
 		return err
 	}
 	if len(ids) == 0 {

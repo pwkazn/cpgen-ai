@@ -118,7 +118,12 @@ func TestWatchdogInProcessControllerCanRearmImmediately(t *testing.T) {
 }
 
 func TestWatchdogControlACLAndDetachedChildOwnerEOF(t *testing.T) {
-	base := t.TempDir()
+	// Keep the Unix socket path below the platform limit.
+	base, err := os.MkdirTemp("", "cpgen-watchdog-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	nonce, err := randomControlNonce()
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +163,7 @@ func TestWatchdogControlACLAndDetachedChildOwnerEOF(t *testing.T) {
 			BuilderImage: string(digest), RuntimeImage: string(digest), TransferImage: string(digest),
 			ExecutionProtocol: ExecutionProtocolDockerDirectV2,
 		},
-		EngineIdentity: domain.SumBytes([]byte("engine")), ControlDirectory: t.TempDir(), Executable: executable, ArmTimeout: 5 * time.Second,
+		EngineIdentity: domain.SumBytes([]byte("engine")), ControlDirectory: base, Executable: executable, ArmTimeout: 5 * time.Second,
 		CommandFactory: func(executable, controlPath string) *exec.Cmd {
 			command := exec.Command(executable, "-test.run=^TestWatchdogDetachedChildHelper$")
 			command.Env = append(os.Environ(), "CPGEN_WATCHDOG_CHILD=1", "CPGEN_WATCHDOG_CONTROL="+controlPath, "CPGEN_WATCHDOG_MARKER="+marker)

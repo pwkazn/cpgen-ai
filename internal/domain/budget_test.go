@@ -288,6 +288,33 @@ func TestCallPlanRejectsRetryOrdinalSwappedAcrossGlobalSequence(t *testing.T) {
 	}
 }
 
+func TestCallPlanRequiresContiguousOrdinalsRegardlessOfSliceOrder(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		ordinals []int64
+		valid    bool
+	}{
+		{nil, false},
+		{[]int64{1}, true},
+		{[]int64{3, 1, 2}, true},
+		{[]int64{1, 3}, false},
+		{[]int64{2, 3}, false},
+		{[]int64{1, 1}, false},
+		{[]int64{0, 1}, false},
+		{[]int64{1, math.MaxInt64}, false},
+	} {
+		plan := domain.CallPlan{Digest: domain.SumBytes([]byte("ordinal sequence"))}
+		for index, ordinal := range test.ordinals {
+			call := completeLLMPlanForDomainTest(index+1, "primary")
+			call.Ordinal, call.RetryOrdinal = ordinal, ordinal
+			plan.Calls = append(plan.Calls, call)
+		}
+		if err := plan.Validate(domain.RetryPolicy{MaxAttempts: 3}); (err == nil) != test.valid {
+			t.Errorf("ordinals %v: error = %v, want valid = %v", test.ordinals, err, test.valid)
+		}
+	}
+}
+
 func completeLLMPlanForDomainTest(ordinal int, group string) domain.PhysicalCallPlan {
 	suffix := fmt.Sprintf("%032x", ordinal)
 	return domain.PhysicalCallPlan{

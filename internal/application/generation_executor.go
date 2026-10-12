@@ -172,27 +172,9 @@ func (s *GenerationExecutor) CollectIdeaCandidates(ctx context.Context, view dom
 	if err != nil {
 		return result, err
 	}
-	generated, err := s.generate(ctx, view, attempt, variables)
-	result = generationResult[domain.IdeaBatch](generated)
-	if err != nil {
-		return result, err
-	}
-	if generated.outcome.Failure != nil {
-		result.Outcome = draftFailure[domain.IdeaBatch](view, attempt, s.config.Content.ProviderPolicyDigest, generated, s.config.Clock.Now())
-		return result, nil
-	}
-	var draft domain.IdeaDraftV1
-	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
-		return result, err
-	}
-	batch, err := draft.Bind(draftInput)
-	if err != nil {
-		result.Outcome = generationContentReview[domain.IdeaBatch](s.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "idea_binding_rejected")
-		return result, nil
-	}
-	result.Outcome = domain.Success(batch)
-	result.Occurrences, result.publication = generated.occurrences, generated.publication
-	return result, nil
+	return collectDraft(s.DraftExecution, ctx, view, attempt, variables, func(draft domain.IdeaDraftV1) (domain.IdeaBatch, error) {
+		return draft.Bind(draftInput)
+	})
 }
 
 func (s *GenerationExecutor) RunStatement(ctx context.Context, view domain.RunView, input domain.StatementInput) (GenerationStageResult[domain.ProblemSpec], error) {
@@ -220,27 +202,9 @@ func (s *GenerationExecutor) RunStatement(ctx context.Context, view domain.RunVi
 	if err != nil {
 		return result, err
 	}
-	generated, err := s.generate(ctx, view, attempt, variables)
-	result = generationResult[domain.ProblemSpec](generated)
-	if err != nil {
-		return result, err
-	}
-	if generated.outcome.Failure != nil {
-		result.Outcome = draftFailure[domain.ProblemSpec](view, attempt, s.config.Content.ProviderPolicyDigest, generated, s.config.Clock.Now())
-		return result, nil
-	}
-	var draft domain.StatementDraftV1
-	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
-		return result, err
-	}
-	problem, err := draft.Bind(draftInput, s.config.Content.StatementRevision)
-	if err != nil {
-		result.Outcome = generationContentReview[domain.ProblemSpec](s.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "statement_binding_rejected")
-		return result, nil
-	}
-	result.Outcome = domain.Success(problem)
-	result.Occurrences, result.publication = generated.occurrences, generated.publication
-	return result, nil
+	return collectDraft(s.DraftExecution, ctx, view, attempt, variables, func(draft domain.StatementDraftV1) (domain.ProblemSpec, error) {
+		return draft.Bind(draftInput, s.config.Content.StatementRevision)
+	})
 }
 
 type generatedDraft struct {
@@ -252,8 +216,28 @@ type generatedDraft struct {
 	publication    *generationCachePublication
 }
 
-func generationResult[T any](draft generatedDraft) GenerationStageResult[T] {
-	return GenerationStageResult[T]{CallTraces: draft.traces, Usage: draft.usage}
+func collectDraft[D, T any](s *DraftExecution, ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte, bind func(D) (T, error)) (GenerationStageResult[T], error) {
+	generated, err := s.generate(ctx, view, attempt, variables)
+	result := GenerationStageResult[T]{CallTraces: generated.traces, Usage: generated.usage}
+	if err != nil {
+		return result, err
+	}
+	if generated.outcome.Failure != nil {
+		result.Outcome = draftFailure[T](view, attempt, s.config.Content.ProviderPolicyDigest, generated, s.config.Clock.Now())
+		return result, nil
+	}
+	var draft D
+	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
+		return result, err
+	}
+	content, err := bind(draft)
+	if err != nil {
+		result.Outcome = generationContentReview[T](s.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, string(view.CurrentStage())+"_binding_rejected")
+		return result, nil
+	}
+	result.Outcome = domain.Success(content)
+	result.Occurrences, result.publication = generated.occurrences, generated.publication
+	return result, nil
 }
 
 func (s *DraftExecution) generate(ctx context.Context, view domain.RunView, attempt domain.StageAttempt, variables []byte) (generatedDraft, error) {
