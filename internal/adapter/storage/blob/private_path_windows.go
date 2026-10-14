@@ -119,18 +119,6 @@ func linkPrivateFile(sourceRoot, source, targetRoot, target string) error {
 	return windows.CreateHardLink(windows.StringToUTF16Ptr(filepath.Join(targetParent, targetBase)), windows.StringToUTF16Ptr(filepath.Join(sourceParent, sourceBase)), 0)
 }
 
-func privateParentPath(root, path string) (string, string, error) {
-	_, parts, err := privateRelativeParts(root, path)
-	if err != nil {
-		return "", "", err
-	}
-	base := parts[len(parts)-1]
-	if base == "." || base == "" || base == string(filepath.Separator) {
-		return "", "", errors.New("blob path is invalid")
-	}
-	return filepath.Join(filepath.Clean(root), filepath.Join(parts[:len(parts)-1]...)), base, nil
-}
-
 func removePrivateFile(root, path string) error {
 	ancestors, err := openWindowsPrivateAncestors(root, path)
 	if err != nil {

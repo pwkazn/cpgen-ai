@@ -204,15 +204,11 @@ func restoreToolchainSnapshot(ctx context.Context, cfg config.Config, runID doma
 	if domain.SumBytes(raw) != run.ConfigDigest {
 		return cfg, errors.New("persisted effective configuration differs from its run binding")
 	}
-	if cfg.Sandbox != nil && frozen.Sandbox != nil && len(frozen.Sandbox.ToolchainLockSnapshot) != 0 {
-		copy := *cfg.Sandbox
-		copy.ToolchainLockSnapshot = append([]byte(nil), frozen.Sandbox.ToolchainLockSnapshot...)
-		cfg.Sandbox = &copy
-	} else if cfg.Sandbox != nil && frozen.Sandbox != nil {
+	if cfg.Sandbox != nil && frozen.Sandbox != nil {
 		// Preserve the distinction between a legacy run and a new run while
 		// keeping the optional field omitted from its effective JSON identity.
 		copy := *cfg.Sandbox
-		copy.ToolchainLockSnapshot = []byte{}
+		copy.ToolchainLockSnapshot = append([]byte{}, frozen.Sandbox.ToolchainLockSnapshot...)
 		cfg.Sandbox = &copy
 	}
 	if cfg.Sandbox != nil && len(cfg.Sandbox.ToolchainLockSnapshot) != 0 {
@@ -245,18 +241,14 @@ func prepareConfig(args []string, effective bool) (*preparedCommand, *commandErr
 }
 
 func runConfigCommand(effectiveOutput bool, cfg config.Config, stdout, stderr io.Writer) int {
-	if !effectiveOutput {
-		effective, err := cfg.EffectiveConfig()
-		if err != nil {
-			return writeStateError(stdout, stderr, 2, "config_invalid", err)
-		}
-		return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: map[string]any{"digest": cfg.EffectiveDigest(), "schema_version": effective.SchemaVersion}}, 0)
-	}
 	effective, err := cfg.EffectiveConfig()
 	if err != nil {
 		return writeStateError(stdout, stderr, 2, "config_invalid", err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: effective}, 0)
+	if !effectiveOutput {
+		return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: map[string]any{"digest": cfg.EffectiveDigest(), "schema_version": effective.SchemaVersion}}, 0)
+	}
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "VALID", Data: effective}, 0)
 }
 
 func prepareGenerate(args []string) (*preparedCommand, *commandError) {
@@ -282,12 +274,7 @@ func runGenerate(requestPath string, app *application.Application, stdout, stder
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	status := string(snapshot.State)
-	code := exitForSnapshot(snapshot.State)
-	if snapshot.State == domain.RunNeedsReview {
-		status = "NEEDS_REVIEW"
-	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: status, Data: snapshot, RunVersion: snapshot.Version}, code)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, exitForSnapshot(snapshot.State))
 }
 
 func prepareRunList(args []string) (*preparedCommand, *commandError) {
@@ -319,7 +306,7 @@ func runList(filter domain.RunFilter, app *application.Application, stdout, stde
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].RunID < rows[j].RunID })
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: rows}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: rows}, 0)
 
 }
 
@@ -338,7 +325,7 @@ func runShow(id domain.RunID, app *application.Application, stdout, stderr io.Wr
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, 0)
 
 }
 
@@ -358,7 +345,7 @@ func runResume(id domain.RunID, app *application.Application, stdout, stderr io.
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
 	code := exitForSnapshot(snapshot.State)
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, code)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(snapshot.State), Data: snapshot, RunVersion: snapshot.Version}, code)
 
 }
 
@@ -389,7 +376,7 @@ func runEvents(id domain.RunID, after int64, app *application.Application, stdou
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].Version < events[j].Version })
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: events}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: events}, 0)
 }
 
 func prepareRunCancel(args []string) (*preparedCommand, *commandError) {
@@ -422,7 +409,7 @@ func runCancel(id domain.RunID, reason string, app *application.Application, std
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(result.State), Data: result, RunVersion: result.Version}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(result.State), Data: result, RunVersion: result.Version}, 0)
 }
 
 func prepareReviewShow(args []string) (*preparedCommand, *commandError) {
@@ -446,7 +433,7 @@ func runReviewShow(id domain.RunID, app *application.Application, stdout, stderr
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: review}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "OK", Data: review}, 0)
 }
 
 type reviewOptions struct {
@@ -586,7 +573,7 @@ func runReviewMutation(id domain.RunID, kind string, options reviewOptions, app 
 	if err != nil {
 		return writeStateError(stdout, stderr, exitForError(err), codeForError(err), err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(decision.State), Data: decision, RunVersion: decision.RunVersion}, 0)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: string(decision.State), Data: decision, RunVersion: decision.RunVersion}, 0)
 }
 
 func parseRunID(raw string) (domain.RunID, error) {
@@ -730,10 +717,6 @@ func canonicalPath(path string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
-func encodeEnvelope(stdout, stderr io.Writer, value envelope, code int) int {
-	return encodeJSON(stdout, stderr, value, code)
-}
-
 func writeStateError(stdout, stderr io.Writer, code int, errorCode string, err error) int {
 	if errorCode == "" {
 		errorCode = "error"
@@ -743,7 +726,7 @@ func writeStateError(stdout, stderr io.Writer, code int, errorCode string, err e
 	if errors.As(err, &fieldErr) {
 		fieldName = fieldErr.Field
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "ERROR", Error: &responseError{Code: errorCode, Message: err.Error(), Field: fieldName}}, code)
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "ERROR", Error: &responseError{Code: errorCode, Message: err.Error(), Field: fieldName}}, code)
 }
 
 func codeForError(err error) string {

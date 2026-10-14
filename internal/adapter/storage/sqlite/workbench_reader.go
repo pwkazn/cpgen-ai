@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"cpgen/internal/domain"
 	"cpgen/internal/port"
@@ -59,7 +60,7 @@ func (s *Store) ReadWorkbenchRun(ctx context.Context, runID domain.RunID) (port.
 			rows.Close()
 			return out, wrap(ErrConsistency, "budget account invalid", err)
 		}
-		out.Budget.Limits = setWorkbenchLimit(out.Budget.Limits, dim, limit)
+		out.Budget.Limits = setBudgetLimit(out.Budget.Limits, dim, limit)
 		out.Budget.Remaining[dim], out.BudgetUsed[dim], out.BudgetReserved[dim] = account.Remaining(), used, reserved
 		if version > out.Budget.Version {
 			out.Budget.Version = version
@@ -193,9 +194,7 @@ func (s *Store) ReadWorkbenchRun(ctx context.Context, runID domain.RunID) (port.
 	if err := rows.Close(); err != nil {
 		return out, err
 	}
-	for i, j := 0, len(out.RecentEvents)-1; i < j; i, j = i+1, j-1 {
-		out.RecentEvents[i], out.RecentEvents[j] = out.RecentEvents[j], out.RecentEvents[i]
-	}
+	slices.Reverse(out.RecentEvents)
 	if len(out.RecentEvents) > 0 {
 		out.BeforeVersion = out.RecentEvents[0].Version
 	}
@@ -205,7 +204,7 @@ func (s *Store) ReadWorkbenchRun(ctx context.Context, runID domain.RunID) (port.
 	return out, nil
 }
 
-func setWorkbenchLimit(l domain.BudgetLimits, d domain.BudgetDimension, v int64) domain.BudgetLimits {
+func setBudgetLimit(l domain.BudgetLimits, d domain.BudgetDimension, v int64) domain.BudgetLimits {
 	switch d {
 	case domain.BudgetLLMCalls:
 		l.MaxLLMCalls = v

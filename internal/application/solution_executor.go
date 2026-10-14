@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"cpgen/internal/domain"
@@ -96,31 +95,12 @@ func (s *SolutionExecutor) CollectDraft(ctx context.Context, view domain.RunView
 	if err != nil {
 		return result, err
 	}
-	generated, err := s.drafts.generate(ctx, view, attempt, variables)
-	result = generationResult[domain.SolutionContent](generated)
-	if err != nil {
-		return result, err
-	}
-	if generated.outcome.Failure != nil {
-		result.Outcome = draftFailure[domain.SolutionContent](view, attempt, s.drafts.config.Content.ProviderPolicyDigest, generated, s.drafts.config.Clock.Now())
-		return result, nil
-	}
-	var draft domain.SolutionDraftV1
-	if err := json.Unmarshal(generated.outcome.Value.Structured, &draft); err != nil {
-		return result, err
-	}
-	if err := validateSolutionDraftForWorkflow(view.WorkflowRevision(), draft); err != nil {
-		result.Outcome = generationContentReview[domain.SolutionContent](s.drafts.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "solution_binding_rejected")
-		return result, nil
-	}
-	content, err := draft.Bind(input)
-	if err != nil {
-		result.Outcome = generationContentReview[domain.SolutionContent](s.drafts.config.Content.ProviderPolicyDigest, generated.outcome.CallTrace, "solution_binding_rejected")
-		return result, nil
-	}
-	result.Outcome = domain.Success(content)
-	result.Occurrences, result.publication = generated.occurrences, generated.publication
-	return result, nil
+	return collectDraft(s.drafts, ctx, view, attempt, variables, func(draft domain.SolutionDraftV1) (domain.SolutionContent, error) {
+		if err := validateSolutionDraftForWorkflow(view.WorkflowRevision(), draft); err != nil {
+			return domain.SolutionContent{}, err
+		}
+		return draft.Bind(input)
+	})
 }
 
 // ReadDraft reconstructs a committed content proposal. It must not be used as

@@ -9,6 +9,29 @@ import (
 	"cpgen/internal/domain"
 )
 
+func TestParseUSDmicroPreservesExactDecimalBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int64
+	}{
+		{"0", 0},
+		{"1.", 1_000_000},
+		{"1.25", 1_250_000},
+		{"0.000001", 1},
+		{"9223372036854.775807", math.MaxInt64},
+	} {
+		got, err := parseUSDmicro(tc.value)
+		if err != nil || got != tc.want {
+			t.Errorf("parseUSDmicro(%q) = %d, %v; want %d", tc.value, got, err, tc.want)
+		}
+	}
+	for _, value := range []string{"", "-1", "+1", "1e1", ".1", "1.0000001", "1.x", "9223372036854.775808"} {
+		if _, err := parseUSDmicro(value); err == nil {
+			t.Errorf("parseUSDmicro(%q) accepted invalid USD budget", value)
+		}
+	}
+}
+
 func TestDecodeRunRequestWithIndependentTokenBudgets(t *testing.T) {
 	for _, tc := range []struct {
 		input, output int64

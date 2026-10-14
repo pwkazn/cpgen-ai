@@ -58,9 +58,6 @@ func (s *LocalRunService) executeStage(ctx context.Context, snapshot domain.RunS
 		ok, revalidateErr := s.stages.revalidate(ctx, view, snapshot.CurrentStage, *blockedBinding)
 		if revalidateErr != nil || !ok {
 			result := domain.Blocked[any](*blockedBinding)
-			if revalidateErr != nil {
-				return s.finishOutcome(ctx, snapshot, attempt, inputDigest, result)
-			}
 			return s.finishOutcome(ctx, snapshot, attempt, inputDigest, result)
 		}
 	}

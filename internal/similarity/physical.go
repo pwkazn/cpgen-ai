@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"cpgen/internal/domain"
@@ -115,7 +116,7 @@ func (a *HTTPAdapter) SearchPhysical(ctx context.Context, request Request, id do
 	if ctx.Err() != nil {
 		return noSend(&domain.PortFailure{Code: domain.FailureTransport, Class: domain.FailureRejected})
 	}
-	request.NormalizedTags = copyStrings(request.NormalizedTags)
+	request.NormalizedTags = slices.Clone(request.NormalizedTags)
 	single := *a
 	single.config.MaxAttempts = 1
 	outcome, err := single.SearchEvidence(ctx, request)

@@ -44,9 +44,6 @@ const state = {
   lastDetail: "",
   artifacts: new Map(),
   pendingActions: new Map(),
-  renderEpoch: 0,
-  actionKeys: new Map(),
-  pendingReview: null,
 };
 const esc = (v) =>
   String(v ?? "").replace(
@@ -124,16 +121,11 @@ async function api(
     if (reportConnection) setOnline(true);
     throw apiError(data, res.status);
   }
-  if (res.headers.get("content-type")?.includes("application/json")) {
-    const x = await res.json();
-    if (pendingKey) state.pendingActions.delete(pendingKey);
-    if (reportConnection) state.lastSuccess = Date.now();
-    return x.data ?? x;
-  }
-  const result = await res.text();
+  const isJSON = res.headers.get("content-type")?.includes("application/json");
+  const result = await (isJSON ? res.json() : res.text());
   if (pendingKey) state.pendingActions.delete(pendingKey);
   if (reportConnection) state.lastSuccess = Date.now();
-  return result;
+  return isJSON ? (result.data ?? result) : result;
 }
 function setOnline(v) {
   state.online = v;

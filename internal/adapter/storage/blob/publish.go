@@ -10,6 +10,10 @@ import (
 	"cpgen/internal/domain"
 )
 
+// syncDirectoryFn is a narrow test seam for exercising the post-publish
+// durability boundary. Production calls always use the platform primitive.
+var syncDirectoryFn = syncDirectory
+
 func (s *Store) publish(ctx context.Context, temporary string, ref domain.BlobRef) (int64, error) {
 	publicationMu.Lock()
 	defer publicationMu.Unlock()
@@ -85,21 +89,11 @@ func (s *Store) openPublishTarget(path string) (*os.File, error) {
 		return nil, err
 	}
 	info, err = file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !singleLinkAtLeastOne(file, info) {
+	if err != nil || !info.Mode().IsRegular() {
 		_ = file.Close()
 		return nil, fmt.Errorf("blob canonical path is not a regular file")
 	}
 	return file, nil
-}
-
-// singleLinkAtLeastOne is deliberately weaker than OpenVerified's final
-// single-link check.  During publication another process may transiently
-// hold the staging hardlink; bytes are still verified from this exact handle.
-func singleLinkAtLeastOne(file *os.File, info os.FileInfo) bool {
-	if file == nil || info == nil {
-		return false
-	}
-	return info.Mode().IsRegular()
 }
 
 func (s *Store) corrupt(ctx context.Context, target string, ref domain.BlobRef, cause error) error {
@@ -114,12 +108,8 @@ func (s *Store) corrupt(ctx context.Context, target string, ref domain.BlobRef, 
 	return fmt.Errorf("verify blob: %w", cause)
 }
 
-func (s *Store) quarantinePath(target string, ref domain.BlobRef) error {
-	publicationMu.Lock()
-	defer publicationMu.Unlock()
-	return s.quarantinePathLocked(target, ref)
-}
-
+// Corrupt canonical bytes are moved to the private quarantine directory
+// before a replacement may be published.
 func (s *Store) quarantinePathLocked(target string, ref domain.BlobRef) error {
 	if _, err := os.Lstat(target); err != nil {
 		return err

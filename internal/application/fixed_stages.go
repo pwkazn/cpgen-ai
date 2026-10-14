@@ -99,16 +99,11 @@ func (s *fixedStages) runStage(ctx context.Context, view domain.RunView, input a
 			result, err := s.data.reader.ReadInput(ctx, view.RunID())
 			return stageExecution{result: convertResult(result)}, err
 		}
-		digest, err := stableValueDigest(typed)
-		if err != nil {
-			return stageExecution{}, err
-		}
 		reason := "solution_requires_review:" + typed.Reason
 		if typed.Passed {
 			reason = "solution_verified_checkpoint:data_not_implemented"
 		}
-		result := domain.Review[any](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: typed.PolicyDigest, Reason: reason})
-		return stageExecution{result: result}, result.Validate()
+		return stageReview(typed, typed.PolicyDigest, reason)
 	case domain.DataDraftInputV1:
 		result, err := s.data.CollectDraft(ctx, view, typed)
 		return stageExecution{result: convertResult(result.Outcome), occurrences: result.Occurrences, publishCache: result.PublishCache}, err
@@ -120,40 +115,34 @@ func (s *fixedStages) runStage(ctx context.Context, view domain.RunView, input a
 			result, err := s.data.RunJudge(ctx, view, s.sandbox)
 			return stageExecution{result: domain.Success[any](result.Report), occurrences: result.Occurrences}, err
 		}
-		digest, err := stableValueDigest(typed)
-		if err != nil {
-			return stageExecution{}, err
-		}
 		reason := "data_requires_review:" + typed.Reason
-		result := domain.Review[any](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: typed.PolicyDigest, Reason: reason})
-		return stageExecution{result: result}, result.Validate()
+		return stageReview(typed, typed.PolicyDigest, reason)
 	case JudgeVerificationReport:
 		if typed.Passed {
 			result, err := s.quality.Run(ctx, view, s.sandbox)
 			return stageExecution{result: domain.Success[any](result.Report), occurrences: result.Occurrences}, err
 		}
-		digest, err := stableValueDigest(typed)
-		if err != nil {
-			return stageExecution{}, err
-		}
 		reason := "judge_requires_review:" + typed.Reason
-		result := domain.Review[any](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: typed.PolicyDigest, Reason: reason})
-		return stageExecution{result: result}, result.Validate()
+		return stageReview(typed, typed.PolicyDigest, reason)
 	case QualityReport:
 		if typed.Passed {
 			result, err := s.packages.Run(ctx, view)
 			return stageExecution{result: domain.Success[any](result.Binding), occurrences: result.Occurrences}, err
 		}
-		digest, err := stableValueDigest(typed)
-		if err != nil {
-			return stageExecution{}, err
-		}
 		reason := "quality_requires_review:" + typed.Reason
-		result := domain.Review[any](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: typed.PolicyDigest, Reason: reason})
-		return stageExecution{result: result}, result.Validate()
+		return stageReview(typed, typed.PolicyDigest, reason)
 	default:
 		return stageExecution{}, errors.New("unsupported typed Slice 2 invocation")
 	}
+}
+
+func stageReview(value any, policy domain.Digest, reason string) (stageExecution, error) {
+	digest, err := stableValueDigest(value)
+	if err != nil {
+		return stageExecution{}, err
+	}
+	result := domain.Review[any](domain.ReviewRequest{EvidenceDigest: digest, PolicyDigest: policy, Reason: reason})
+	return stageExecution{result: result}, result.Validate()
 }
 
 func (s *fixedStages) bindCommit(ctx context.Context, snapshot domain.RunSnapshot, value any, command *domain.FinishStageCommand) error {

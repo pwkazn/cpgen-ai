@@ -24,7 +24,7 @@ import (
 )
 
 type watchdogSession struct {
-	client        *watchdogprotocol.Client
+	*watchdogprotocol.Client
 	controlRef    string
 	controlDigest domain.Digest
 	cleanup       func() error
@@ -35,22 +35,9 @@ type watchdogSession struct {
 func (s *watchdogSession) ControlRecordRef() string         { return s.controlRef }
 func (s *watchdogSession) ControlFileDigest() domain.Digest { return s.controlDigest }
 
-func (s *watchdogSession) PreCreate(ctx context.Context, resource port.PlannedResource, labels map[string]string) error {
-	return s.client.PreCreate(ctx, resource, labels)
-}
-func (s *watchdogSession) ResourceCreated(ctx context.Context, resource port.PlannedResource, id string) error {
-	return s.client.ResourceCreated(ctx, resource, id)
-}
-func (s *watchdogSession) TargetPhase(ctx context.Context, resource port.PlannedResource, id string, remaining time.Duration) error {
-	return s.client.TargetPhase(ctx, resource, id, remaining)
-}
-func (s *watchdogSession) Stopped(ctx context.Context, resource port.PlannedResource, id string) error {
-	return s.client.Stopped(ctx, resource, id)
-}
-func (s *watchdogSession) Cleaned(ctx context.Context) error { return s.client.Cleaned(ctx) }
 func (s *watchdogSession) Close() error {
 	s.closeOnce.Do(func() {
-		s.closeErr = s.client.Close()
+		s.closeErr = s.Client.Close()
 	})
 	return s.closeErr
 }
@@ -298,7 +285,7 @@ func NewInProcessWatchdogController(token string, engine Engine) (*InProcessWatc
 
 func (c *InProcessWatchdogController) TokenDigest() domain.Digest { return c.tokenHash }
 
-func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogprotocol.ControlRecord) (WatchdogSession, error) {
+func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogprotocol.ControlRecord) (session WatchdogSession, returnErr error) {
 	if record.TokenDigest != c.tokenHash {
 		return nil, fmt.Errorf("watchdog token digest mismatch")
 	}
@@ -313,23 +300,24 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	cleanupControl := func() error {
 		return cleanupWatchdogControl(controlDir, filepath.Join(controlDir, "control.json"))
 	}
+	defer func() {
+		if returnErr != nil {
+			_ = cleanupControl()
+		}
+	}()
 	if err := prepareWatchdogControlDirectory(controlDir); err != nil {
-		_ = cleanupControl()
 		return nil, err
 	}
 	encoded, err := jsonMarshalEnvelope(envelope)
 	if err != nil {
-		_ = cleanupControl()
 		return nil, err
 	}
 	controlPath := filepath.Join(controlDir, "control.json")
 	if err := secureWriteWatchdogControl(controlPath, encoded); err != nil {
-		_ = cleanupControl()
 		return nil, err
 	}
 	reconciler, err := newDockerWatchdogReconciler(c.engine)
 	if err != nil {
-		_ = cleanupControl()
 		return nil, err
 	}
 	owner, service := net.Pipe()
@@ -339,10 +327,9 @@ func (c *InProcessWatchdogController) Arm(ctx context.Context, record watchdogpr
 	client, err := watchdogprotocol.NewClient(owner, c.token, envelope.RecordDigest)
 	if err != nil {
 		_ = owner.Close()
-		_ = cleanupControl()
 		return nil, err
 	}
-	return &watchdogSession{client: client, controlRef: controlPath, controlDigest: domain.SumBytes(encoded), cleanup: cleanupControl}, nil
+	return &watchdogSession{Client: client, controlRef: controlPath, controlDigest: domain.SumBytes(encoded), cleanup: cleanupControl}, nil
 }
 
 type DetachedWatchdogOptions struct {
@@ -390,7 +377,6 @@ func (c *DetachedWatchdogController) TokenDigest() domain.Digest { return c.toke
 type detachedWatchdogPreparation struct {
 	controller  *DetachedWatchdogController
 	listener    net.Listener
-	address     string
 	controlDir  string
 	controlPath string
 	envelope    watchdogprotocol.Envelope
@@ -439,7 +425,7 @@ func (p *detachedWatchdogPreparation) ReleaseControl() error {
 	return cleanupWatchdogControl(p.controlDir, p.controlPath)
 }
 
-func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdogprotocol.ControlRecord) (PreparedWatchdog, error) {
+func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdogprotocol.ControlRecord) (prepared PreparedWatchdog, returnErr error) {
 	if record.TokenDigest != c.tokenHash || record.EngineEndpoint != c.options.Config.EngineEndpoint || record.EngineIdentityDigest != c.options.EngineIdentity {
 		return nil, fmt.Errorf("watchdog control record does not match the configured controller")
 	}
@@ -449,10 +435,14 @@ func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdo
 		return nil, err
 	}
 	controlPath := filepath.Join(controlDir, "control.json")
+	defer func() {
+		if returnErr != nil {
+			_ = listener.Close()
+			_ = cleanupWatchdogControl(controlDir, controlPath)
+		}
+	}()
 	envelope, err := watchdogprotocol.NewEnvelope(record, c.token, address)
 	if err != nil {
-		_ = listener.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
 	envelope.EngineConfig = &watchdogprotocol.EngineConfig{
@@ -461,33 +451,25 @@ func (c *DetachedWatchdogController) Prepare(ctx context.Context, record watchdo
 	}
 	encoded, err := jsonMarshalEnvelope(envelope)
 	if err != nil {
-		_ = listener.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
 	if err := secureWriteWatchdogControl(controlPath, encoded); err != nil {
-		_ = listener.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
-	command := (*exec.Cmd)(nil)
+	var command *exec.Cmd
 	if c.options.CommandFactory != nil {
 		command = c.options.CommandFactory(c.options.Executable, controlPath)
 	} else {
 		command = exec.Command(c.options.Executable, "sandbox-watchdog", "--control", controlPath)
 	}
 	if command == nil {
-		_ = listener.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, fmt.Errorf("watchdog command factory returned nil")
 	}
 	detachWatchdogCommand(command)
 	if err := ctx.Err(); err != nil {
-		_ = listener.Close()
-		_ = cleanupWatchdogControl(controlDir, controlPath)
 		return nil, err
 	}
-	return &detachedWatchdogPreparation{controller: c, listener: listener, address: address, controlDir: controlDir, controlPath: controlPath, envelope: envelope, encoded: encoded, command: command}, nil
+	return &detachedWatchdogPreparation{controller: c, listener: listener, controlDir: controlDir, controlPath: controlPath, envelope: envelope, encoded: encoded, command: command}, nil
 }
 
 func (p *detachedWatchdogPreparation) Start(ctx context.Context) (WatchdogSession, error) {
@@ -544,7 +526,7 @@ func (p *detachedWatchdogPreparation) Start(ctx context.Context) (WatchdogSessio
 		_ = p.Abort()
 		return nil, err
 	}
-	return &watchdogSession{client: client, controlRef: p.controlPath, controlDigest: p.ControlFileDigest(), cleanup: func() error { return cleanupWatchdogControl(p.controlDir, p.controlPath) }}, nil
+	return &watchdogSession{Client: client, controlRef: p.controlPath, controlDigest: p.ControlFileDigest(), cleanup: p.ReleaseControl}, nil
 }
 
 func (c *DetachedWatchdogController) Arm(ctx context.Context, record watchdogprotocol.ControlRecord) (WatchdogSession, error) {

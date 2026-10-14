@@ -249,10 +249,8 @@ func New(c Config) (*OpenAICompatible, error) {
 		return http.ErrUseLastResponse
 	}}
 	baseTransport := http.DefaultTransport
-	if normalized.HTTPClient != nil {
-		if normalized.HTTPClient.Transport != nil {
-			baseTransport = normalized.HTTPClient.Transport
-		}
+	if normalized.HTTPClient != nil && normalized.HTTPClient.Transport != nil {
+		baseTransport = normalized.HTTPClient.Transport
 	}
 	// An arbitrary RoundTripper can choose a proxy or a different dial target
 	// after the pre-flight policy check. Only the standard transport, whose
@@ -284,9 +282,6 @@ type OpenAICompatible struct {
 	config   Config
 	endpoint *url.URL
 	client   *http.Client
-	// exchange is adapter-local; all request identity, policy, retry and strict
-	// response validation remain shared across the two protocol implementations.
-	exchange func(context.Context, []byte, string, string) ([]byte, int, string, time.Duration, bool, error)
 	// prepareBody performs local SDK serialization before budget admission.
 	prepareBody func([]byte) ([]byte, error)
 }
@@ -481,6 +476,10 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 			physicalIDs = append(physicalIDs, physicalID)
 			attemptUsages = append(attemptUsages, usageForAttempt(responseBody, status, len(body), request.MaxOutput.Tokens))
 		}
+		responseReceived := err == nil
+		if responseReceived && (status < 200 || status >= 300) {
+			err = classifyHTTP(status, retryAfter)
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				if ctx.Err() != nil {
@@ -490,7 +489,8 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 					return empty, &Error{Code: ErrorCanceled, UnwrapCause: ctx.Err()}
 				}
 			}
-			if adapterErr, ok := err.(*Error); ok && adapterErr.ConfirmedNoSend && retryableAdapterError(adapterErr) && attempt < a.config.MaxAttempts {
+			adapterErr, typed := err.(*Error)
+			if typed && (responseReceived || adapterErr.ConfirmedNoSend) && retryableAdapterError(adapterErr) && attempt < a.config.MaxAttempts {
 				if err := a.waitRetry(ctx, attempt, adapterErr.RetryAfter); err != nil {
 					if len(physicalIDs) > 0 {
 						return cancellationOutcome(logicalID, physicalIDs), nil
@@ -501,26 +501,7 @@ func (a *OpenAICompatible) Generate(ctx context.Context, request port.GenerateRe
 			}
 			trace := traceForIDs(logicalID, physicalIDs)
 			failure := domain.PortFailure{Code: failureCode(err), Class: failureClass(err)}
-			if adapterErr, ok := err.(*Error); ok && adapterErr.RetryAfter > 0 {
-				when := a.now().Add(adapterErr.RetryAfter)
-				failure.RetryAfter = &when
-			}
-			return domain.MeteredOutcome[port.GenerateResponse]{Failure: &failure, CallTrace: trace}, nil
-		}
-		if status < 200 || status >= 300 {
-			adapterErr := classifyHTTP(status, retryAfter)
-			if retryableAdapterError(adapterErr) && attempt < a.config.MaxAttempts {
-				if err := a.waitRetry(ctx, attempt, adapterErr.RetryAfter); err != nil {
-					if len(physicalIDs) > 0 {
-						return cancellationOutcome(logicalID, physicalIDs), nil
-					}
-					return empty, err
-				}
-				continue
-			}
-			trace := traceForIDs(logicalID, physicalIDs)
-			failure := domain.PortFailure{Code: failureCode(adapterErr), Class: failureClass(adapterErr)}
-			if adapterErr.RetryAfter > 0 {
+			if typed && adapterErr.RetryAfter > 0 {
 				when := a.now().Add(adapterErr.RetryAfter)
 				failure.RetryAfter = &when
 			}
@@ -681,13 +662,6 @@ func canonicalPromptRef(ref port.PromptRef) port.PromptRef {
 }
 
 func (a *OpenAICompatible) doRequest(ctx context.Context, body []byte, apiKey, idempotencyKey string) ([]byte, int, string, time.Duration, bool, error) {
-	if a.exchange != nil {
-		return a.exchange(ctx, body, apiKey, idempotencyKey)
-	}
-	return a.doHTTPRequest(ctx, body, apiKey, idempotencyKey)
-}
-
-func (a *OpenAICompatible) doHTTPRequest(ctx context.Context, body []byte, apiKey, idempotencyKey string) ([]byte, int, string, time.Duration, bool, error) {
 	requestContext, cancel := context.WithTimeout(ctx, a.config.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestContext, http.MethodPost, a.endpoint.String(), bytes.NewReader(body))

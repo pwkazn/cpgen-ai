@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"cpgen/internal/domain"
 )
@@ -64,26 +63,7 @@ func (s *Store) BudgetSnapshot(ctx context.Context, runID domain.RunID) (domain.
 		if version > result.Version {
 			result.Version = version
 		}
-		switch dimension {
-		case domain.BudgetLLMCalls:
-			result.Limits.MaxLLMCalls = limit
-		case domain.BudgetLLMInputTokens:
-			result.Limits.MaxLLMInputTokens = limit
-		case domain.BudgetLLMOutputTokens:
-			result.Limits.MaxLLMOutputTokens = limit
-		case domain.BudgetExternalCostMicroUSD:
-			result.Limits.MaxLLMCostMicroUSD = limit
-		case domain.BudgetSimilarityCalls:
-			result.Limits.MaxSimilarityCalls = limit
-		case domain.BudgetSimilarityCostMicroUSD:
-			result.Limits.MaxSimilarityCostMicroUSD = limit
-		case domain.BudgetDockerContainerCreates:
-			result.Limits.MaxSandboxCreates = limit
-		case domain.BudgetArtifactPhysicalNewBytes:
-			result.Limits.MaxArtifactBytes = limit
-		case domain.BudgetActiveTimeNS:
-			result.Limits.MaxActiveTimeMilliseconds = limit / int64(time.Millisecond)
-		}
+		result.Limits = setBudgetLimit(result.Limits, dimension, limit)
 	}
 	if err := rows.Err(); err != nil {
 		return domain.BudgetSnapshot{}, err

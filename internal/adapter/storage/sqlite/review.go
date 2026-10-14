@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"cpgen/internal/domain"
 	"cpgen/internal/workflow"
@@ -445,5 +444,3 @@ func scanReview(row *sql.Row) (*domain.ReviewDecision, error) {
 	}
 	return &result, nil
 }
-
-func positiveTime(value time.Time) bool { return !value.IsZero() }

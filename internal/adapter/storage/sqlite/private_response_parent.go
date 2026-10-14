@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 
 	"cpgen/internal/domain"
@@ -16,20 +17,8 @@ func requireTerminalPrivateResponseParents(ctx context.Context, tx *immediateTx,
 	if err != nil {
 		return err
 	}
-	var ids []domain.CallRecordID
-	for rows.Next() {
-		var id domain.CallRecordID
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
+	ids, err := collectCallRecordIDs(rows)
+	if err != nil {
 		return err
 	}
 	for _, id := range ids {
@@ -76,4 +65,22 @@ func privateResponseParent(call domain.CallRecord) (domain.CallRecordID, bool) {
 	raw, ok := strings.CutPrefix(call.LogicalOperationID, prefix)
 	id := domain.CallRecordID(raw)
 	return id, ok && id.Validate() == nil
+}
+
+// Close the ID query before callers read or update these calls on the same
+// connection. A scan failure must not leave an active SQLite statement behind.
+func collectCallRecordIDs(rows *sql.Rows) ([]domain.CallRecordID, error) {
+	defer rows.Close()
+	var ids []domain.CallRecordID
+	for rows.Next() {
+		var id domain.CallRecordID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, rows.Close()
 }

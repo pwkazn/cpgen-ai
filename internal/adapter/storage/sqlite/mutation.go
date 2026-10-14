@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	"cpgen/internal/domain"
 )
@@ -190,8 +189,4 @@ func readMutationGrant(ctx context.Context, queryer rowQuerier, claimID string) 
 		return result, err
 	}
 	return result, result.Validate()
-}
-
-func isMutationConstraint(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "constraint")
 }

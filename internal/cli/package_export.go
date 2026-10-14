@@ -48,7 +48,7 @@ func runPackageExport(id domain.RunID, output string, app *application.Applicati
 	if err := publishPackageExport(destination, raw); err != nil {
 		return writeStateError(stdout, stderr, 9, "export_failed", err)
 	}
-	return encodeEnvelope(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "EXPORTED", Data: struct {
+	return encodeJSON(stdout, stderr, envelope{SchemaVersion: cliSchema, Status: "EXPORTED", Data: struct {
 		Path    string                       `json:"path"`
 		Package domain.VerifiedPackageRecord `json:"package"`
 	}{destination, record}}, 0)

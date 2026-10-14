@@ -54,7 +54,7 @@ func Inspect(ctx context.Context, root *os.Root, limits ReadLimits) (VerifiedPro
 	return inspectOpened(ctx, opened)
 }
 
-func openPackage(ctx context.Context, root *os.Root, limits ReadLimits) (*openedPackage, error) {
+func openPackage(ctx context.Context, root *os.Root, limits ReadLimits) (_ *openedPackage, returnErr error) {
 	if ctx == nil || root == nil {
 		return nil, fmt.Errorf("package inspect context and root are required")
 	}
@@ -63,6 +63,13 @@ func openPackage(ctx context.Context, root *os.Root, limits ReadLimits) (*opened
 	}
 	result := &openedPackage{}
 	all := make([]openedFile, 0)
+	defer func() {
+		if returnErr != nil {
+			for _, file := range all {
+				_ = file.file.Close()
+			}
+		}
+	}()
 	paths := make([]domain.SafeRelPath, 0)
 	var total int64
 	err := fs.WalkDir(root.FS(), ".", func(rawPath string, entry fs.DirEntry, walkErr error) error {
@@ -105,15 +112,9 @@ func openPackage(ctx context.Context, root *os.Root, limits ReadLimits) (*opened
 		return nil
 	})
 	if err != nil {
-		for _, file := range all {
-			_ = file.file.Close()
-		}
 		return nil, err
 	}
 	if err := validatePackagePaths(paths, limits.MaxPathBytes); err != nil {
-		for _, file := range all {
-			_ = file.file.Close()
-		}
 		return nil, err
 	}
 	for _, file := range all {
@@ -124,38 +125,30 @@ func openPackage(ctx context.Context, root *os.Root, limits ReadLimits) (*opened
 		}
 	}
 	if result.manifestFile.file == nil {
-		_ = result.close()
 		return nil, fmt.Errorf("package manifest.json is missing")
 	}
 	if result.manifestFile.info.Size() > limits.MaxManifestBytes {
-		_ = result.close()
 		return nil, fmt.Errorf("package manifest exceeds %d bytes", limits.MaxManifestBytes)
 	}
 	result.manifestBytes, err = readExactHandle(result.manifestFile, result.manifestFile.info.Size())
 	if err != nil {
-		_ = result.close()
 		return nil, err
 	}
 	if err := decodeStrict(result.manifestBytes, &result.manifest); err != nil {
-		_ = result.close()
 		return nil, fmt.Errorf("decode package manifest: %w", err)
 	}
 	if err := result.manifest.Validate(limits.MaxPathBytes); err != nil {
-		_ = result.close()
 		return nil, err
 	}
 	if len(result.files) != len(result.manifest.Files) {
-		_ = result.close()
 		return nil, fmt.Errorf("package tree file count does not match the manifest")
 	}
 	sort.Slice(result.files, func(left, right int) bool { return result.files[left].path < result.files[right].path })
 	for index, entry := range result.manifest.Files {
 		if result.files[index].path != entry.Path {
-			_ = result.close()
 			return nil, fmt.Errorf("package tree has missing or undeclared file near %q", entry.Path)
 		}
 		if result.files[index].info.Size() != entry.Size {
-			_ = result.close()
 			return nil, fmt.Errorf("package file %q size does not match manifest", entry.Path)
 		}
 	}
